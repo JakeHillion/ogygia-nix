@@ -5,7 +5,7 @@ with lib;
 {
   options.ogygia = {
     enable = mkEnableOption "ogygia";
-    
+
     domain = mkOption {
       type = types.str;
       description = "Domain name";
