@@ -1,0 +1,8 @@
+[package]
+name = "ogygia"
+version.workspace = true
+edition = "2021"
+license.workspace = true
+
+[dependencies]
+clap = { workspace = true }
