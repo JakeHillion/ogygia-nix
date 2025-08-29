@@ -1,0 +1,15 @@
+[workspace]
+members = [
+    "src/ogygia",
+]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+license = "MIT"
+
+[workspace.metadata.crane]
+name = "ogygia-workspace"
+
+[workspace.dependencies]
+clap = { version = "4.5", features = ["derive"] }
