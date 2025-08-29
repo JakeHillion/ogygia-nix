@@ -1,0 +1,22 @@
+{
+  "nix": {
+    "enabled": true
+  },
+  "lockFileMaintenance": {
+    "enabled": true,
+    "automerge": true
+  },
+  "packageRules": [
+    {
+      "matchManagers": ["github-actions", "nix"],
+      "automerge": true
+    }
+  ],
+  "rebaseWhen": "behind-base-branch",
+  "schedule": ["after 11pm on Monday"],
+  "extends": [
+    "config:recommended",
+    "helpers:pinGitHubActionDigests"
+  ]
+}
+
