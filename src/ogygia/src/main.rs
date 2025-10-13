@@ -1,8 +1,15 @@
-use clap::Command;
+mod status;
+
+use clap::Parser;
+
+#[derive(Parser)]
+#[command(name = "ogygia", version, about = "ogygia")]
+struct Cli {
+    #[command(subcommand)]
+    command: status::Command,
+}
 
 fn main() {
-    Command::new("ogygia")
-        .version(env!("CARGO_PKG_VERSION"))
-        .about("ogygia")
-        .get_matches();
+    let cli = Cli::parse();
+    cli.command.run();
 }
