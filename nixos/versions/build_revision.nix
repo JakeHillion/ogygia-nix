@@ -2,6 +2,7 @@
 
 let
   cfg = config.ogygia.versions.build_revision;
+  revision = if config.system.configurationRevision != null then config.system.configurationRevision else "unknown";
 in
 {
   options.ogygia.versions.build_revision = {
@@ -10,7 +11,7 @@ in
 
   config = lib.mkIf cfg.enable {
     environment = {
-      systemPackages = [ (pkgs.writeTextDir "share/ogygia/build-revision" ((config.system.configurationRevision or "dirty") + "\n")) ];
+      systemPackages = [ (pkgs.writeTextDir "share/ogygia/build-revision" (revision + "\n")) ];
       pathsToLink = [ "/share/ogygia" ];
     };
   };
