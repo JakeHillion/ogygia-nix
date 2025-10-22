@@ -42,6 +42,7 @@ Ogygia extracts these battle-tested patterns into standalone, reusable component
 
 - **📝 Configuration Revision Tracking**: Automatically embed Git revision information into your NixOS system closure
 - **🔍 System Status Inspection**: CLI tool to view build revisions across different system states
+- **🔄 Closure Comparison**: Compare two NixOS system closures to identify package differences
 - **⚙️ NixOS Module Integration**: Easy integration into existing NixOS configurations via flake
 - **📦 Cachix Support**: Pre-built binaries available via Cachix for faster installations
 - **🦀 Built with Rust**: Fast, reliable CLI written in Rust using Clap
@@ -119,6 +120,56 @@ The status command shows:
 - **⚡ Current system**: The currently active system configuration (`/run/current-system`)
 - **🥾 Booted system**: The system that was booted (`/run/booted-system`)
 - **🔜 Next boot system**: The system that will be used on next boot (`/nix/var/nix/profiles/system`)
+
+### Diff Closures Command
+
+Compare two NixOS system closures to identify package differences:
+
+```bash
+ogygia diff-closures <path1> <path2>
+```
+
+**Options:**
+- `--ignore-build-revision`: Ignore the ogygia managed build-revision when comparing closures
+- `--exit-code`: Exit with code 1 if closures differ, 0 if identical (similar to `git diff --exit-code`)
+
+**Examples:**
+
+```bash
+# Compare current and booted systems
+ogygia diff-closures /run/current-system /run/booted-system
+
+# Compare and exit with status code
+ogygia diff-closures --exit-code /run/current-system /run/booted-system
+
+# Compare ignoring build revision differences
+ogygia diff-closures --ignore-build-revision /run/current-system /run/booted-system
+
+# Compare two specific store paths
+ogygia diff-closures /nix/store/abc-nixos-system /nix/store/def-nixos-system
+```
+
+The command outputs a dependency tree to stderr showing all store paths and their relationships. Each path is annotated with a status symbol:
+- `  ` (space) - Unchanged path
+- `+` - Added (present in second closure but not first)
+- `-` - Removed (present in first closure but not second)
+- `~` - Changed (different version with arrow showing old → new)
+
+Example output:
+```
+abc123-nixos-system-24.05 → def456-nixos-system-24.05
+├─   ghi789-systemd-255.2
+│  ├─   jkl012-util-linux-2.39
+│  └─ + mno345-dbus-1.14.10
+├─ + pqr678-firefox-120.0
+│  └─   stu901-gtk3-3.24.38
+└─ - vwx234-chromium-119.0
+```
+
+**Exit codes:**
+- `0`: Closures are identical (only when `--exit-code` is used)
+- `1`: Closures differ (only when `--exit-code` is used)
+- `2`: Error occurred (invalid paths, nix-store command failed, etc.)
 
 ## Cachix
 
