@@ -82,10 +82,16 @@
             cargoExtraArgs = "-p ogygia";
             src = fileSetForCrate ./src/ogygia;
           });
+
+          ogygiad = craneLib.buildPackage (individualCrateArgs // {
+            pname = "ogygiad";
+            cargoExtraArgs = "-p ogygiad";
+            src = fileSetForCrate ./src/ogygiad;
+          });
         in
         {
           packages = {
-            inherit ogygia;
+            inherit ogygia ogygiad;
             default = ogygia;
           };
 
@@ -100,7 +106,7 @@
           formatter = treefmtEval.config.build.wrapper;
 
           checks = {
-            inherit ogygia;
+            inherit ogygia ogygiad;
 
             ogygia-clippy = craneLib.cargoClippy (commonArgs // {
               inherit cargoArtifacts;
@@ -130,6 +136,13 @@
             });
           };
         }) // {
-      nixosModules.default = import ./nixos;
+      nixosModules.default = { config, pkgs, ... }: {
+        imports = [ (import ./nixos) ];
+        nixpkgs.overlays = [
+          (final: prev: {
+            ogygiad = self.packages.${pkgs.system}.ogygiad;
+          })
+        ];
+      };
     };
 }

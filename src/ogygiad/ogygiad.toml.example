@@ -1,0 +1,11 @@
+# Example configuration for ogygiad
+
+[zookeeper]
+# ZooKeeper server addresses (comma-separated host:port pairs)
+addresses = "zk1.example.com:2181,zk2.example.com:2181,zk3.example.com:2181"
+
+# Enable version uploading to ZooKeeper
+enable_version_upload = true
+
+# Hostname to use in ZooKeeper paths (typically FQDN)
+hostname = "node1.island.example.com"

@@ -1,6 +1,7 @@
 [workspace]
 members = [
     "src/ogygia",
+    "src/ogygiad",
 ]
 resolver = "2"
 

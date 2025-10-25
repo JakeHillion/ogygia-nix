@@ -1,0 +1,19 @@
+[package]
+name = "ogygiad"
+version.workspace = true
+edition = "2021"
+license.workspace = true
+
+[[bin]]
+name = "ogygiad"
+path = "src/main.rs"
+
+[dependencies]
+tokio = { version = "1.42", features = ["full"] }
+notify = { version = "6.1", default-features = false }
+serde = { version = "1.0", features = ["derive"] }
+toml = "0.8"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+anyhow = "1.0"
+zookeeper-client = "0.8"
