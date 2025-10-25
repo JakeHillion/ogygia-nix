@@ -71,7 +71,7 @@ impl ZooKeeperVersions {
             return Ok(false);
         }
 
-        let znode_path = format!("/nixos/versions/{}/{}", self.hostname, state);
+        let znode_path = format!("/ogygia/versions/v1/{}/{}", self.hostname, state);
         info!("Updating {} = {}", znode_path, version);
 
         let version_bytes = version.as_bytes().to_vec();
@@ -117,7 +117,7 @@ impl ZooKeeperVersions {
 
     /// Load existing versions from ZooKeeper into cache
     async fn load_existing_versions(&self) -> Result<()> {
-        let hostname_path = format!("/nixos/versions/{}", self.hostname);
+        let hostname_path = format!("/ogygia/versions/v1/{}", self.hostname);
 
         match self.zk_client.get_children(&hostname_path).await {
             Ok(children) => {
@@ -172,7 +172,7 @@ impl ZooKeeperVersions {
 
     /// Ensure the hostname directory exists in ZooKeeper
     async fn ensure_hostname_directory(&self) -> Result<()> {
-        let hostname_path = format!("/nixos/versions/{}", self.hostname);
+        let hostname_path = format!("/ogygia/versions/v1/{}", self.hostname);
 
         // Try to create the entire path
         match self

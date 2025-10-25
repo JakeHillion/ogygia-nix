@@ -12,7 +12,7 @@ Monitors the NixOS system state and uploads version information to ZooKeeper. Th
 - **booted**: The system that was booted (`/run/booted-system`)
 - **nextboot**: The system that will be used on next boot (`/nix/var/nix/profiles/system`)
 
-Version information is read from `/sw/share/ogygia/build-revision` within each system path and uploaded to ZooKeeper at `/nixos/versions/{hostname}/{state}`.
+Version information is read from `/sw/share/ogygia/build-revision` within each system path and uploaded to ZooKeeper at `/ogygia/versions/v1/{hostname}/{state}`.
 
 The daemon uses file watching (via the `notify` crate) to detect changes and automatically update ZooKeeper when the system state changes. It caches versions to avoid unnecessary ZooKeeper updates.
 
