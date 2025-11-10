@@ -32,7 +32,13 @@
         let
           pkgs = nixpkgs.legacyPackages.${system};
           lib = pkgs.lib;
-          toolchain = fenix.packages.${system}.stable.toolchain;
+          toolchain = fenix.packages.${system}.stable.withComponents [
+            "cargo"
+            "clippy"
+            "rust-src"
+            "rustc"
+            "rustfmt"
+          ];
           craneLib = (crane.mkLib pkgs).overrideToolchain toolchain;
 
           treefmtEval = treefmt-nix.lib.evalModule pkgs {
