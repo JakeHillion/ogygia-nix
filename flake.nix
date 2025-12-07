@@ -88,6 +88,7 @@
             cargoExtraArgs = "-p ogygia";
             src = fileSetForCrate ./src/ogygia;
           });
+
         in
         {
           packages = {
@@ -134,6 +135,12 @@
               partitionType = "count";
               cargoNextestPartitionsExtraArgs = "--no-tests=pass";
             });
+
+            ogygia-cli-config = import ./nixos/tests/cli-config.nix {
+              inherit pkgs system;
+              inherit (nixpkgs) lib;
+              ogygiaModule = self.nixosModules.default;
+            };
           };
         }) // {
       nixosModules.default = import ./nixos;

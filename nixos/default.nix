@@ -16,9 +16,11 @@ in
 
   imports = [
     ./versions
+    ./config
   ];
 
   config = lib.mkIf cfg.enable {
     ogygia.versions.enable = lib.mkOverride 999 true;
+    ogygia.cliConfig.enable = lib.mkOverride 999 true;
   };
 }
