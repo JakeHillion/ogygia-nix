@@ -1,0 +1,31 @@
+# Commit message template
+#
+# Format:
+#   CRATE_OR_AREA: what changed (one line)
+#
+# Examples:
+#   ogygia: add support for custom backup schedules
+#   nixos: improve module configuration documentation
+#
+# Body guidelines:
+#   - 1–3 sentences about what the issue is that this commit is fixing.
+#   - 1–3 sentences on how the change was implemented.
+#   - 1–2 sentences on why this implementation fixes the initial issue.
+#
+# Test plan guidelines:
+#   - Why existing tests cover this change AND/OR
+#   - What new tests were added to cover this change AND/OR
+#   - Description of any manual testing run
+#
+# Lines starting with "#" are comments and will be stripped by Git.
+
+CRATE_OR_AREA: what changed (one line)
+
+# 1–3 sentences about what the issue is that this commit is fixing.
+# 1–3 sentences on how the change was implemented.
+# 1–2 sentences on why this implementation fixes the initial issue.
+
+Test plan:
+# - Why existing tests cover this change AND/OR
+# - What new tests were added to cover this change AND/OR
+# - Description of any manual testing run
