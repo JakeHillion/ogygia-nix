@@ -52,18 +52,9 @@
             };
           };
 
-          src = craneLib.cleanCargoSource (craneLib.path ./.);
+          # Use path directly to include all workspace members
+          src = craneLib.path ./.;
           inherit (craneLib.crateNameFromCargoToml { inherit src; }) version;
-
-          fileSetForCrate = crate:
-            lib.fileset.toSource {
-              root = ./.;
-              fileset = lib.fileset.unions [
-                ./Cargo.toml
-                ./Cargo.lock
-                (craneLib.fileset.commonCargoSources crate)
-              ];
-            };
 
           commonArgs = {
             inherit src;
@@ -86,13 +77,17 @@
           ogygia = craneLib.buildPackage (individualCrateArgs // {
             pname = "ogygia";
             cargoExtraArgs = "-p ogygia";
-            src = fileSetForCrate ./src/ogygia;
+          });
+
+          ogygiad = craneLib.buildPackage (individualCrateArgs // {
+            pname = "ogygiad";
+            cargoExtraArgs = "-p ogygiad";
           });
 
         in
         {
           packages = {
-            inherit ogygia;
+            inherit ogygia ogygiad;
             default = ogygia;
           };
 
@@ -107,7 +102,7 @@
           formatter = treefmtEval.config.build.wrapper;
 
           checks = {
-            inherit ogygia;
+            inherit ogygia ogygiad;
 
             ogygia-clippy = craneLib.cargoClippy (commonArgs // {
               inherit cargoArtifacts;

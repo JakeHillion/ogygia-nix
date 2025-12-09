@@ -1,0 +1,19 @@
+[package]
+name = "ogygiad"
+version.workspace = true
+edition = "2021"
+license.workspace = true
+
+[dependencies]
+ogygia-common = { path = "../ogygia-common" }
+anyhow = { workspace = true }
+hostname = { workspace = true }
+zookeeper = { workspace = true }
+tokio = { version = "1", features = ["full"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+inotify = "0.11"
+
+[[bin]]
+name = "ogygiad"
+path = "src/main.rs"

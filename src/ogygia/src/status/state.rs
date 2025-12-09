@@ -11,57 +11,19 @@
 
 use std::env;
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::Command as ProcessCommand;
-use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow};
 use hostname::get as get_hostname;
-use serde::Deserialize;
+use ogygia_common::config::ZookeeperConfig;
 use zookeeper::{WatchedEvent, Watcher, ZkError, ZooKeeper};
 
-/// Number of system states tracked per host (current, booted, next boot).
-pub const STATE_COUNT: usize = 3;
-
-/// Minimum ZooKeeper connection timeout in seconds.
-const MIN_TIMEOUT_SECONDS: u64 = 1;
-
-/// Relative path from system closure to the build revision file.
-const REVISION_RELATIVE_PATH: &str = "sw/share/ogygia/build-revision";
-
-/// Relative path from system closure to the configuration file.
-const CONFIG_RELATIVE_PATH: &str = "sw/share/ogygia/config.toml";
-
-/// Environment variable to override the configuration file path.
-const HOSTNAME_OVERRIDE_ENV: &str = "OGYGIA_HOSTNAME";
-
-/// Environment variable to override hostname detection.
-const CONFIG_OVERRIDE_ENV: &str = "OGYGIA_CONFIG";
-
-/// Metadata about a NixOS system state (without display information).
-#[derive(Clone, Copy)]
-pub struct SystemStateData {
-    /// Absolute path on the local filesystem where this system state is stored.
-    pub base_path: &'static str,
-    /// Name of the ZooKeeper znode under the host's namespace that stores this state.
-    pub znode_name: &'static str,
-}
-
-/// The three system states we track for each NixOS host.
-pub const SYSTEM_STATE_DATA: [SystemStateData; STATE_COUNT] = [
-    SystemStateData {
-        base_path: "/run/current-system",
-        znode_name: "current",
-    },
-    SystemStateData {
-        base_path: "/run/booted-system",
-        znode_name: "booted",
-    },
-    SystemStateData {
-        base_path: "/nix/var/nix/profiles/system",
-        znode_name: "nextboot",
-    },
-];
+// Re-export common types and constants for backward compatibility
+pub use ogygia_common::{
+    HOSTNAME_OVERRIDE_ENV, REVISION_RELATIVE_PATH, STATE_COUNT, SYSTEM_STATE_DATA,
+    join_zk_path,
+};
 
 /// Array of optional revision strings for the three tracked states.
 pub type StateValues = [Option<String>; STATE_COUNT];
@@ -84,22 +46,11 @@ pub struct HostState {
 #[derive(Debug)]
 pub struct CliConfig {
     /// Path to the configuration file that was loaded.
-    pub path: PathBuf,
+    pub path: std::path::PathBuf,
     /// Optional domain suffix to trim from hostnames (normalized).
     pub domain_suffix: Option<String>,
     /// Optional ZooKeeper connection configuration.
-    pub zookeeper: Option<ZookeeperCliConfig>,
-}
-
-/// Processed ZooKeeper configuration ready for connection.
-#[derive(Debug)]
-pub struct ZookeeperCliConfig {
-    /// List of ZooKeeper endpoints in "host:port" format.
-    pub endpoints: Vec<String>,
-    /// Normalized namespace path (starts with /, no trailing /).
-    pub namespace: String,
-    /// Connection timeout duration.
-    pub timeout: Duration,
+    pub zookeeper: Option<ZookeeperConfig>,
 }
 
 /// Creates an empty state values array with all entries set to `None`.
@@ -159,7 +110,7 @@ fn read_revision(base_path: &Path) -> Option<String> {
 /// A vector of host state rows, sorted alphabetically by hostname.
 /// Missing znodes are represented as `None`.
 pub fn fetch_zookeeper_state(
-    config: &ZookeeperCliConfig,
+    config: &ZookeeperConfig,
     exclude_host: Option<&HostMatcher>,
 ) -> Result<Vec<HostState>> {
     let connection_string = config.endpoints.join(",");
@@ -233,22 +184,7 @@ fn parse_zk_revision_bytes(data: &[u8]) -> Option<String> {
     }
 }
 
-/// Joins two ZooKeeper path components, handling slashes correctly.
-///
-/// ZooKeeper paths are always forward-slash separated strings (not platform-specific
-/// filesystem paths), so we need custom logic to handle edge cases like root paths
-/// and ensure no double slashes.
-pub fn join_zk_path(prefix: &str, child: &str) -> String {
-    if prefix == "/" {
-        format!("/{}", child.trim_start_matches('/'))
-    } else {
-        format!(
-            "{}/{}",
-            prefix.trim_end_matches('/'),
-            child.trim_start_matches('/')
-        )
-    }
-}
+// join_zk_path is now imported from ogygia_common
 
 /// Loads the Ogygia CLI configuration from the filesystem.
 ///
@@ -262,161 +198,15 @@ pub fn join_zk_path(prefix: &str, child: &str) -> String {
 /// * `Ok(None)` - No configuration file found (will use local-only mode)
 /// * `Err(_)` - Configuration file exists but couldn't be read or parsed
 pub fn load_cli_config() -> Result<Option<CliConfig>> {
-    let Some(path) = locate_config_file() else {
+    let Some(config) = ogygia_common::config::load_config()? else {
         return Ok(None);
     };
 
-    let contents = fs::read_to_string(&path)
-        .with_context(|| format!("failed to read Ogygia config at {}", path.display()))?;
-    let raw: RawConfig = toml::from_str(&contents)
-        .with_context(|| format!("failed to parse Ogygia config at {}", path.display()))?;
-
-    let Some(ogygia_cfg) = raw.ogygia else {
-        return Ok(Some(CliConfig {
-            path,
-            domain_suffix: None,
-            zookeeper: None,
-        }));
-    };
-
-    let domain_suffix = ogygia_cfg.domain.and_then(|d| normalize_domain(&d));
-
-    let zookeeper = match ogygia_cfg.zookeeper {
-        Some(raw_zk) => {
-            if raw_zk.endpoints.is_empty() {
-                return Err(anyhow!(
-                    "ZooKeeper config {} does not define any endpoints. \
-                     Add endpoints in the format [\"host1:2181\", \"host2:2181\"]",
-                    path.display()
-                ));
-            }
-
-            // Validate endpoint format
-            for endpoint in &raw_zk.endpoints {
-                if !endpoint.contains(':') {
-                    return Err(anyhow!(
-                        "Invalid ZooKeeper endpoint '{}' in {}. \
-                         Endpoints must be in 'host:port' format (e.g., 'zk1.example.com:2181')",
-                        endpoint,
-                        path.display()
-                    ));
-                }
-            }
-
-            Some(ZookeeperCliConfig {
-                endpoints: raw_zk.endpoints,
-                namespace: normalize_namespace(&raw_zk.namespace),
-                timeout: Duration::from_secs(raw_zk.timeout_seconds.max(MIN_TIMEOUT_SECONDS)),
-            })
-        }
-        None => None,
-    };
-
     Ok(Some(CliConfig {
-        path,
-        domain_suffix,
-        zookeeper,
+        path: config.path,
+        domain_suffix: config.domain,
+        zookeeper: config.zookeeper,
     }))
-}
-
-/// Normalizes a ZooKeeper namespace path.
-///
-/// Ensures the path:
-/// - Starts with `/`
-/// - Does not end with `/` (unless it's the root)
-/// - Defaults to `/nixos/versions` if empty
-pub fn normalize_namespace(value: &str) -> String {
-    let trimmed = value.trim();
-    if trimmed.is_empty() {
-        return "/nixos/versions".into();
-    }
-
-    let prefixed = if trimmed.starts_with('/') {
-        trimmed.to_string()
-    } else {
-        format!("/{}", trimmed)
-    };
-
-    if prefixed.len() == 1 {
-        "/".into()
-    } else {
-        prefixed.trim_end_matches('/').to_string()
-    }
-}
-
-/// Normalizes a domain suffix by trimming whitespace and dots.
-///
-/// Returns `None` if the domain is empty after normalization.
-pub fn normalize_domain(value: &str) -> Option<String> {
-    let trimmed = value.trim().trim_matches('.');
-    if trimmed.is_empty() {
-        None
-    } else {
-        Some(trimmed.to_string())
-    }
-}
-
-/// Searches for a configuration file in standard locations.
-///
-/// Checks the environment variable first, then falls back to searching
-/// system state paths for the configuration file.
-fn locate_config_file() -> Option<PathBuf> {
-    if let Ok(path) = env::var(CONFIG_OVERRIDE_ENV) {
-        let candidate = PathBuf::from(path);
-        if candidate.exists() {
-            return Some(candidate);
-        }
-    }
-
-    for state in &SYSTEM_STATE_DATA {
-        let candidate = Path::new(state.base_path).join(CONFIG_RELATIVE_PATH);
-        if candidate.exists() {
-            return Some(candidate);
-        }
-    }
-
-    None
-}
-
-/// Raw configuration structure as parsed from TOML.
-#[derive(Debug, Deserialize)]
-struct RawConfig {
-    ogygia: Option<RawOgygiaConfig>,
-}
-
-/// Raw Ogygia configuration section from TOML.
-#[derive(Debug, Deserialize)]
-struct RawOgygiaConfig {
-    /// Domain suffix to trim from hostnames for display (e.g., "example.com").
-    #[serde(default)]
-    domain: Option<String>,
-    /// ZooKeeper connection settings.
-    #[serde(default)]
-    zookeeper: Option<RawZookeeperConfig>,
-}
-
-/// Raw ZooKeeper configuration section from TOML.
-#[derive(Debug, Deserialize)]
-struct RawZookeeperConfig {
-    /// List of ZooKeeper server endpoints (e.g., ["zk1:2181", "zk2:2181"]).
-    #[serde(default)]
-    endpoints: Vec<String>,
-    /// ZooKeeper namespace path where host data is stored.
-    #[serde(default = "default_namespace")]
-    namespace: String,
-    /// Connection timeout in seconds.
-    #[serde(default = "default_timeout_seconds")]
-    timeout_seconds: u64,
-}
-
-/// Default ZooKeeper connection timeout in seconds.
-const fn default_timeout_seconds() -> u64 {
-    10
-}
-
-/// Default ZooKeeper namespace for host data storage.
-fn default_namespace() -> String {
-    "/nixos/versions".to_string()
 }
 
 /// No-op watcher for ZooKeeper connections.

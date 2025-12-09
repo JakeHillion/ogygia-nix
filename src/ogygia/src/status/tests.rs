@@ -1,9 +1,10 @@
 //! Unit tests for status module.
 
+use ogygia_common::config::{normalize_domain, normalize_namespace};
+
 use super::display::{trim_domain_suffix, truncate_revision};
 use super::state::{
-    HostMatcher, HostState, STATE_COUNT, empty_state_values, join_zk_path, normalize_domain,
-    normalize_namespace,
+    HostMatcher, HostState, STATE_COUNT, empty_state_values, join_zk_path,
 };
 
 // ============================================================================

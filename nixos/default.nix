@@ -17,6 +17,7 @@ in
   imports = [
     ./versions
     ./config
+    ./daemon
   ];
 
   config = lib.mkIf cfg.enable {
