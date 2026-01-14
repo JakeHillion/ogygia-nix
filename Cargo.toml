@@ -1,7 +1,7 @@
 [workspace]
-members = [
-    "src/ogygia",
-]
+# Wildcard membership allows Nix builds to omit non-target crates
+# from the source tree without causing Cargo workspace errors.
+members = ["src/*"]
 resolver = "2"
 
 [workspace.package]
@@ -12,11 +12,58 @@ license = "MIT"
 name = "ogygia-workspace"
 
 [workspace.dependencies]
-clap = { version = "4.5", features = ["derive"] }
+# CLI and config
+clap = { version = "4.5", features = ["derive", "env"] }
 anyhow = "1.0"
 serde = { version = "1.0", features = ["derive"] }
 toml = "0.8"
 zookeeper = "0.8"
 hostname = "0.4"
+strum = { version = "0.27", features = ["derive"] }
+
+# HTTP server
+axum = { version = "0.8", features = ["http2"] }
+tokio = { version = "1", features = ["full"] }
+tokio-util = { version = "0.7", features = ["io"] }
+hyper = { version = "1", features = ["http1", "server"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
+tower = "0.5"
+tower-http = { version = "0.6", features = ["trace"] }
+
+# HTTP client
+reqwest = { version = "0.12", default-features = false, features = ["stream", "gzip", "rustls-tls"] }
+
+# Bloom filters
+fastbloom = "0.17"
+arc-swap = "1"
+
+# Randomization
+rand = "0.9"
+
+# Cryptography and hashing
+base64 = "0.22"
+sha2 = "0.10"
+hex = "0.4"
+siphasher = "1"
+
+# Compression
+async-compression = { version = "0.4", features = ["tokio", "zstd", "xz", "gzip"] }
+
+# Serialization
+bincode = "1"
+serde_json = "1"
+
+# Logging
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Utilities
+bytes = "1"
+futures = "0.3"
+thiserror = "2"
+
+# Filesystem watching
+notify = { version = "7", default-features = false, features = ["macos_fsevent"] }
+
+# Process utilities
+which = "7"

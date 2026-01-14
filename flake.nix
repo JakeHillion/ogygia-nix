@@ -93,10 +93,16 @@
             src = fileSetForCrate ./src/ogygia;
           });
 
+          ogygia-irisd = craneLib.buildPackage (individualCrateArgs // {
+            pname = "ogygia-irisd";
+            cargoExtraArgs = "-p ogygia-irisd";
+            src = fileSetForCrate ./src/ogygia-irisd;
+          });
+
         in
         {
           packages = {
-            inherit ogygia;
+            inherit ogygia ogygia-irisd;
             default = ogygia;
           };
 
@@ -111,7 +117,7 @@
           formatter = treefmtEval.config.build.wrapper;
 
           checks = {
-            inherit ogygia;
+            inherit ogygia ogygia-irisd;
 
             ogygia-clippy = craneLib.cargoClippy (commonArgs // {
               inherit cargoArtifacts;
@@ -145,8 +151,25 @@
               inherit (nixpkgs) lib;
               ogygiaModule = self.nixosModules.default;
             };
+
+          } // lib.optionalAttrs (system == "x86_64-linux") {
+            ogygia-irisd-local = import ./nixos/tests/irisd-local.nix {
+              inherit pkgs system;
+              inherit (nixpkgs) lib;
+              ogygiaModule = self.nixosModules.default;
+            };
+
+            ogygia-irisd-push = import ./nixos/tests/irisd-push.nix {
+              inherit pkgs system;
+              inherit (nixpkgs) lib;
+              ogygiaModule = self.nixosModules.default;
+              ogygia = self.packages.${system}.ogygia;
+            };
           };
         }) // {
-      nixosModules.default = import ./nixos;
+      nixosModules.default = { pkgs, ... }: {
+        imports = [ ./nixos ];
+        _module.args.ogygia-irisd = self.packages.${pkgs.system}.ogygia-irisd;
+      };
     };
 }
