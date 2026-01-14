@@ -12,11 +12,19 @@ in
       description = "Domain name";
       example = "island.example.com";
     };
+
+    nebula.ipv4 = lib.mkOption {
+      type = lib.types.nullOr lib.types.str;
+      default = null;
+      description = "This node's Nebula IPv4 address for internal P2P communication.";
+      example = "172.20.0.1";
+    };
   };
 
   imports = [
     ./versions
     ./config
+    ./irisd
   ];
 
   config = lib.mkIf cfg.enable {

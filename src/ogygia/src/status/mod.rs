@@ -43,7 +43,6 @@ mod state;
 mod tests;
 
 use anyhow::Result;
-use clap::Subcommand;
 use display::print_host_table;
 use state::HostMatcher;
 use state::collect_local_state;
@@ -52,21 +51,6 @@ use state::fetch_zookeeper_state;
 use state::load_cli_config;
 use tracing::info;
 use tracing::warn;
-
-#[derive(Subcommand)]
-pub enum Command {
-    /// Show build commits for the local host and ZooKeeper fleet
-    Status,
-}
-
-impl Command {
-    /// Executes the command.
-    pub fn run(&self) -> Result<()> {
-        match self {
-            Command::Status => show_status(),
-        }
-    }
-}
 
 /// Main entry point for the status command.
 ///
@@ -79,7 +63,7 @@ impl Command {
 ///
 /// If ZooKeeper is not configured or connection fails, gracefully falls back
 /// to displaying only local host data.
-fn show_status() -> Result<()> {
+pub fn show_status() -> Result<()> {
     let cli_config = load_cli_config()?;
     let domain_suffix = cli_config
         .as_ref()
