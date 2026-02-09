@@ -44,6 +44,7 @@ mod tests;
 
 use anyhow::Result;
 use clap::Subcommand;
+use tracing::{info, warn};
 
 use display::print_host_table;
 use state::{
@@ -89,10 +90,10 @@ fn show_status() -> Result<()> {
     match cli_config.as_ref() {
         Some(cli_config) => {
             if let Some(zookeeper) = cli_config.zookeeper.as_ref() {
-                println!(
-                    "ZooKeeper fleet state ({} via {}):",
-                    zookeeper.namespace,
-                    cli_config.path.display()
+                info!(
+                    namespace = %zookeeper.namespace,
+                    config = %cli_config.path.display(),
+                    "ZooKeeper fleet state"
                 );
 
                 match fetch_zookeeper_state(zookeeper, Some(&host_matcher)) {
@@ -102,29 +103,30 @@ fn show_status() -> Result<()> {
                         all_states.extend(remote_states);
 
                         if all_states.len() == 1 {
-                            println!("Only the local host is currently registered in ZooKeeper.");
+                            info!("only the local host is currently registered in ZooKeeper");
                         }
 
                         print_host_table(&all_states, domain_suffix);
                     }
                     Err(error) => {
-                        println!(
-                            "Failed to read ZooKeeper from {}: {error}. Showing local data only.",
-                            cli_config.path.display()
+                        warn!(
+                            config = %cli_config.path.display(),
+                            %error,
+                            "failed to read ZooKeeper, showing local data only"
                         );
                         print_host_table(&[local_state], domain_suffix);
                     }
                 }
             } else {
-                println!(
-                    "ZooKeeper settings not found in {}; showing local data only.",
-                    cli_config.path.display()
+                info!(
+                    config = %cli_config.path.display(),
+                    "ZooKeeper settings not found, showing local data only"
                 );
                 print_host_table(&[local_state], domain_suffix);
             }
         }
         None => {
-            println!("Ogygia config not found; showing local data only.");
+            info!("config not found, showing local data only");
             print_host_table(&[local_state], domain_suffix);
         }
     }
