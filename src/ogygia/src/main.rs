@@ -26,6 +26,8 @@ mod status;
 
 use clap::Parser;
 use std::process;
+use tracing::error;
+use tracing_subscriber::EnvFilter;
 
 /// Ogygia CLI application.
 #[derive(Parser)]
@@ -36,9 +38,17 @@ struct Cli {
 }
 
 fn main() {
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| EnvFilter::new("ogygia=info,warn")),
+        )
+        .with_writer(std::io::stderr)
+        .init();
+
     let cli = Cli::parse();
     if let Err(error) = cli.command.run() {
-        eprintln!("error: {error}");
+        error!(%error, "fatal error");
         process::exit(1);
     }
 }
