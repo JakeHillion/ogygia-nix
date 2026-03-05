@@ -1,9 +1,9 @@
-{ pkgs, lib, system, ogygiaModule }:
+{ pkgs, lib, ogygiaModule }:
 
 let
   configTestSystem = lib.nixosSystem {
-    inherit system;
     modules = [
+      { nixpkgs.hostPlatform = pkgs.stdenv.hostPlatform.system; }
       ogygiaModule
       {
         ogygia.enable = true;

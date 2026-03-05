@@ -137,7 +137,7 @@
             });
 
             ogygia-cli-config = import ./nixos/tests/cli-config.nix {
-              inherit pkgs system;
+              inherit pkgs;
               inherit (nixpkgs) lib;
               ogygiaModule = self.nixosModules.default;
             };
