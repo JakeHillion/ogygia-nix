@@ -32,12 +32,16 @@
         let
           pkgs = nixpkgs.legacyPackages.${system};
           lib = pkgs.lib;
-          toolchain = fenix.packages.${system}.stable.withComponents [
-            "cargo"
-            "clippy"
-            "rust-src"
-            "rustc"
-            "rustfmt"
+          toolchain = fenix.packages.${system}.combine [
+            (fenix.packages.${system}.stable.withComponents [
+              "cargo"
+              "clippy"
+              "rust-src"
+              "rustc"
+            ])
+            (fenix.packages.${system}.complete.withComponents [
+              "rustfmt"
+            ])
           ];
           craneLib = (crane.mkLib pkgs).overrideToolchain toolchain;
 

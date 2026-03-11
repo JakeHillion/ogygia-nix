@@ -11,14 +11,20 @@
 
 use std::env;
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::Path;
+use std::path::PathBuf;
 use std::process::Command as ProcessCommand;
 use std::time::Duration;
 
-use anyhow::{Context, Result, anyhow};
+use anyhow::Context;
+use anyhow::Result;
+use anyhow::anyhow;
 use hostname::get as get_hostname;
 use serde::Deserialize;
-use zookeeper::{WatchedEvent, Watcher, ZkError, ZooKeeper};
+use zookeeper::WatchedEvent;
+use zookeeper::Watcher;
+use zookeeper::ZkError;
+use zookeeper::ZooKeeper;
 
 /// Number of system states tracked per host (current, booted, next boot).
 pub const STATE_COUNT: usize = 3;
