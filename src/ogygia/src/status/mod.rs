@@ -44,12 +44,14 @@ mod tests;
 
 use anyhow::Result;
 use clap::Subcommand;
-use tracing::{info, warn};
-
 use display::print_host_table;
-use state::{
-    HostMatcher, collect_local_state, detect_hostname, fetch_zookeeper_state, load_cli_config,
-};
+use state::HostMatcher;
+use state::collect_local_state;
+use state::detect_hostname;
+use state::fetch_zookeeper_state;
+use state::load_cli_config;
+use tracing::info;
+use tracing::warn;
 
 #[derive(Subcommand)]
 pub enum Command {

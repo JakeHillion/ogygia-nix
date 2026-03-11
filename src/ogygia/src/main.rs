@@ -24,8 +24,9 @@
 
 mod status;
 
-use clap::Parser;
 use std::process;
+
+use clap::Parser;
 use tracing::error;
 use tracing_subscriber::EnvFilter;
 

@@ -1,10 +1,14 @@
 //! Unit tests for status module.
 
-use super::display::{trim_domain_suffix, truncate_revision};
-use super::state::{
-    HostMatcher, HostState, STATE_COUNT, empty_state_values, join_zk_path, normalize_domain,
-    normalize_namespace,
-};
+use super::display::trim_domain_suffix;
+use super::display::truncate_revision;
+use super::state::HostMatcher;
+use super::state::HostState;
+use super::state::STATE_COUNT;
+use super::state::empty_state_values;
+use super::state::join_zk_path;
+use super::state::normalize_domain;
+use super::state::normalize_namespace;
 
 // ============================================================================
 // HostMatcher tests

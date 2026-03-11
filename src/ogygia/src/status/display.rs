@@ -3,7 +3,9 @@
 //! This module handles all formatting, truncation, and table rendering.
 //! It takes raw state data and formats it for human-readable display.
 
-use super::state::{HostState, STATE_COUNT, StateValues};
+use super::state::HostState;
+use super::state::STATE_COUNT;
+use super::state::StateValues;
 
 /// Number of characters to display from revision hashes (e.g., git SHA).
 const REVISION_DISPLAY_LENGTH: usize = 12;
