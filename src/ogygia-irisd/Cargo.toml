@@ -34,7 +34,6 @@ rand = { workspace = true }
 
 # Cryptography and hashing
 base64 = { workspace = true }
-sha2 = { workspace = true }
 hex = { workspace = true }
 siphasher = { workspace = true }
 
@@ -43,7 +42,9 @@ async-compression = { workspace = true }
 
 # Serialization
 bincode = { workspace = true }
-serde_json = { workspace = true }
+
+# Database
+rusqlite = { workspace = true }
 
 # Logging
 tracing = { workspace = true }

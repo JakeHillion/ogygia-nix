@@ -4,7 +4,6 @@
 //! and updates the local bloom filter accordingly.
 
 use std::path::Path;
-use std::path::PathBuf;
 use std::sync::Arc;
 
 use anyhow::Result;
@@ -14,22 +13,32 @@ use notify::EventKind;
 use notify::RecommendedWatcher;
 use notify::RecursiveMode;
 use notify::Watcher;
+use tokio::sync::Mutex;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use crate::bloom::local::LocalBloom;
-use crate::nix::store::PathInfo;
+use crate::nix::db::NixDb;
 
 /// Store watcher that monitors /nix/store for path changes
 pub struct StoreWatcher {
     bloom: Arc<LocalBloom>,
+    nix_db: Arc<Mutex<NixDb>>,
     rebuild_tx: mpsc::Sender<()>,
 }
 
 impl StoreWatcher {
     /// Create a new store watcher with a channel for requesting rebuilds.
-    pub fn new(bloom: Arc<LocalBloom>, rebuild_tx: mpsc::Sender<()>) -> Self {
-        Self { bloom, rebuild_tx }
+    pub fn new(
+        bloom: Arc<LocalBloom>,
+        nix_db: Arc<Mutex<NixDb>>,
+        rebuild_tx: mpsc::Sender<()>,
+    ) -> Self {
+        Self {
+            bloom,
+            nix_db,
+            rebuild_tx,
+        }
     }
 
     /// Start watching /nix/store for new and removed paths
@@ -104,20 +113,22 @@ impl StoreWatcher {
             _ => return,
         };
 
-        let path = PathBuf::from(store_path);
-        let info = match PathInfo::from_store_path(&path).await {
-            Ok(info) => info,
-            Err(e) => {
-                tracing::debug!("Failed to query path info for {}: {}", store_path, e);
-                return;
+        let serveable = {
+            let db = self.nix_db.lock().await;
+            match db.is_path_serveable(store_path) {
+                Ok(s) => s,
+                Err(e) => {
+                    tracing::debug!("Failed to query path info for {}: {}", store_path, e);
+                    return;
+                }
             }
         };
 
-        if info.is_serveable() {
+        if serveable {
             self.bloom.insert(hash);
             tracing::debug!("Indexed new store path: {}", store_path);
         } else {
-            tracing::debug!("Skipping unsigned store path: {}", store_path);
+            tracing::debug!("Skipping non-serveable store path: {}", store_path);
         }
     }
 
