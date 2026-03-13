@@ -15,6 +15,7 @@ use tokio::process::Command;
 
 use crate::nix::narinfo::Compression;
 use crate::nix::narinfo::NarInfo;
+use crate::nix::narinfo::nar_hash_to_hex;
 
 /// Information about a store path from `nix path-info --json`
 #[derive(Debug, Clone)]
@@ -126,8 +127,14 @@ impl PathInfo {
         // Extract just the store path name (without /nix/store/ prefix)
         let store_name = self.path.strip_prefix("/nix/store/").unwrap_or(&self.path);
 
-        // Generate URL for NAR file (use zstd compression)
-        let url = format!("nar/{}.nar.zst", store_name);
+        // Generate URL for NAR file (use zstd compression).
+        // Encode the NarHash in the URL so NAR requests are self-describing
+        // and we don't need server-side state to match narinfo to NAR.
+        let url = format!(
+            "nar/{}/{}.nar.zst",
+            nar_hash_to_hex(&self.nar_hash),
+            store_name
+        );
 
         // For now, use placeholder values for FileHash and FileSize
         // since we compress on-the-fly and don't know these until first generation
@@ -193,7 +200,7 @@ mod tests {
     fn test_path_info_to_narinfo() {
         let path_info = PathInfo {
             path: "/nix/store/abc123def456ghi789jkl012mno345pq-hello-2.10".to_string(),
-            nar_hash: "sha256:0123456789abcdef".to_string(),
+            nar_hash: "sha256-ASNFZ4mrze8=".to_string(),
             nar_size: 12345,
             references: vec!["/nix/store/xyz789abc123def456ghi012jkl345mno-glibc-2.35".to_string()],
             deriver: Some(
@@ -211,10 +218,10 @@ mod tests {
         );
         assert_eq!(
             narinfo.url,
-            "nar/abc123def456ghi789jkl012mno345pq-hello-2.10.nar.zst"
+            "nar/0123456789abcdef/abc123def456ghi789jkl012mno345pq-hello-2.10.nar.zst"
         );
         assert_eq!(narinfo.compression, Compression::Zstd);
-        assert_eq!(narinfo.nar_hash, "sha256:0123456789abcdef");
+        assert_eq!(narinfo.nar_hash, "sha256-ASNFZ4mrze8=");
         assert_eq!(narinfo.nar_size, 12345);
         assert_eq!(narinfo.references.len(), 1);
         assert_eq!(narinfo.signatures.len(), 1);

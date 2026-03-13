@@ -4,13 +4,11 @@ mod handlers;
 mod routes;
 mod state;
 
-use std::collections::HashMap;
 use std::sync::Arc;
 
 use anyhow::Result;
 pub use routes::create_router;
 pub use state::AppState;
-use tokio::sync::RwLock;
 use tokio_util::sync::CancellationToken;
 use tower_http::trace::DefaultMakeSpan;
 use tower_http::trace::DefaultOnResponse;
@@ -34,7 +32,6 @@ pub async fn start(
         local_bloom,
         peer_blooms,
         http_client,
-        narinfo_cache: RwLock::new(HashMap::new()),
     });
 
     let app = create_router(state).layer(

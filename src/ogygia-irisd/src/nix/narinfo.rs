@@ -4,6 +4,29 @@ use std::collections::HashMap;
 
 use anyhow::Result;
 use anyhow::anyhow;
+use base64::Engine;
+use base64::engine::general_purpose::STANDARD;
+
+/// Convert a NarHash from SRI base64 format (`sha256-BASE64==`) to bare hex.
+/// Hashes without the SRI prefix are returned unchanged.
+pub fn nar_hash_to_hex(hash: &str) -> String {
+    if let Some(b64) = hash.strip_prefix("sha256-") {
+        let bytes = STANDARD.decode(b64).expect("invalid base64 in NarHash");
+        hex::encode(bytes)
+    } else {
+        hash.to_string()
+    }
+}
+
+/// Convert a bare hex NarHash back to SRI base64 format (`sha256-BASE64==`).
+/// Hashes already in SRI format are returned unchanged.
+pub fn nar_hash_to_sri(hash: &str) -> String {
+    if hash.starts_with("sha256-") {
+        return hash.to_string();
+    }
+    let bytes = hex::decode(hash).expect("invalid hex in NarHash");
+    format!("sha256-{}", STANDARD.encode(bytes))
+}
 
 /// Parsed narinfo file
 #[derive(Debug, Clone)]

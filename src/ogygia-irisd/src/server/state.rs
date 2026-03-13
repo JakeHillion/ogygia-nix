@@ -1,6 +1,5 @@
 //! Shared application state and peer lookup logic.
 
-use std::collections::HashMap;
 use std::sync::Arc;
 
 use axum::body::Body;
@@ -10,12 +9,12 @@ use axum::response::Response;
 use futures::StreamExt;
 use futures::TryStreamExt;
 use futures::stream::FuturesUnordered;
-use tokio::sync::RwLock;
 
 use crate::bloom::local::LocalBloom;
 use crate::bloom::peers::PeerBlooms;
 use crate::config::Config;
 use crate::nix::narinfo::NarInfo;
+use crate::nix::narinfo::nar_hash_to_sri;
 
 /// Shared application state
 pub struct AppState {
@@ -23,8 +22,6 @@ pub struct AppState {
     pub local_bloom: Arc<LocalBloom>,
     pub peer_blooms: Arc<PeerBlooms>,
     pub http_client: reqwest::Client,
-    /// Maps store path hash → NarHash for narinfos we've served to clients.
-    pub narinfo_cache: RwLock<HashMap<String, String>>,
 }
 
 impl AppState {
@@ -33,10 +30,6 @@ impl AppState {
     /// Streams bloom lookups concurrently with narinfo fetches: as each
     /// peer's bloom becomes available and matches the hash, a narinfo fetch
     /// is started immediately — without waiting for all blooms to arrive.
-    ///
-    /// Uses hash-affinity: if we previously served a narinfo for this hash, prefer
-    /// a peer whose NarHash matches. This ensures consistency between narinfo and
-    /// NAR responses for the same store path.
     pub(super) async fn try_peer_narinfo(&self, hash: &str) -> Option<(NarInfo, String)> {
         let peer_urls = &self.config.peers.urls;
         if peer_urls.is_empty() {
@@ -50,11 +43,8 @@ impl AppState {
             .lookup_stream(peer_urls, hash, &self.http_client)
             .await;
 
-        let expected = self.narinfo_cache.read().await.get(hash).cloned();
-
         let client = self.http_client.clone();
         let mut narinfo_futs = FuturesUnordered::new();
-        let mut first_valid: Option<(NarInfo, String)> = None;
 
         loop {
             tokio::select! {
@@ -74,18 +64,8 @@ impl AppState {
                         continue;
                     }
 
-                    if expected.as_ref().is_some_and(|h| h == &narinfo.nar_hash) {
-                        tracing::info!(
-                            "narinfo {} fetched from peer {} (NarHash matches cache)",
-                            hash,
-                            peer_url
-                        );
-                        return Some((narinfo, peer_url));
-                    }
-
-                    if first_valid.is_none() {
-                        first_valid = Some((narinfo, peer_url));
-                    }
+                    tracing::info!("narinfo {} fetched from peer {}", hash, peer_url);
+                    return Some((narinfo, peer_url));
                 }
 
                 Some(peer_url) = candidate_rx.recv() => {
@@ -100,15 +80,7 @@ impl AppState {
             }
         }
 
-        if let Some((ref narinfo, ref peer_url)) = first_valid {
-            tracing::info!("narinfo {} fetched from peer {}", hash, peer_url);
-            self.narinfo_cache
-                .write()
-                .await
-                .insert(hash.to_string(), narinfo.nar_hash.clone());
-        }
-
-        first_valid
+        None
     }
 
     /// Try to proxy a NAR from a peer found via bloom filter lookup.
@@ -117,10 +89,9 @@ impl AppState {
     /// peer's bloom becomes available and matches the hash, a narinfo fetch
     /// is started immediately — without waiting for all blooms to arrive.
     ///
-    /// Uses hash-affinity: looks up the expected NarHash from the narinfo cache
-    /// and skips peers whose NarHash doesn't match. This ensures the NAR content
-    /// is consistent with the narinfo we previously served.
-    pub(super) async fn try_peer_nar(&self, hash: &str) -> Response {
+    /// The expected NarHash is extracted from the request URL, so peers whose
+    /// NarHash doesn't match are skipped without needing server-side state.
+    pub(super) async fn try_peer_nar(&self, hash: &str, expected_nar_hash: &str) -> Response {
         let peer_urls = &self.config.peers.urls;
         if peer_urls.is_empty() {
             return (StatusCode::NOT_FOUND, "Not found").into_response();
@@ -133,7 +104,9 @@ impl AppState {
             .lookup_stream(peer_urls, hash, &self.http_client)
             .await;
 
-        let expected = self.narinfo_cache.read().await.get(hash).cloned();
+        // Convert the hex hash from the URL to SRI format once, so we can
+        // compare directly against each peer's NarHash without repeated conversion.
+        let expected_sri = nar_hash_to_sri(expected_nar_hash);
 
         let client = self.http_client.clone();
         let mut narinfo_futs = FuturesUnordered::new();
@@ -156,8 +129,8 @@ impl AppState {
                         continue;
                     }
 
-                    // Skip peers whose NarHash doesn't match our cached value
-                    if expected.as_ref().is_some_and(|h| h != &narinfo.nar_hash) {
+                    // Skip peers whose NarHash doesn't match the one in the URL
+                    if narinfo.nar_hash != expected_sri {
                         continue;
                     }
 

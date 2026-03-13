@@ -17,6 +17,7 @@ use serde::Serialize;
 use super::AppState;
 use crate::nix::nar::generate_nar_stream;
 use crate::nix::narinfo::NarInfo;
+use crate::nix::narinfo::nar_hash_to_hex;
 use crate::nix::store::PathInfo;
 use crate::nix::store::find_store_path;
 
@@ -77,7 +78,11 @@ pub async fn get_narinfo(
     }
 
     // 2. Try peers via bloom lookup
-    if let Some((narinfo, _)) = state.try_peer_narinfo(hash).await {
+    if let Some((mut narinfo, _)) = state.try_peer_narinfo(hash).await {
+        // Rewrite the URL to use our format with the NarHash encoded as hex,
+        // so the NAR request will be self-describing regardless of the peer's format.
+        let filename = narinfo.url.rsplit('/').next().unwrap_or(&narinfo.url);
+        narinfo.url = format!("nar/{}/{}", nar_hash_to_hex(&narinfo.nar_hash), filename);
         return (
             StatusCode::OK,
             [("content-type", "text/x-nix-narinfo")],
@@ -114,10 +119,21 @@ async fn try_local_store_narinfo(hash: &str) -> Option<NarInfo> {
 }
 
 /// GET /nar/{path}
+///
+/// Path format: `nar/{nar_hash}/{store_hash}-{name}.nar.zst`
+/// The NarHash in the URL makes requests self-describing so we don't need
+/// server-side state to match narinfo responses to NAR content.
 pub async fn get_nar(State(state): State<Arc<AppState>>, Path(path): Path<String>) -> Response {
-    let filename = path.rsplit('/').next().unwrap_or(&path);
+    // Split into nar_hash and filename segments
+    let (nar_hash, filename) = match path.split_once('/') {
+        Some((nar_hash, filename)) => (nar_hash, filename),
+        None => {
+            tracing::warn!("Invalid NAR path format: {}", path);
+            return (StatusCode::NOT_FOUND, "Not found").into_response();
+        }
+    };
 
-    // Extract hash from filename (format: {hash}-{name}.nar.{compression})
+    // Extract store hash from filename (format: {hash}-{name}.nar.{compression})
     let hash = match filename.split('-').next() {
         Some(h) if h.len() == 32 => h,
         _ => {
@@ -145,7 +161,7 @@ pub async fn get_nar(State(state): State<Arc<AppState>>, Path(path): Path<String
     }
 
     // Try peers via bloom lookup
-    state.try_peer_nar(hash).await
+    state.try_peer_nar(hash, nar_hash).await
 }
 
 /// Query parameters for GET /providers/{hash}
