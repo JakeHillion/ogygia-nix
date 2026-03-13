@@ -134,7 +134,7 @@ impl AppState {
                         continue;
                     }
 
-                    let nar_url = format!("{}/{}", peer_url.trim_end_matches('/'), narinfo.url);
+                    let nar_url = format!("{}/local/{}", peer_url.trim_end_matches('/'), narinfo.url);
                     match stream_nar_from_url(&self.http_client, &nar_url).await {
                         Some(response) => {
                             tracing::info!("Proxying NAR {} from peer {}", hash, peer_url);
@@ -166,7 +166,7 @@ async fn fetch_narinfo_from_peer(
     peer_url: String,
     hash: String,
 ) -> Option<(String, NarInfo)> {
-    let url = format!("{}/{}.narinfo", peer_url.trim_end_matches('/'), hash);
+    let url = format!("{}/local/{}.narinfo", peer_url.trim_end_matches('/'), hash);
     let response = match client.get(&url).send().await {
         Ok(r) if r.status().is_success() => r,
         Ok(r) => {
