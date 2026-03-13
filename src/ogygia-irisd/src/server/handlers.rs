@@ -94,6 +94,29 @@ pub async fn get_narinfo(
     (StatusCode::NOT_FOUND, "Not found").into_response()
 }
 
+/// GET /local/{hash}.narinfo — local-only narinfo (no peer fan-out)
+///
+/// Used by peers to query this node's local store without triggering
+/// cascading fan-out across the cluster.
+pub async fn get_local_narinfo(Path(narinfo_path): Path<String>) -> Response {
+    let hash = match narinfo_path.strip_suffix(".narinfo") {
+        Some(h) => h,
+        None => {
+            return (StatusCode::NOT_FOUND, "Not found").into_response();
+        }
+    };
+
+    match try_local_store_narinfo(hash).await {
+        Some(narinfo) => (
+            StatusCode::OK,
+            [("content-type", "text/x-nix-narinfo")],
+            narinfo.serialize(),
+        )
+            .into_response(),
+        None => (StatusCode::NOT_FOUND, "Not found").into_response(),
+    }
+}
+
 /// Try to generate narinfo from local /nix/store path
 async fn try_local_store_narinfo(hash: &str) -> Option<NarInfo> {
     let store_path = find_store_path(hash).await?;
@@ -124,44 +147,81 @@ async fn try_local_store_narinfo(hash: &str) -> Option<NarInfo> {
 /// The NarHash in the URL makes requests self-describing so we don't need
 /// server-side state to match narinfo responses to NAR content.
 pub async fn get_nar(State(state): State<Arc<AppState>>, Path(path): Path<String>) -> Response {
-    // Split into nar_hash and filename segments
-    let (nar_hash, filename) = match path.split_once('/') {
-        Some((nar_hash, filename)) => (nar_hash, filename),
-        None => {
-            tracing::warn!("Invalid NAR path format: {}", path);
-            return (StatusCode::NOT_FOUND, "Not found").into_response();
-        }
+    let Some((nar_hash, hash)) = parse_nar_path(&path) else {
+        tracing::warn!("Invalid NAR path format: {}", path);
+        return (StatusCode::NOT_FOUND, "Not found").into_response();
     };
 
-    // Extract store hash from filename (format: {hash}-{name}.nar.{compression})
-    let hash = match filename.split('-').next() {
-        Some(h) if h.len() == 32 => h,
-        _ => {
-            tracing::warn!("Invalid NAR path format: {}", path);
-            return (StatusCode::NOT_FOUND, "Not found").into_response();
-        }
-    };
-
-    // Try local store first
-    if let Some(store_path) = find_store_path(hash).await {
-        match generate_nar_stream(&store_path).await {
-            Ok(stream) => {
-                tracing::info!("Streaming NAR for {}", store_path.display());
-                let body =
-                    Body::from_stream(stream.map_err(|e| std::io::Error::other(e.to_string())));
-                return (StatusCode::OK, [("content-type", "application/zstd")], body)
-                    .into_response();
-            }
-            Err(e) => {
-                tracing::error!("Failed to generate NAR for {}: {}", store_path.display(), e);
-                return (StatusCode::INTERNAL_SERVER_ERROR, "Failed to generate NAR")
-                    .into_response();
-            }
-        }
+    let local = try_local_store_nar(hash, nar_hash).await;
+    if local.status() != StatusCode::NOT_FOUND {
+        return local;
     }
 
     // Try peers via bloom lookup
     state.try_peer_nar(hash, nar_hash).await
+}
+
+/// GET /local/nar/{path} — local-only NAR download (no peer fan-out)
+///
+/// Used by peers to fetch NARs from this node's local store without
+/// triggering cascading fan-out across the cluster.
+pub async fn get_local_nar(Path(path): Path<String>) -> Response {
+    let Some((nar_hash, hash)) = parse_nar_path(&path) else {
+        tracing::warn!("Invalid NAR path format: {}", path);
+        return (StatusCode::NOT_FOUND, "Not found").into_response();
+    };
+
+    try_local_store_nar(hash, nar_hash).await
+}
+
+/// Parse a NAR path into `(nar_hash, store_hash)`.
+///
+/// Expected format: `{nar_hash}/{store_hash}-{name}.nar.{compression}`
+fn parse_nar_path(path: &str) -> Option<(&str, &str)> {
+    let (nar_hash, filename) = path.split_once('/')?;
+    let hash = filename.split('-').next()?;
+    (hash.len() == 32).then_some((nar_hash, hash))
+}
+
+/// Try to stream a NAR from the local store, verifying the NarHash matches.
+async fn try_local_store_nar(hash: &str, expected_nar_hash: &str) -> Response {
+    let Some(store_path) = find_store_path(hash).await else {
+        return (StatusCode::NOT_FOUND, "Not found").into_response();
+    };
+
+    // Verify the local NarHash matches what the URL claims
+    match PathInfo::from_store_path(&store_path).await {
+        Ok(info) if nar_hash_to_hex(&info.nar_hash) != expected_nar_hash => {
+            tracing::debug!(
+                "Local NarHash mismatch for {}: expected {}, got {}",
+                hash,
+                expected_nar_hash,
+                nar_hash_to_hex(&info.nar_hash)
+            );
+            return (StatusCode::NOT_FOUND, "Not found").into_response();
+        }
+        Err(e) => {
+            tracing::warn!(
+                "Failed to get path-info for {}: {}",
+                store_path.display(),
+                e
+            );
+            return (StatusCode::NOT_FOUND, "Not found").into_response();
+        }
+        _ => {}
+    }
+
+    match generate_nar_stream(&store_path).await {
+        Ok(stream) => {
+            tracing::info!("Streaming NAR for {}", store_path.display());
+            let body = Body::from_stream(stream.map_err(|e| std::io::Error::other(e.to_string())));
+            (StatusCode::OK, [("content-type", "application/zstd")], body).into_response()
+        }
+        Err(e) => {
+            tracing::error!("Failed to generate NAR for {}: {}", store_path.display(), e);
+            (StatusCode::INTERNAL_SERVER_ERROR, "Failed to generate NAR").into_response()
+        }
+    }
 }
 
 /// Query parameters for GET /providers/{hash}
@@ -206,7 +266,7 @@ pub async fn get_providers(
         bloom_candidates = candidates.clone();
 
         for peer_url in &candidates {
-            let url = format!("{}/{}.narinfo", peer_url.trim_end_matches('/'), hash);
+            let url = format!("{}/local/{}.narinfo", peer_url.trim_end_matches('/'), hash);
             match state.http_client.get(&url).send().await {
                 Ok(response) if response.status().is_success() => {
                     providers.push(peer_url.clone());
