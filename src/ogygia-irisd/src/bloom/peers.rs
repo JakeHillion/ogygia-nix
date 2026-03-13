@@ -331,13 +331,17 @@ mod tests {
     use super::*;
     use crate::bloom::local::LocalBloom;
 
-    #[test]
-    fn test_serialize_deserialize_roundtrip() {
+    #[tokio::test]
+    async fn test_serialize_deserialize_roundtrip() {
+        use bytes::Bytes;
+        use futures::TryStreamExt;
+
         let local = LocalBloom::new(0.01, 0.1);
         local.insert("abc123def456ghi789jkl012mno345pq");
         local.insert("xyz789abc123def456ghi012jkl345mno");
 
-        let data = local.serialize().unwrap();
+        let chunks: Vec<Bytes> = local.serialize_stream().try_collect().await.unwrap();
+        let data: Vec<u8> = chunks.iter().flat_map(|b| b.iter().copied()).collect();
         let bloom = deserialize_bloom(&data, local.num_bits(), local.num_hashes()).unwrap();
 
         assert!(bloom.contains("abc123def456ghi789jkl012mno345pq"));

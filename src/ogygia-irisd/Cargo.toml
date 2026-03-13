@@ -49,6 +49,9 @@ serde_json = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 
+# Async streams
+async-stream = { workspace = true }
+
 # Utilities
 bytes = { workspace = true }
 futures = { workspace = true }

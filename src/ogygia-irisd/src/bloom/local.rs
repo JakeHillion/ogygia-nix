@@ -8,13 +8,14 @@
 //! estimate is a compile-time constant today; future work will replace
 //! it with a cluster-derived measurement.
 
+use std::convert::Infallible;
 use std::sync::Arc;
 use std::sync::RwLock;
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
 
-use anyhow::Result;
 use arc_swap::ArcSwap;
+use bytes::Bytes;
 use fastbloom::AtomicBloomFilter;
 
 use super::BLOOM_SEED;
@@ -25,6 +26,9 @@ use super::BLOOM_SEED;
 /// bloom filter at startup. This is a rough constant for now — future
 /// work will derive an accurate count from cluster-wide store metadata.
 const ESTIMATED_ENTRIES: usize = 400_000;
+
+/// Batch size (in u64 words) for streaming bloom serialization (~8KB per batch).
+const WORD_BATCH: usize = 1024;
 
 /// Compute optimal bloom filter dimensions for `n` elements at the
 /// given false-positive rate.
@@ -144,16 +148,38 @@ impl LocalBloom {
         (deletions as f64 / elements as f64) > self.rebuild_threshold
     }
 
-    /// Serialize the bloom filter for the `/bloom` HTTP endpoint.
+    /// Serialize the bloom filter as a streaming response body.
     ///
-    /// Uses the shared wire format from `bloom::wire`.
-    pub fn serialize(&self) -> Result<Vec<u8>> {
+    /// Returns a stream that yields the wire-format header first, then
+    /// batched word chunks read directly from the filter's in-memory
+    /// `iter()`. The `Arc<AtomicBloomFilter>` is cloned and moved into
+    /// the stream generator to keep the filter alive for the duration
+    /// of iteration.
+    pub fn serialize_stream(
+        &self,
+    ) -> impl futures::Stream<Item = Result<Bytes, Infallible>> + Send {
         let header = super::wire::BloomHeader {
             num_hashes: self.num_hashes,
             num_bits: self.num_bits as u64,
         };
-        let filter = self.read_bloom.load();
-        Ok(super::wire::serialize(&header, filter.iter()))
+        let header_bytes = super::wire::serialize_header(&header);
+        let filter: Arc<AtomicBloomFilter> = Arc::clone(&*self.read_bloom.load());
+
+        async_stream::try_stream! {
+            yield Bytes::from(header_bytes);
+
+            let mut buf = Vec::with_capacity(WORD_BATCH * 8);
+            for word in filter.iter() {
+                buf.extend_from_slice(&word.to_be_bytes());
+                if buf.len() >= WORD_BATCH * 8 {
+                    yield Bytes::from(std::mem::take(&mut buf));
+                    buf = Vec::with_capacity(WORD_BATCH * 8);
+                }
+            }
+            if !buf.is_empty() {
+                yield Bytes::from(buf);
+            }
+        }
     }
 
     /// Begin a rebuild: swap the write slot to a fresh empty state.
@@ -203,13 +229,18 @@ impl LocalBloom {
 mod tests {
     use super::*;
 
-    #[test]
-    fn serialize_roundtrip() {
+    #[tokio::test]
+    async fn serialize_stream_roundtrip() {
+        use futures::TryStreamExt;
+
         let bloom = LocalBloom::new(0.01, 0.1);
         bloom.insert("abc123def456ghi789jkl012mno345pq");
         bloom.insert("xyz789abc123def456ghi012jkl345mno");
 
-        let data = bloom.serialize().unwrap();
+        // Collect stream chunks into a single byte buffer.
+        let chunks: Vec<Bytes> = bloom.serialize_stream().try_collect().await.unwrap();
+        let data: Vec<u8> = chunks.iter().flat_map(|b| b.iter().copied()).collect();
+
         let (num_bits, num_hashes) = bloom_params(0.01, ESTIMATED_ENTRIES);
 
         // Deserialize via the wire module and validate header.

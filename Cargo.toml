@@ -57,6 +57,9 @@ serde_json = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
+# Async streams
+async-stream = "0.3"
+
 # Utilities
 bytes = "1"
 futures = "0.3"

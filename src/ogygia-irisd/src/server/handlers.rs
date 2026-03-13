@@ -36,22 +36,14 @@ pub async fn nix_cache_info(State(state): State<Arc<AppState>>) -> impl IntoResp
 
 /// GET /bloom — return serialized local bloom filter
 pub async fn get_bloom(State(state): State<Arc<AppState>>) -> Response {
-    match state.local_bloom.serialize() {
-        Ok(data) => (
-            StatusCode::OK,
-            [("content-type", "application/octet-stream")],
-            data,
-        )
-            .into_response(),
-        Err(e) => {
-            tracing::error!("Failed to serialize bloom: {}", e);
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "Failed to serialize bloom",
-            )
-                .into_response()
-        }
-    }
+    let stream = state.local_bloom.serialize_stream();
+    let body = Body::from_stream(stream);
+    (
+        StatusCode::OK,
+        [("content-type", "application/octet-stream")],
+        body,
+    )
+        .into_response()
 }
 
 /// GET /{hash}.narinfo
