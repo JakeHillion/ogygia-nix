@@ -20,6 +20,7 @@ use tracing::Level;
 use crate::bloom::local::LocalBloom;
 use crate::bloom::peers::PeerBlooms;
 use crate::config::Config;
+use crate::nix::db::NixDb;
 
 /// Start HTTP servers on all configured listen addresses with graceful shutdown.
 pub async fn start(
@@ -27,6 +28,7 @@ pub async fn start(
     local_bloom: Arc<LocalBloom>,
     peer_blooms: Arc<PeerBlooms>,
     http_client: reqwest::Client,
+    nix_db: NixDb,
     token: CancellationToken,
 ) -> Result<()> {
     let state = Arc::new(AppState {
@@ -34,6 +36,7 @@ pub async fn start(
         local_bloom,
         peer_blooms,
         http_client,
+        nix_db: tokio::sync::Mutex::new(nix_db),
         narinfo_cache: RwLock::new(HashMap::new()),
     });
 

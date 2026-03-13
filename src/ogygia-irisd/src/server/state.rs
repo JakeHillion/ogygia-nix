@@ -15,6 +15,7 @@ use tokio::sync::RwLock;
 use crate::bloom::local::LocalBloom;
 use crate::bloom::peers::PeerBlooms;
 use crate::config::Config;
+use crate::nix::db::NixDb;
 use crate::nix::narinfo::NarInfo;
 
 /// Shared application state
@@ -23,6 +24,7 @@ pub struct AppState {
     pub local_bloom: Arc<LocalBloom>,
     pub peer_blooms: Arc<PeerBlooms>,
     pub http_client: reqwest::Client,
+    pub nix_db: tokio::sync::Mutex<NixDb>,
     /// Maps store path hash → NarHash for narinfos we've served to clients.
     pub narinfo_cache: RwLock<HashMap<String, String>>,
 }

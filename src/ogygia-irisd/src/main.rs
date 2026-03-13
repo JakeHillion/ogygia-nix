@@ -8,6 +8,7 @@ use std::time::Instant;
 use anyhow::Result;
 use clap::Parser;
 use tokio::signal;
+use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use tracing_subscriber::EnvFilter;
@@ -49,6 +50,11 @@ async fn main() -> Result<()> {
     tracing::info!("ogygia-irisd starting");
     tracing::info!("HTTP listen: {:?}", config.server.listen);
     tracing::info!("Peers: {:?}", config.peers.urls);
+
+    // Open Nix database (shared across scanner, watcher, server)
+    let nix_db = Arc::new(Mutex::new(nix::db::NixDb::open()?));
+    tracing::info!("Opened Nix database");
+
     // Initialize bloom filters
     let local_bloom = Arc::new(bloom::local::LocalBloom::new(
         config.bloom.false_positive_rate,
@@ -83,13 +89,13 @@ async fn main() -> Result<()> {
     let (rebuild_tx, rebuild_rx) = tokio::sync::mpsc::channel::<()>(1);
 
     // Initial store scan (must complete before serving)
-    let scanner = store::scanner::StoreScanner::new(Arc::clone(&local_bloom), rebuild_rx);
-    let stats = scanner.scan("Store scan").await?;
-    tracing::info!(
-        "Store scan: {} paths, {} indexed",
-        stats.total_paths,
-        stats.indexed,
+    let scanner = store::scanner::StoreScanner::new(
+        Arc::clone(&local_bloom),
+        Arc::clone(&nix_db),
+        rebuild_rx,
     );
+    let stats = scanner.scan("Store scan").await?;
+    tracing::info!("Store scan: {} indexed", stats.indexed);
 
     // Spawn background tasks
     let mut tasks: Vec<JoinHandle<Result<()>>> = Vec::new();
@@ -102,9 +108,10 @@ async fn main() -> Result<()> {
     // Store watcher (optional, runs until cancelled)
     if !cli.no_watch {
         let bloom = Arc::clone(&local_bloom);
+        let nix_db = Arc::clone(&nix_db);
         let token = token.clone();
         tasks.push(tokio::spawn(async move {
-            let watcher = Arc::new(store::watcher::StoreWatcher::new(bloom, rebuild_tx));
+            let watcher = Arc::new(store::watcher::StoreWatcher::new(bloom, nix_db, rebuild_tx));
             watcher.start(token).await
         }));
     }
@@ -133,12 +140,18 @@ async fn main() -> Result<()> {
         }));
     }
 
+    // Open a separate NixDb connection for the HTTP server (the
+    // Arc<Mutex<NixDb>> is already shared with scanner/watcher, but
+    // the server gets its own to avoid cross-component contention).
+    let server_db = nix::db::NixDb::open()?;
+
     // HTTP server (runs until token is cancelled)
     tasks.push(tokio::spawn(server::start(
         config,
         local_bloom,
         peer_blooms,
         http_client,
+        server_db,
         token.clone(),
     )));
 
