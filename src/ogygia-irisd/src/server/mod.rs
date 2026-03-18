@@ -1,6 +1,7 @@
 //! HTTP server for Nix binary cache protocol
 
 mod handlers;
+pub(crate) mod range;
 mod routes;
 mod state;
 
@@ -18,6 +19,7 @@ use tracing::Level;
 use crate::bloom::local::LocalBloom;
 use crate::bloom::peers::PeerBlooms;
 use crate::config::Config;
+use crate::downloader::PeerDownloader;
 use crate::nix::cache::NarCache;
 
 /// Start HTTP servers on all configured listen addresses with graceful shutdown.
@@ -27,6 +29,7 @@ pub async fn start(
     peer_blooms: Arc<PeerBlooms>,
     http_client: reqwest::Client,
     nar_cache: Arc<NarCache>,
+    downloader: Arc<PeerDownloader>,
     token: CancellationToken,
 ) -> Result<()> {
     let state = Arc::new(AppState {
@@ -35,6 +38,7 @@ pub async fn start(
         peer_blooms,
         http_client,
         nar_cache,
+        downloader,
     });
 
     let app = create_router(state).layer(

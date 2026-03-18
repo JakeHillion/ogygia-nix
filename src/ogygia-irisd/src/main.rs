@@ -15,6 +15,7 @@ use tracing_subscriber::EnvFilter;
 
 mod bloom;
 mod config;
+mod downloader;
 mod nix;
 mod server;
 mod store;
@@ -155,6 +156,13 @@ async fn main() -> Result<()> {
         }));
     }
 
+    // Initialize multi-peer downloader
+    let downloads_dir = config.cache.dir.join("downloads");
+    tokio::fs::create_dir_all(&downloads_dir)
+        .await
+        .context("Failed to create downloads directory")?;
+    let downloader = Arc::new(downloader::PeerDownloader::new(&config.cache));
+
     // HTTP server (runs until token is cancelled)
     tasks.push(tokio::spawn(server::start(
         config,
@@ -162,6 +170,7 @@ async fn main() -> Result<()> {
         peer_blooms,
         http_client,
         nar_cache,
+        downloader,
         token.clone(),
     )));
 
