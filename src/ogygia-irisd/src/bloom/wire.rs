@@ -36,10 +36,26 @@ impl BloomHeader {
     }
 }
 
+/// Serialize just the bloom wire-format header (hash + bincode header).
+///
+/// Returns the small header prefix (~20 bytes). Used by the streaming
+/// serialization path where the body is yielded separately.
+pub(super) fn serialize_header(header: &BloomHeader) -> Vec<u8> {
+    let hash = header.sip_hash();
+    let header_bytes = bincode::serialize(header).expect("BloomHeader serialization cannot fail");
+    let mut buf = Vec::with_capacity(8 + header_bytes.len());
+    buf.extend_from_slice(&hash.to_be_bytes());
+    buf.extend_from_slice(&header_bytes);
+    buf
+}
+
 /// Serialize a bloom header and bit-vector body into the wire format.
 ///
 /// Consumes the word iterator directly — no intermediate collection.
-pub fn serialize(header: &BloomHeader, words: impl Iterator<Item = u64>) -> Vec<u8> {
+/// Used only in tests; the production path streams via `serialize_header`
+/// plus batched word iteration.
+#[cfg(test)]
+fn serialize(header: &BloomHeader, words: impl Iterator<Item = u64>) -> Vec<u8> {
     let hash = header.sip_hash();
     let header_bytes = bincode::serialize(header).expect("BloomHeader serialization cannot fail");
     let word_count = (header.num_bits as usize).div_ceil(64);
