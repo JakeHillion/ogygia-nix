@@ -20,7 +20,7 @@ in
 
     namespace = lib.mkOption {
       type = lib.types.str;
-      default = "/ogygia/nixos/versions";
+      default = "/ogygia";
       description = "etcd key prefix that contains host state information.";
     };
 
@@ -28,6 +28,17 @@ in
       type = lib.types.int;
       default = 10;
       description = "Connection timeout used by the Ogygia CLI when contacting etcd.";
+    };
+
+    clientConnectionString = lib.mkOption {
+      type = lib.types.str;
+      readOnly = true;
+      default = lib.concatStringsSep "," etcdCfg.endpoints;
+      description = ''
+        Read-only option that generates a comma-separated connection string
+        from the configured endpoints. This is used by services like
+        ogygia-hostinfod to connect to etcd.
+      '';
     };
   };
 

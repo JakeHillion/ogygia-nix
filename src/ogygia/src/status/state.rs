@@ -478,9 +478,17 @@ pub fn load_cli_config() -> Result<Option<CliConfig>> {
                 }
             }
 
+            let base_namespace = normalize_namespace(&raw_etcd.namespace);
+            // Append /nixos/versions to the base namespace (e.g., /ogygia -> /ogygia/nixos/versions)
+            let namespace = if base_namespace == "/" {
+                "/nixos/versions".to_string()
+            } else {
+                format!("{}/nixos/versions", base_namespace)
+            };
+
             Some(EtcdCliConfig {
                 endpoints: raw_etcd.endpoints,
-                namespace: normalize_namespace(&raw_etcd.namespace),
+                namespace,
                 timeout: Duration::from_secs(raw_etcd.timeout_seconds.max(MIN_TIMEOUT_SECONDS)),
             })
         }
@@ -641,7 +649,7 @@ const fn default_timeout_seconds() -> u64 {
 
 /// Default etcd namespace for host data storage.
 fn default_etcd_namespace() -> String {
-    "/ogygia/nixos/versions".to_string()
+    "/ogygia".to_string()
 }
 
 /// Default ZooKeeper namespace for host data storage.

@@ -1,0 +1,24 @@
+[package]
+name = "ogygia-hostinfod"
+version.workspace = true
+edition = "2021"
+license.workspace = true
+
+[dependencies]
+# CLI
+clap = { workspace = true }
+anyhow = { workspace = true }
+hostname = { workspace = true }
+
+# Async runtime
+tokio = { workspace = true }
+
+# etcd client
+etcd-client = { workspace = true }
+
+# Filesystem watching - using raw inotify for proper symlink change detection
+inotify = "0.10"
+
+# Logging
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }

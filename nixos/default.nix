@@ -27,10 +27,12 @@ in
     ./config-generator
     ./etcd
     ./irisd
+    ./hostinfod
   ];
 
   config = lib.mkIf cfg.enable {
     ogygia.versions.enable = lib.mkOverride 999 true;
     ogygia.cliConfig.enable = lib.mkOverride 999 true;
+    ogygia.hostinfod.enable = lib.mkOverride 999 (cfg.etcd.endpoints != [ ]);
   };
 }
