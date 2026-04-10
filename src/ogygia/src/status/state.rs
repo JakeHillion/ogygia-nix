@@ -35,14 +35,23 @@ const MIN_TIMEOUT_SECONDS: u64 = 1;
 /// Relative path from system closure to the build revision file.
 const REVISION_RELATIVE_PATH: &str = "sw/share/ogygia/build-revision";
 
+/// Relative path pattern from system closure to island-specific build revision files.
+const ISLAND_REVISION_RELATIVE_PATH_PATTERN: &str = "sw/share/ogygia/build-revision-{}";
+
 /// Relative path from system closure to the configuration file.
 const CONFIG_RELATIVE_PATH: &str = "sw/share/ogygia/config.toml";
+
+/// Relative path pattern from system closure to island-specific configuration files.
+const ISLAND_CONFIG_RELATIVE_PATH_PATTERN: &str = "sw/share/ogygia/config-{}.toml";
 
 /// Environment variable to override the configuration file path.
 const HOSTNAME_OVERRIDE_ENV: &str = "OGYGIA_HOSTNAME";
 
 /// Environment variable to override hostname detection.
 const CONFIG_OVERRIDE_ENV: &str = "OGYGIA_CONFIG";
+
+/// Environment variable to select which island configuration to use.
+const ISLAND_OVERRIDE_ENV: &str = "OGYGIA_ISLAND";
 
 /// Metadata about a NixOS system state (without display information).
 #[derive(Clone, Copy)]
@@ -134,7 +143,29 @@ pub fn collect_local_state(hostname: String) -> HostState {
 ///
 /// Returns the full revision string (not truncated). Returns `None` if the file
 /// doesn't exist, or `Some(error_string)` if reading fails for other reasons.
+///
+/// If OGYGIA_ISLAND is set, searches for island-specific revision file first
+/// (build-revision-{island}), then falls back to the default revision file
+/// (build-revision) for backwards compatibility.
 fn read_revision(base_path: &Path) -> Option<String> {
+    // Try island-specific revision file first
+    if let Some(island) = get_island_name() {
+        let island_path_str = ISLAND_REVISION_RELATIVE_PATH_PATTERN.replace("{}", &island);
+        let island_revision_path = base_path.join(&island_path_str);
+
+        match fs::read_to_string(&island_revision_path) {
+            Ok(contents) => return Some(contents.trim().to_string()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                // Fall through to default revision file
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => {
+                return Some("permission denied".to_string());
+            }
+            Err(error) => return Some(format!("error: {}", error)),
+        }
+    }
+
+    // Fall back to default revision file (backwards compatibility)
     let revision_path = base_path.join(REVISION_RELATIVE_PATH);
 
     match fs::read_to_string(&revision_path) {
@@ -362,11 +393,21 @@ pub fn normalize_domain(value: &str) -> Option<String> {
     }
 }
 
+/// Gets the island name from environment or returns None for default island.
+fn get_island_name() -> Option<String> {
+    env::var(ISLAND_OVERRIDE_ENV).ok().filter(|s| !s.is_empty())
+}
+
 /// Searches for a configuration file in standard locations.
 ///
 /// Checks the environment variable first, then falls back to searching
 /// system state paths for the configuration file.
+///
+/// If OGYGIA_ISLAND is set, searches for island-specific config first
+/// (config-{island}.toml), then falls back to the default config (config.toml)
+/// for backwards compatibility.
 fn locate_config_file() -> Option<PathBuf> {
+    // Check for explicit config override first
     if let Ok(path) = env::var(CONFIG_OVERRIDE_ENV) {
         let candidate = PathBuf::from(path);
         if candidate.exists() {
@@ -374,6 +415,18 @@ fn locate_config_file() -> Option<PathBuf> {
         }
     }
 
+    // Check for island-specific config
+    if let Some(island) = get_island_name() {
+        let island_config_path = ISLAND_CONFIG_RELATIVE_PATH_PATTERN.replace("{}", &island);
+        for state in &SYSTEM_STATE_DATA {
+            let candidate = Path::new(state.base_path).join(&island_config_path);
+            if candidate.exists() {
+                return Some(candidate);
+            }
+        }
+    }
+
+    // Fall back to default config (backwards compatibility)
     for state in &SYSTEM_STATE_DATA {
         let candidate = Path::new(state.base_path).join(CONFIG_RELATIVE_PATH);
         if candidate.exists() {
