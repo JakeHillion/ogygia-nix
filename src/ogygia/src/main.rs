@@ -18,6 +18,11 @@
 //!
 //! # Push store paths to irisd (requires irisd feature)
 //! nix build ... --print-out-paths | ogygia iris push --signing-key ./my-key
+//!
+//! # Manage Nebula certificates (requires nebula feature)
+//! ogygia nebula discover
+//! ogygia nebula status
+//! ogygia nebula rekey -a
 //! ```
 //!
 //! # Configuration
@@ -27,6 +32,8 @@
 
 #[cfg(feature = "irisd")]
 mod iris;
+#[cfg(feature = "nebula")]
+mod nebula;
 mod status;
 
 use std::process;
@@ -52,6 +59,9 @@ enum Command {
     /// Interact with irisd binary cache
     #[cfg(feature = "irisd")]
     Iris(iris::IrisArgs),
+    /// Manage Nebula overlay network certificates
+    #[cfg(feature = "nebula")]
+    Nebula(nebula::cli::NebulaArgs),
 }
 
 impl Command {
@@ -60,6 +70,8 @@ impl Command {
             Command::Status => status::show_status(),
             #[cfg(feature = "irisd")]
             Command::Iris(args) => args.run(),
+            #[cfg(feature = "nebula")]
+            Command::Nebula(args) => args.run(),
         }
     }
 }

@@ -25,6 +25,7 @@ in
     ./versions
     ./config
     ./irisd
+    ./nebula
   ];
 
   config = lib.mkIf cfg.enable {

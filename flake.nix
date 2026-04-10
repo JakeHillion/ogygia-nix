@@ -60,12 +60,17 @@
           inherit (craneLib.crateNameFromCargoToml { inherit src; }) version;
 
           fileSetForCrate = crate:
+            let
+              crateSources = craneLib.fileset.commonCargoSources crate;
+              nebulaSources = lib.fileset.maybeMissing ./src/ogygia/src/nebula;
+            in
             lib.fileset.toSource {
               root = ./.;
               fileset = lib.fileset.unions [
                 ./Cargo.toml
                 ./Cargo.lock
-                (craneLib.fileset.commonCargoSources crate)
+                crateSources
+                nebulaSources
               ];
             };
 

@@ -1216,11 +1216,14 @@ name = "ogygia"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "base64",
  "clap",
+ "hex",
  "hostname",
  "reqwest",
  "serde",
  "serde_json",
+ "sha2",
  "tokio",
  "toml",
  "tracing",
