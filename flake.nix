@@ -73,7 +73,7 @@
             inherit src;
             strictDeps = true;
             buildInputs = [ ];
-            nativeBuildInputs = [ ];
+            nativeBuildInputs = [ pkgs.protobuf ];
           };
 
           individualCrateArgs = commonArgs // {

@@ -6,8 +6,8 @@
 //! 1. **Local-only mode**: Shows revision information for the current host by
 //!    reading from standard NixOS system state paths.
 //!
-//! 2. **Fleet mode**: Connects to ZooKeeper to display revision information for
-//!    all hosts in the fleet that have published their state.
+//! 2. **Fleet mode**: Connects to etcd or ZooKeeper to display
+//!    revision information for all hosts in the fleet that have published their state.
 //!
 //! ## Architecture
 //!
@@ -16,7 +16,7 @@
 //! - **Booted**: The system that was booted (`/run/booted-system`)
 //! - **Next boot**: The system that will boot next (`/nix/var/nix/profiles/system`)
 //!
-//! In fleet mode, the CLI fetches equivalent data from ZooKeeper znodes under
+//! In fleet mode, the CLI fetches equivalent data from etcd keys under
 //! a configured namespace (default: `/nixos/versions/{hostname}/{state}`).
 //!
 //! ## Configuration
@@ -27,12 +27,12 @@
 //!
 //! ## Note on Write Side
 //!
-//! This module only **reads** from ZooKeeper. A separate publisher daemon
-//! (not included here) is responsible for writing host state to ZooKeeper.
+//! This module only **reads** from etcd/ZooKeeper. A separate publisher daemon
+//! (not included here) is responsible for writing host state.
 //!
 //! ## Module Organization
 //!
-//! - `state`: State gathering logic (filesystem, ZooKeeper, config loading)
+//! - `state`: State gathering logic (filesystem, etcd, ZooKeeper, config loading)
 //! - `display`: Rendering and formatting logic (tables, truncation, trimming)
 //! - `tests`: Unit tests for both state and display modules
 
@@ -47,6 +47,7 @@ use display::print_host_table;
 use state::HostMatcher;
 use state::collect_local_state;
 use state::detect_hostname;
+use state::fetch_etcd_state;
 use state::fetch_zookeeper_state;
 use state::load_cli_config;
 use tracing::info;
@@ -58,10 +59,10 @@ use tracing::warn;
 /// 1. Loading configuration (if available)
 /// 2. Detecting the local hostname
 /// 3. Collecting local system state
-/// 4. Optionally fetching fleet state from ZooKeeper
+/// 4. Optionally fetching fleet state from etcd or ZooKeeper
 /// 5. Rendering the status table
 ///
-/// If ZooKeeper is not configured or connection fails, gracefully falls back
+/// If no backend is configured or connection fails, gracefully falls back
 /// to displaying only local host data.
 pub fn show_status() -> Result<()> {
     let cli_config = load_cli_config()?;
@@ -75,7 +76,38 @@ pub fn show_status() -> Result<()> {
 
     match cli_config.as_ref() {
         Some(cli_config) => {
-            if let Some(zookeeper) = cli_config.zookeeper.as_ref() {
+            // Prefer etcd, fallback to ZooKeeper (deprecated)
+            if let Some(etcd) = cli_config.etcd.as_ref() {
+                info!(
+                    namespace = %etcd.namespace,
+                    config = %cli_config.path.display(),
+                    "etcd fleet state"
+                );
+
+                // Create tokio runtime for async etcd operations
+                let rt = tokio::runtime::Runtime::new()?;
+                match rt.block_on(fetch_etcd_state(etcd, Some(&host_matcher))) {
+                    Ok(remote_states) => {
+                        // Combine local and remote states
+                        let mut all_states = vec![local_state];
+                        all_states.extend(remote_states);
+
+                        if all_states.len() == 1 {
+                            info!("only the local host is currently registered in etcd");
+                        }
+
+                        print_host_table(&all_states, domain_suffix);
+                    }
+                    Err(error) => {
+                        warn!(
+                            config = %cli_config.path.display(),
+                            %error,
+                            "failed to read etcd, showing local data only"
+                        );
+                        print_host_table(&[local_state], domain_suffix);
+                    }
+                }
+            } else if let Some(zookeeper) = cli_config.zookeeper.as_ref() {
                 info!(
                     namespace = %zookeeper.namespace,
                     config = %cli_config.path.display(),
@@ -106,7 +138,7 @@ pub fn show_status() -> Result<()> {
             } else {
                 info!(
                     config = %cli_config.path.display(),
-                    "ZooKeeper settings not found, showing local data only"
+                    "etcd/ZooKeeper settings not found, showing local data only"
                 );
                 print_host_table(&[local_state], domain_suffix);
             }

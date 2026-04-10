@@ -6,6 +6,7 @@ use super::state::HostMatcher;
 use super::state::HostState;
 use super::state::STATE_COUNT;
 use super::state::empty_state_values;
+use super::state::join_etcd_path;
 use super::state::join_zk_path;
 use super::state::normalize_domain;
 use super::state::normalize_namespace;
@@ -95,6 +96,41 @@ fn test_join_zk_path_root_prefix() {
 #[test]
 fn test_join_zk_path_multi_level() {
     assert_eq!(join_zk_path("/a/b/c", "d/e"), "/a/b/c/d/e");
+}
+
+// ============================================================================
+// etcd path manipulation tests
+// ============================================================================
+
+#[test]
+fn test_join_etcd_path_normal() {
+    assert_eq!(join_etcd_path("/foo", "bar"), "/foo/bar");
+}
+
+#[test]
+fn test_join_etcd_path_with_trailing_slash() {
+    assert_eq!(join_etcd_path("/foo/", "bar"), "/foo/bar");
+}
+
+#[test]
+fn test_join_etcd_path_with_leading_slash() {
+    assert_eq!(join_etcd_path("/foo", "/bar"), "/foo/bar");
+}
+
+#[test]
+fn test_join_etcd_path_both_slashes() {
+    assert_eq!(join_etcd_path("/foo/", "/bar"), "/foo/bar");
+}
+
+#[test]
+fn test_join_etcd_path_root_prefix() {
+    assert_eq!(join_etcd_path("/", "bar"), "/bar");
+    assert_eq!(join_etcd_path("/", "/bar"), "/bar");
+}
+
+#[test]
+fn test_join_etcd_path_multi_level() {
+    assert_eq!(join_etcd_path("/a/b/c", "d/e"), "/a/b/c/d/e");
 }
 
 // ============================================================================

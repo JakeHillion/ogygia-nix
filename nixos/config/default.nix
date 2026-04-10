@@ -2,30 +2,7 @@
 
 let
   cfg = config.ogygia;
-  cliCfg = cfg.cliConfig;
   zkCfg = cfg.zookeeper;
-
-  tomlFormat = pkgs.formats.toml { };
-
-  configData =
-    {
-      ogygia =
-        { domain = cfg.domain; } //
-        (lib.optionalAttrs zkCfg.enable {
-          zookeeper = {
-            endpoints = zkCfg.endpoints;
-            namespace = zkCfg.namespace;
-            timeout_seconds = zkCfg.timeoutSeconds;
-          };
-        });
-    };
-
-  generatedToml = tomlFormat.generate "config.toml" configData;
-
-  configPackage = pkgs.runCommand "share-ogygia-config" { } ''
-    mkdir -p $out/share/ogygia
-    cp ${generatedToml} $out/share/ogygia/config.toml
-  '';
 in
 {
   options.ogygia.cliConfig = {
@@ -65,19 +42,12 @@ in
     };
   };
 
-  config = lib.mkIf (cfg.enable && cliCfg.enable) {
+  config = lib.mkIf (cfg.enable && cfg.cliConfig.enable && zkCfg.enable) {
     assertions = lib.optionals zkCfg.enable [
       {
         assertion = zkCfg.endpoints != [ ];
         message = "ogygia.zookeeper.endpoints must not be empty when ZooKeeper integration is enabled.";
       }
     ];
-
-    ogygia.cliConfig.package = configPackage;
-
-    environment = {
-      systemPackages = [ configPackage ];
-      pathsToLink = [ "/share/ogygia" ];
-    };
   };
 }
