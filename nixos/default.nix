@@ -24,6 +24,8 @@ in
   imports = [
     ./versions
     ./config
+    ./config-generator
+    ./etcd
     ./irisd
   ];
 

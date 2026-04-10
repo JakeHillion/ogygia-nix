@@ -42,6 +42,7 @@ Ogygia extracts these battle-tested patterns into standalone, reusable component
 
 - **📝 Configuration Revision Tracking**: Automatically embed Git revision information into your NixOS system closure
 - **🔍 System Status Inspection**: CLI tool to view build revisions across different system states
+- **🌐 Fleet Visibility**: Query etcd to see build revisions across all hosts in your infrastructure
 - **⚙️ NixOS Module Integration**: Easy integration into existing NixOS configurations via flake
 - **📦 Cachix Support**: Pre-built binaries available via Cachix for faster installations
 - **🦀 Built with Rust**: Fast, reliable CLI written in Rust using Clap
@@ -119,12 +120,12 @@ Host      ⚡ current    🥾 booted      🔜 next boot
 hostname  a1b2c3d4e5f6  a1b2c3d4e5f6  g7h8i9j0k1l2
 ```
 
-#### Fleet Mode with ZooKeeper
+#### Fleet Mode with etcd
 
-When ZooKeeper is configured, the status command shows all hosts in your fleet:
+When etcd is configured, the status command shows all hosts in your fleet:
 
 ```
-ZooKeeper fleet state (/nixos/versions via /run/current-system/sw/share/ogygia/config.toml):
+etcd fleet state (/nixos/versions via /run/current-system/sw/share/ogygia/config.toml):
 Host              ⚡ current    🥾 booted      🔜 next boot
 ------------------------------------------------------------
 * web01.dc1 (local) a1b2c3d4e5f6  a1b2c3d4e5f6  g7h8i9j0k1l2
@@ -139,27 +140,27 @@ The status command shows:
 - **`*` marker**: Indicates the local host
 - **unknown**: Indicates the revision file is missing or the state hasn't been published yet
 
-### ZooKeeper Fleet Visibility
+### etcd Fleet Visibility
 
-Ogygia can connect to ZooKeeper to provide fleet-wide visibility of system build revisions. This allows you to see the current, booted, and next boot revisions for all hosts in your infrastructure from any machine.
+Ogygia can connect to etcd to provide fleet-wide visibility of system build revisions. This allows you to see the current, booted, and next boot revisions for all hosts in your infrastructure from any machine.
 
 #### Configuration
 
-To enable ZooKeeper integration, add the following to your NixOS configuration:
+To enable etcd integration, add the following to your NixOS configuration:
 
 ```nix
 {
   ogygia = {
     enable = true;
     domain = "example.com";  # Optional: base domain suffix to trim from hostnames in display
-    zookeeper = {
+    etcd = {
       enable = true;
       endpoints = [
-        "zk1.internal:2181"
-        "zk2.internal:2181"
-        "zk3.internal:2181"
+        "http://etcd1.internal:2379"
+        "http://etcd2.internal:2379"
+        "http://etcd3.internal:2379"
       ];
-      namespace = "/nixos/versions";  # Optional: ZooKeeper path prefix (default shown)
+      namespace = "/nixos/versions";  # Optional: etcd key prefix (default shown)
       timeoutSeconds = 10;            # Optional: connection timeout (default: 10)
     };
   };
@@ -172,8 +173,8 @@ This generates a configuration file at `/run/current-system/sw/share/ogygia/conf
 [ogygia]
 domain = "example.com"
 
-[ogygia.zookeeper]
-endpoints = ["zk1.internal:2181", "zk2.internal:2181", "zk3.internal:2181"]
+[ogygia.etcd]
+endpoints = ["http://etcd1.internal:2379", "http://etcd2.internal:2379", "http://etcd3.internal:2379"]
 namespace = "/nixos/versions"
 timeout_seconds = 10
 ```
@@ -192,11 +193,11 @@ You can override the CLI behavior with environment variables:
   OGYGIA_HOSTNAME=web01.example.com ogygia status
   ```
 
-#### ZooKeeper Data Structure
+#### etcd Data Structure
 
-**Note:** This implementation is read-only. To populate ZooKeeper with host data, you need a separate publisher daemon (not included in this feature). The publisher would monitor system state changes and write revision data to the znodes described below.
+**Note:** This implementation is read-only. To populate etcd with host data, you need a separate publisher daemon (not included in this feature). The publisher would monitor system state changes and write revision data to the keys described below.
 
-Ogygia expects data in ZooKeeper under the configured namespace with the following structure:
+Ogygia expects data in etcd under the configured namespace with the following structure:
 
 ```
 /nixos/versions/          # namespace (configurable)
@@ -218,28 +219,64 @@ Ogygia expects data in ZooKeeper under the configured namespace with the followi
 
 **Connection Failures**
 
-If the CLI cannot connect to ZooKeeper, it will display an error and fall back to local-only mode:
+If the CLI cannot connect to etcd, it will display an error and fall back to local-only mode:
 
 ```
-ZooKeeper fleet state (/nixos/versions via /run/current-system/sw/share/ogygia/config.toml):
-Failed to read ZooKeeper from /run/current-system/sw/share/ogygia/config.toml: failed to connect to ZooKeeper at zk1:2181,zk2:2181. Check that the endpoints are reachable and the ZooKeeper service is running. Connection timeout: 10s. Showing local data only.
+etcd fleet state (/nixos/versions via /run/current-system/sw/share/ogygia/config.toml):
+Failed to read etcd from /run/current-system/sw/share/ogygia/config.toml: failed to connect to etcd at ["http://etcd1:2379"]. Check that the endpoints are reachable and the etcd service is running. Connection timeout: 10s. Showing local data only.
 Host           ⚡ current    🥾 booted      🔜 next boot
 -------------------------------------------------------
 * web01 (local) a1b2c3d4e5f6  a1b2c3d4e5f6  g7h8i9j0k1l2
 ```
 
 **Common Issues:**
-- **ZooKeeper not running**: Ensure the ZooKeeper service is running on the configured endpoints
-- **Network connectivity**: Verify the host can reach the ZooKeeper endpoints (check firewall rules)
-- **Namespace doesn't exist**: This is normal before the publisher daemon creates the znodes
-- **Permission denied**: Check ZooKeeper ACLs if authentication is enabled
+- **etcd not running**: Ensure the etcd service is running on the configured endpoints
+- **Network connectivity**: Verify the host can reach the etcd endpoints (check firewall rules)
+- **Namespace doesn't exist**: This is normal before the publisher daemon creates the keys
+- **Permission denied**: Check etcd ACLs if authentication is enabled
 
 **"unknown" Revisions**
 
 The status display shows "unknown" in these cases:
 - The build revision file doesn't exist (system not built with Ogygia enabled)
-- The ZooKeeper znode is missing (publisher hasn't written data yet)
+- The etcd key is missing (publisher hasn't written data yet)
 - The system state path doesn't exist yet (e.g., before first reboot)
+
+### ZooKeeper Fleet Visibility
+
+Ogygia can also connect to ZooKeeper to provide fleet-wide visibility. The status command will prefer etcd if both are configured.
+
+#### Configuration
+
+```nix
+{
+  ogygia = {
+    enable = true;
+    domain = "example.com";
+    zookeeper = {
+      enable = true;
+      endpoints = [
+        "zk1.internal:2181"
+        "zk2.internal:2181"
+        "zk3.internal:2181"
+      ];
+      namespace = "/nixos/versions";
+      timeoutSeconds = 10;
+    };
+  };
+}
+```
+
+#### ZooKeeper Data Structure
+
+Same structure as etcd:
+```
+/nixos/versions/
+├── web01/
+│   ├── current
+│   ├── booted
+│   └── nextboot
+```
 
 **Hostname Detection Issues**
 
