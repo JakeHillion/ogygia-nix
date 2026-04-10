@@ -26,6 +26,7 @@ jobs:
       with:
         extra_nix_config: |
           accept-flake-config = true
+          max-jobs = 2
 
     - name: Enter CI devShell
       uses: nicknovitski/nix-develop@9be7cfb4b10451d3390a75dc18ad0465bed4932a # v1
