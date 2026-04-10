@@ -34,7 +34,7 @@ jobs:
         arguments: .#ci
 
     - name: Build all outputs
-      run: nix-fast-build --no-nom --skip-cached --flake '.#ci'
+      run: nix-fast-build --no-nom --skip-cached --flake '.#ci' -j 2 --eval-workers 4
 
     - name: Flake check
       run: nix flake check
