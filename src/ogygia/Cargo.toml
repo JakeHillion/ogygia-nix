@@ -5,12 +5,18 @@ edition = "2021"
 license.workspace = true
 
 [features]
-default = ["irisd"]
+default = ["irisd", "nebula"]
 irisd = [
     "dep:reqwest",
     "dep:tokio",
     "dep:serde_json",
     "dep:which",
+]
+nebula = [
+    "dep:base64",
+    "dep:sha2",
+    "dep:hex",
+    "dep:serde_json",
 ]
 
 [dependencies]
@@ -28,3 +34,8 @@ reqwest = { workspace = true, features = ["json"], optional = true }
 tokio = { workspace = true, optional = true }
 serde_json = { workspace = true, optional = true }
 which = { workspace = true, optional = true }
+
+# Optional deps for nebula feature
+base64 = { workspace = true, optional = true }
+sha2 = { workspace = true, optional = true }
+hex = { workspace = true, optional = true }
