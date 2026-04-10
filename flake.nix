@@ -3,10 +3,10 @@
 
   nixConfig = {
     extra-substituters = [
-      "https://ogygia.cachix.org"
+      "https://nixcache.jakehillion.me"
     ];
     extra-trusted-public-keys = [
-      "ogygia.cachix.org-1:xb4bnMPeWgSP81Xs0Vl7ZU4Ez7Ul65qp/EoZ40pDaWo="
+      "nixcache.jakehillion.me-1:HQsjYdrcs3ilS/ngtlbTQXU4Xfsm+va5NN7yoK0wKMg="
     ];
   };
 
@@ -24,9 +24,12 @@
 
     advisory-db.url = "github:rustsec/advisory-db";
     advisory-db.flake = false;
+
+    nix-fast-build.url = "github:Mic92/nix-fast-build";
+    nix-fast-build.inputs.nixpkgs.follows = "nixpkgs";
   };
 
-  outputs = { self, nixpkgs, flake-utils, treefmt-nix, fenix, crane, advisory-db }:
+  outputs = { self, nixpkgs, flake-utils, treefmt-nix, fenix, crane, advisory-db, nix-fast-build }:
     flake-utils.lib.eachSystem [ "aarch64-linux" "x86_64-linux" ]
       (system:
         let
@@ -114,6 +117,13 @@
             ];
           };
 
+          devShells.ci = pkgs.mkShell {
+            packages = [
+              pkgs.jq
+              nix-fast-build.packages.${system}.nix-fast-build
+            ];
+          };
+
           formatter = treefmtEval.config.build.wrapper;
 
           checks = {
@@ -171,5 +181,11 @@
         imports = [ ./nixos ];
         _module.args.ogygia-irisd = self.packages.${pkgs.system}.ogygia-irisd;
       };
+
+      ci = nixpkgs.lib.genAttrs [ "aarch64-linux" "x86_64-linux" ] (system:
+        (self.packages.${system} or { })
+        // (self.checks.${system} or { })
+        // (self.devShells.${system} or { })
+      );
     };
 }
