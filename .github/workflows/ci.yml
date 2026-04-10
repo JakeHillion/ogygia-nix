@@ -9,6 +9,7 @@ on:
 jobs:
   nix:
     strategy:
+      fail-fast: false
       matrix:
         os:
           - ubuntu-24.04
@@ -22,34 +23,39 @@ jobs:
 
     - name: Install Nix
       uses: cachix/install-nix-action@fd24c48048070c1be9acd18c9d369a83f0fe94d7 # v31
-
-    - name: Setup Cachix
-      uses: cachix/cachix-action@3ba601ff5bbb07c7220846facfa2cd81eeee15a1 # v16
       with:
-        name: ogygia
-        authToken: '${{ secrets.CACHIX_AUTH_TOKEN }}'
+        extra_nix_config: |
+          accept-flake-config = true
+
+    - name: Enter CI devShell
+      uses: nicknovitski/nix-develop@9be7cfb4b10451d3390a75dc18ad0465bed4932a # v1
+      with:
+        arguments: .#ci
 
     - name: Build all outputs
-      run: |
-        # Get current system using Nix
-        SYSTEM=$(nix-instantiate --eval -E builtins.currentSystem | tr -d '"')
-        
-        echo "Building for system: $SYSTEM"
-        
-        echo "Discovering all buildable outputs..."
-        buildable_outputs=$(nix flake show --json | jq -r --arg system "$SYSTEM" '
-          [
-            (.packages[$system] // {} | to_entries[] | ".#packages." + $system + "." + .key),
-            (.checks[$system] // {} | to_entries[] | ".#checks." + $system + "." + .key),
-            (.devShells[$system] // {} | to_entries[] | ".#devShells." + $system + "." + .key)
-          ] | .[]
-        ')
-        
-        echo "Found buildable outputs:"
-        echo "$buildable_outputs"
-        
-        echo "Building all outputs..."
-        echo "$buildable_outputs" | xargs nix build
+      run: nix-fast-build --no-nom --skip-cached --flake '.#ci'
 
     - name: Flake check
       run: nix flake check
+
+    - name: Sign and push to R2
+      if: always()
+      run: |
+        if [ -z "$SIGNING_KEY" ]; then
+          echo "No signing key available; skipping sign+push."
+          exit 0
+        fi
+        echo "$SIGNING_KEY" > /tmp/nix-signing-key
+        trap 'rm -f /tmp/nix-signing-key' EXIT
+        paths=$(nix path-info --all --json \
+          | jq -r 'to_entries[] | select(.value.ultimate == true) | .key')
+        if [ -z "$paths" ]; then
+          echo "No ultimate paths to sign; skipping."
+          exit 0
+        fi
+        echo "$paths" | xargs nix store sign --key-file /tmp/nix-signing-key
+        echo "$paths" | xargs nix copy --to 's3://jakehillion-nix?endpoint=https://28e45df51086264c6d9cf2b5e6ecc190.r2.cloudflarestorage.com&region=auto'
+      env:
+        SIGNING_KEY: ${{ secrets.NIX_SIGNING_KEY }}
+        AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+        AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
