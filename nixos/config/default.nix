@@ -26,28 +26,50 @@ in
       description = ''
         List of ZooKeeper endpoints in <host>:<port> form that publish host state
         information. The CLI uses these endpoints to read global status data.
+
+        :::{.warning}
+        ZooKeeper support is deprecated and will be removed in a future version.
+        Please migrate to etcd, which is more actively supported and will receive all future features.
+        :::
       '';
     };
 
     namespace = lib.mkOption {
       type = lib.types.str;
       default = "/nixos/versions";
-      description = "ZooKeeper znode prefix that contains host state information.";
+      description = ''
+        ZooKeeper znode prefix that contains host state information.
+
+        :::{.warning}
+        ZooKeeper support is deprecated and will be removed in a future version.
+        Please migrate to etcd, which is more actively supported and will receive all future features.
+        :::
+      '';
     };
 
     timeoutSeconds = lib.mkOption {
       type = lib.types.int;
       default = 10;
-      description = "Connection timeout used by the Ogygia CLI when contacting ZooKeeper.";
+      description = ''
+        Connection timeout used by the Ogygia CLI when contacting ZooKeeper.
+
+        :::{.warning}
+        ZooKeeper support is deprecated and will be removed in a future version.
+        Please migrate to etcd, which is more actively supported and will receive all future features.
+        :::
+      '';
     };
   };
 
-  config = lib.mkIf (cfg.enable && cfg.cliConfig.enable && zkCfg.enable) {
-    assertions = lib.optionals zkCfg.enable [
+  config = lib.mkIf (cfg.enable && cfg.cliConfig.enable && zkCfg.enable)
+    (lib.warn
+      "ogygia: ZooKeeper support is deprecated and will be removed in a future version. Please migrate to etcd, which is more actively supported and will receive all future features."
       {
-        assertion = zkCfg.endpoints != [ ];
-        message = "ogygia.zookeeper.endpoints must not be empty when ZooKeeper integration is enabled.";
-      }
-    ];
-  };
+        assertions = lib.optionals zkCfg.enable [
+          {
+            assertion = zkCfg.endpoints != [ ];
+            message = "ogygia.zookeeper.endpoints must not be empty when ZooKeeper integration is enabled.";
+          }
+        ];
+      });
 }
