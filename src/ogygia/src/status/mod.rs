@@ -108,6 +108,10 @@ pub fn show_status() -> Result<()> {
                     }
                 }
             } else if let Some(zookeeper) = cli_config.zookeeper.as_ref() {
+                warn!(
+                    "ZooKeeper support is deprecated and will be removed in a future version. \
+                     Please migrate to etcd, which is more actively supported and will receive all future features."
+                );
                 info!(
                     namespace = %zookeeper.namespace,
                     config = %cli_config.path.display(),
