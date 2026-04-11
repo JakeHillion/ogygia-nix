@@ -7,10 +7,11 @@ let
   tomlFormat = pkgs.formats.toml { };
 
   # Build config data from all enabled backends
+  etcdEnabled = cfg.etcd.endpoints != [ ];
   configData = {
     ogygia = {
       domain = cfg.domain;
-    } // lib.optionalAttrs cfg.etcd.enable {
+    } // lib.optionalAttrs etcdEnabled {
       etcd = {
         endpoints = cfg.etcd.endpoints;
         namespace = cfg.etcd.namespace;
@@ -34,7 +35,7 @@ let
 in
 {
   # This module provides the shared config package that all backends contribute to
-  config = lib.mkIf (cfg.enable && cliCfg.enable && (cfg.etcd.enable || cfg.zookeeper.enable)) {
+  config = lib.mkIf (cfg.enable && cliCfg.enable && (etcdEnabled || cfg.zookeeper.enable)) {
     ogygia.cliConfig.package = configPackage;
 
     environment = {

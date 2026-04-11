@@ -154,7 +154,6 @@ To enable etcd integration, add the following to your NixOS configuration:
     enable = true;
     domain = "example.com";  # Optional: base domain suffix to trim from hostnames in display
     etcd = {
-      enable = true;
       endpoints = [
         "http://etcd1.internal:2379"
         "http://etcd2.internal:2379"

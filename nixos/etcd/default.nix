@@ -3,10 +3,21 @@
 let
   cfg = config.ogygia;
   etcdCfg = cfg.etcd;
+  etcdEnabled = etcdCfg.endpoints != [ ];
 in
 {
   options.ogygia.etcd = {
-    enable = lib.mkEnableOption "etcd configuration rendering for Ogygia tooling";
+    enable = lib.mkOption {
+      type = lib.types.nullOr lib.types.bool;
+      default = null;
+      description = ''
+        DEPRECATED: This option is deprecated and will be removed in a future release.
+        etcd integration is now automatically enabled when endpoints are provided.
+
+        Previously enabled etcd configuration rendering for Ogygia tooling.
+        This option no longer has any effect - endpoints alone determine enablement.
+      '';
+    };
 
     endpoints = lib.mkOption {
       type = with lib.types; listOf str;
@@ -15,6 +26,7 @@ in
       description = ''
         List of etcd endpoints in URL form that publish host state
         information. The CLI uses these endpoints to read global status data.
+        etcd integration is automatically enabled when this list is non-empty.
       '';
     };
 
@@ -42,12 +54,21 @@ in
     };
   };
 
-  config = lib.mkIf (cfg.enable && cfg.cliConfig.enable && etcdCfg.enable) {
-    assertions = [
-      {
-        assertion = etcdCfg.endpoints != [ ];
-        message = "ogygia.etcd.endpoints must not be empty when etcd integration is enabled.";
-      }
-    ];
-  };
+  config = lib.mkMerge [
+    {
+      warnings = lib.optionals (etcdCfg.enable != null) [
+        "ogygia.etcd.enable is deprecated and will be removed in a future release. etcd integration is now automatically enabled when endpoints are provided. Remove the 'enable' option from your configuration."
+      ];
+    }
+    (lib.mkIf (cfg.enable && cfg.cliConfig.enable && etcdEnabled) {
+      assertions = [
+        {
+          # etcdEnabled already checks endpoints != [], so this assertion
+          # is effectively redundant now but kept for clarity
+          assertion = etcdEnabled;
+          message = "ogygia.etcd.endpoints must not be empty when etcd integration is enabled.";
+        }
+      ];
+    })
+  ];
 }
