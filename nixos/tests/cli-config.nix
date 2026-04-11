@@ -1,7 +1,7 @@
 { pkgs, lib, ogygiaModule }:
 
 let
-  # Test etcd only configuration
+  # Test etcd only configuration (using new pattern without deprecated enable)
   etcdOnlySystem = lib.nixosSystem {
     modules = [
       { nixpkgs.hostPlatform = pkgs.stdenv.hostPlatform.system; }
@@ -10,7 +10,6 @@ let
         ogygia.enable = true;
         ogygia.domain = "neb.test";
         ogygia.etcd = {
-          enable = true;
           endpoints = [ "http://etcd1.internal:2379" "http://etcd2.internal:2379" ];
           namespace = "/cluster/nixos";
           timeoutSeconds = 42;
@@ -52,7 +51,6 @@ let
         ogygia.enable = true;
         ogygia.domain = "neb.test";
         ogygia.etcd = {
-          enable = true;
           endpoints = [ "http://etcd1.internal:2379" "http://etcd2.internal:2379" ];
           namespace = "/cluster/nixos";
           timeoutSeconds = 42;
@@ -62,6 +60,22 @@ let
           endpoints = [ "zk1.internal:2181" "zk2.internal:2181" ];
           namespace = "/cluster/nixos";
           timeoutSeconds = 42;
+        };
+      }
+    ];
+  };
+
+  # Test deprecation warning with legacy enable flag
+  etcdWithDeprecatedEnable = lib.nixosSystem {
+    modules = [
+      { nixpkgs.hostPlatform = pkgs.stdenv.hostPlatform.system; }
+      ogygiaModule
+      {
+        ogygia.enable = true;
+        ogygia.domain = "neb.test";
+        ogygia.etcd = {
+          enable = true;
+          endpoints = [ "http://etcd1.internal:2379" ];
         };
       }
     ];
@@ -128,6 +142,22 @@ pkgs.runCommand "ogygia-cli-config"
   assert zk["namespace"] == "/cluster/nixos", zk["namespace"]
   assert zk["timeout_seconds"] == 42, zk["timeout_seconds"]
   PY
+
+    # Test deprecation warning is emitted when enable is used
+    deprecatedConf="${etcdWithDeprecatedEnable.config.ogygia.cliConfig.package}/share/ogygia/config.toml"
+    python3 - <<'PY'
+  import tomllib
+  from pathlib import Path
+  conf = Path("${etcdWithDeprecatedEnable.config.ogygia.cliConfig.package}/share/ogygia/config.toml")
+  data = tomllib.loads(conf.read_text())
+  og = data["ogygia"]
+  # Config should still work with deprecated enable flag
+  etcd = og["etcd"]
+  assert etcd["endpoints"] == ["http://etcd1.internal:2379"], etcd["endpoints"]
+  PY
+
+    # Verify deprecation warning is emitted
+    ${lib.concatMapStringsSep "\n    " (w: "echo 'Warning:' ${lib.escapeShellArg w}") etcdWithDeprecatedEnable.config.warnings}
 
     mkdir -p $out
     cp "$etcdConf" "$out/config-etcd.toml"
