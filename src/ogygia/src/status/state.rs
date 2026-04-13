@@ -298,10 +298,10 @@ pub async fn fetch_etcd_state(
         if let Some(relative_path) = key.strip_prefix(&config.namespace) {
             let relative_path = relative_path.trim_start_matches('/');
             let host = relative_path.split('/').next().map(String::from);
-            if let Some(host) = host {
-                if !hosts.contains(&host) {
-                    hosts.push(host);
-                }
+            if let Some(host) = host
+                && !hosts.contains(&host)
+            {
+                hosts.push(host);
             }
         }
     }
@@ -322,10 +322,10 @@ pub async fn fetch_etcd_state(
             let key = join_etcd_path(&host_prefix, state.key_name);
             match client.get(key.as_str(), None).await {
                 Ok(response) => {
-                    if let Some(kv) = response.kvs().first() {
-                        if let Some(value) = parse_etcd_value(kv.value()) {
-                            values[idx] = Some(value);
-                        }
+                    if let Some(kv) = response.kvs().first()
+                        && let Some(value) = parse_etcd_value(kv.value())
+                    {
+                        values[idx] = Some(value);
                     }
                 }
                 Err(e) => {

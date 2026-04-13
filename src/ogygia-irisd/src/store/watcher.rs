@@ -73,15 +73,16 @@ impl StoreWatcher {
                 event = rx.recv() => {
                     let Some(event) = event else { break };
                     for path in event.paths {
-                        if let Some(store_path) = path.to_str() {
-                            if store_path.starts_with("/nix/store/") && store_path.len() > 44 {
-                                match event.kind {
-                                    EventKind::Create(_) => {
-                                        self.process_create(store_path).await;
-                                    }
-                                    EventKind::Remove(_) => self.process_remove(store_path),
-                                    _ => {}
+                        if let Some(store_path) = path.to_str()
+                            && store_path.starts_with("/nix/store/")
+                            && store_path.len() > 44
+                        {
+                            match event.kind {
+                                EventKind::Create(_) => {
+                                    self.process_create(store_path).await;
                                 }
+                                EventKind::Remove(_) => self.process_remove(store_path),
+                                _ => {}
                             }
                         }
                     }

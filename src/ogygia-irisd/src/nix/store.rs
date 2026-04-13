@@ -182,10 +182,11 @@ pub async fn find_store_path(hash: &str) -> Option<PathBuf> {
     let mut read_dir = tokio::fs::read_dir(store_dir).await.ok()?;
 
     while let Ok(Some(entry)) = read_dir.next_entry().await {
-        if let Some(name) = entry.file_name().to_str() {
-            if name.starts_with(&pattern) && !name.ends_with(".lock") {
-                return Some(store_dir.join(name));
-            }
+        if let Some(name) = entry.file_name().to_str()
+            && name.starts_with(&pattern)
+            && !name.ends_with(".lock")
+        {
+            return Some(store_dir.join(name));
         }
     }
 
