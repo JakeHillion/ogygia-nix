@@ -1,0 +1,44 @@
+[package]
+name = "ogygia-dashboard"
+version.workspace = true
+edition = "2024"
+license.workspace = true
+
+[dependencies]
+# CLI
+clap = { workspace = true }
+anyhow = { workspace = true }
+
+# Async runtime
+tokio = { workspace = true }
+
+# HTTP server
+axum = { workspace = true }
+tower = { workspace = true }
+tower-http = { workspace = true }
+hyper = { workspace = true }
+hyper-util = { workspace = true }
+
+# HTTP client
+reqwest = { workspace = true }
+
+# etcd client
+etcd-client = { workspace = true }
+
+# Serialization
+serde = { workspace = true }
+serde_json = { workspace = true }
+toml = { workspace = true }
+
+# Git
+git2 = { workspace = true }
+tempfile = { workspace = true }
+chrono = { workspace = true }
+
+# Enums
+strum = { workspace = true }
+enum-map = { workspace = true }
+
+# Logging
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }

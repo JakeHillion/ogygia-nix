@@ -13,6 +13,12 @@ in
       example = "island.example.com";
     };
 
+    gitRemoteUrl = lib.mkOption {
+      type = lib.types.str;
+      description = "Git remote URL for the NixOS configuration repository.";
+      example = "https://git.example.com/user/nixos.git";
+    };
+
     nebula.ipv4 = lib.mkOption {
       type = lib.types.nullOr lib.types.str;
       default = null;
@@ -28,6 +34,7 @@ in
     ./etcd
     ./irisd
     ./hostinfod
+    ./dashboard
   ];
 
   config = lib.mkIf cfg.enable {

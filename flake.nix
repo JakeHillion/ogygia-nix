@@ -75,8 +75,8 @@
           commonArgs = {
             inherit src;
             strictDeps = true;
-            buildInputs = [ ];
-            nativeBuildInputs = [ pkgs.protobuf ];
+            buildInputs = [ pkgs.openssl ];
+            nativeBuildInputs = [ pkgs.protobuf pkgs.pkg-config ];
           };
 
           individualCrateArgs = commonArgs // {
@@ -108,10 +108,19 @@
             src = fileSetForCrate ./src/ogygia-hostinfod;
           });
 
+          ogygia-dashboard = craneLib.buildPackage (individualCrateArgs // {
+            pname = "ogygia-dashboard";
+            cargoExtraArgs = "-p ogygia-dashboard";
+            src = fileSetForCrate ./src/ogygia-dashboard;
+            postInstall = ''
+              ${pkgs.patchelf}/bin/patchelf --set-rpath "${lib.makeLibraryPath [ pkgs.openssl ]}" $out/bin/ogygia-dashboard
+            '';
+          });
+
         in
         {
           packages = {
-            inherit ogygia ogygia-irisd ogygia-hostinfod;
+            inherit ogygia ogygia-irisd ogygia-hostinfod ogygia-dashboard;
             default = ogygia;
           };
 
@@ -133,7 +142,7 @@
           formatter = treefmtEval.config.build.wrapper;
 
           checks = {
-            inherit ogygia ogygia-irisd ogygia-hostinfod;
+            inherit ogygia ogygia-irisd ogygia-hostinfod ogygia-dashboard;
 
             ogygia-clippy = craneLib.cargoClippy (commonArgs // {
               inherit cargoArtifacts;
@@ -193,6 +202,7 @@
         imports = [ ./nixos ];
         _module.args.ogygia-irisd = self.packages.${pkgs.system}.ogygia-irisd;
         _module.args.ogygia-hostinfod = self.packages.${pkgs.system}.ogygia-hostinfod;
+        _module.args.ogygia-dashboard = self.packages.${pkgs.system}.ogygia-dashboard;
       };
 
       ci = nixpkgs.lib.genAttrs [ "aarch64-linux" "x86_64-linux" ] (system:
