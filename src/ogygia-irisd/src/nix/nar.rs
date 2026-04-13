@@ -25,7 +25,7 @@ const BUFFER_SIZE: usize = 64 * 1024; // 64KB
 /// on-the-fly.
 pub async fn generate_nar_stream(
     store_path: &Path,
-) -> Result<impl Stream<Item = Result<Bytes>> + Send> {
+) -> Result<impl Stream<Item = Result<Bytes>> + Send + use<>> {
     let mut child = Command::new("nix-store")
         .arg("--dump")
         .arg(store_path)
