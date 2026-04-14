@@ -55,6 +55,7 @@ in
 
       environment = {
         RUST_LOG = lib.mkDefault "info";
+        OGYGIA_HOSTNAME = config.networking.fqdn;
       };
     };
   };

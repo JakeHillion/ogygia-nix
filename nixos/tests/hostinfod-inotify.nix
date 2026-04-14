@@ -30,8 +30,9 @@ pkgs.testers.nixosTest {
       etcd.endpoints = [ "http://localhost:2379" ];
     };
 
-    # Set a custom hostname for predictable testing
+    # Set hostname and domain for predictable FQDN testing
     networking.hostName = "test-host";
+    networking.domain = "test.local";
   };
 
   testScript = ''
@@ -49,8 +50,8 @@ pkgs.testers.nixosTest {
     # Wait a moment for initial etcd write
     time.sleep(3)
     
-    # Check that initial values are in etcd
-    hostname = "test-host"
+    # Check that initial values are in etcd (using FQDN)
+    hostname = "test-host.test.local"
     
     # Test current system - should have a value (even if "unknown")
     result = machine.succeed("etcdctl get /ogygia/nixos/versions/{}/current --print-value-only".format(hostname))
