@@ -127,6 +127,7 @@
           devShells.default = craneLib.devShell {
             checks = self.checks.${system};
             packages = with pkgs; [
+              etcd # for etcdctl
               rust-analyzer
               treefmtEval.config.build.wrapper
             ];
