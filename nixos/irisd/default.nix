@@ -77,6 +77,12 @@ in
         - `cache.max_size_bytes` (int) — maximum total cache size
           in bytes. Default: 10737418240 (10 GiB). Set to 0 for
           unlimited.
+
+        - `cache.chunk_size_mb` (int) — chunk size in megabytes for
+          parallel peer downloads. Default: 4.
+
+        - `cache.escalation_delay_ms` (int) — milliseconds to wait
+          before escalating to multi-peer download. Default: 100.
       '';
     };
 

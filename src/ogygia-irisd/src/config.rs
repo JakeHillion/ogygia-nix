@@ -100,6 +100,12 @@ pub struct CacheConfig {
     /// Maximum total size in bytes of all cached NAR files (0 = unlimited)
     #[serde(default = "default_max_size_bytes")]
     pub max_size_bytes: u64,
+    /// Chunk size for parallel peer downloads in megabytes
+    #[serde(default = "default_chunk_size_mb")]
+    pub chunk_size_mb: u64,
+    /// Delay before escalating to multi-peer download (milliseconds)
+    #[serde(default = "default_escalation_delay_ms")]
+    pub escalation_delay_ms: u64,
 }
 
 fn default_cache_dir() -> PathBuf {
@@ -114,12 +120,22 @@ fn default_max_size_bytes() -> u64 {
     10 * 1024 * 1024 * 1024 // 10 GiB
 }
 
+fn default_chunk_size_mb() -> u64 {
+    4
+}
+
+fn default_escalation_delay_ms() -> u64 {
+    100
+}
+
 impl Default for CacheConfig {
     fn default() -> Self {
         Self {
             dir: default_cache_dir(),
             time_to_idle_secs: default_time_to_idle_secs(),
             max_size_bytes: default_max_size_bytes(),
+            chunk_size_mb: default_chunk_size_mb(),
+            escalation_delay_ms: default_escalation_delay_ms(),
         }
     }
 }
@@ -223,6 +239,8 @@ listen = ["127.0.0.1:35742"]
         );
         assert_eq!(config.cache.time_to_idle_secs, 3600);
         assert_eq!(config.cache.max_size_bytes, 10 * 1024 * 1024 * 1024);
+        assert_eq!(config.cache.chunk_size_mb, 4);
+        assert_eq!(config.cache.escalation_delay_ms, 100);
     }
 
     #[test]

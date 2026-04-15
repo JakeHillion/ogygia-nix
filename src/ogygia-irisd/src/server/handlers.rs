@@ -7,14 +7,18 @@ use axum::Json;
 use axum::body::Body;
 use axum::extract::Path;
 use axum::extract::State;
+use axum::http::HeaderMap;
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::response::Response;
 use serde::Deserialize;
 use serde::Serialize;
+use tokio::io::AsyncReadExt;
+use tokio::io::AsyncSeekExt;
 use tokio_util::io::ReaderStream;
 
 use super::AppState;
+use super::range::ByteRange;
 use crate::nix::cache::NarCache;
 use crate::nix::narinfo::NarInfo;
 use crate::nix::narinfo::nar_hash_to_hex;
@@ -164,35 +168,42 @@ async fn try_local_store_narinfo(hash: &str, nar_cache: &NarCache) -> Option<Nar
 /// Path format: `nar/{nar_hash}/{store_hash}-{name}.nar.zst`
 /// The NarHash in the URL makes requests self-describing so we don't need
 /// server-side state to match narinfo responses to NAR content.
-pub async fn get_nar(State(state): State<Arc<AppState>>, Path(path): Path<String>) -> Response {
-    let Some((nar_hash, hash)) = parse_nar_path(&path) else {
-        tracing::warn!("Invalid NAR path format: {}", path);
-        return (StatusCode::NOT_FOUND, "Not found").into_response();
-    };
-
-    let local = try_local_store_nar(hash, nar_hash, &state.nar_cache).await;
-    if local.status() != StatusCode::NOT_FOUND {
-        return local;
-    }
-
-    // Try peers via bloom lookup
-    state.try_peer_nar(hash, nar_hash).await
-}
-
-/// GET /local/nar/{path} — local-only NAR download (no peer fan-out)
-///
-/// Used by peers to fetch NARs from this node's local store without
-/// triggering cascading fan-out across the cluster.
-pub async fn get_local_nar(
+pub async fn get_nar(
     State(state): State<Arc<AppState>>,
     Path(path): Path<String>,
+    headers: HeaderMap,
 ) -> Response {
     let Some((nar_hash, hash)) = parse_nar_path(&path) else {
         tracing::warn!("Invalid NAR path format: {}", path);
         return (StatusCode::NOT_FOUND, "Not found").into_response();
     };
 
-    try_local_store_nar(hash, nar_hash, &state.nar_cache).await
+    // Try local first (cache-backed, range-capable)
+    let local = try_local_store_nar(hash, nar_hash, &state.nar_cache, &headers).await;
+    if local.status() != StatusCode::NOT_FOUND {
+        return local;
+    }
+
+    // Try peers via multi-peer downloader (not cached)
+    state.try_peer_nar(hash, nar_hash).await
+}
+
+/// GET /local/nar/{path} — local-only NAR download (no peer fan-out)
+///
+/// Used by peers to fetch NARs from this node's local store without
+/// triggering cascading fan-out across the cluster. Supports range
+/// requests for parallel chunk downloading.
+pub async fn get_local_nar(
+    State(state): State<Arc<AppState>>,
+    Path(path): Path<String>,
+    headers: HeaderMap,
+) -> Response {
+    let Some((nar_hash, hash)) = parse_nar_path(&path) else {
+        tracing::warn!("Invalid NAR path format: {}", path);
+        return (StatusCode::NOT_FOUND, "Not found").into_response();
+    };
+
+    try_local_store_nar(hash, nar_hash, &state.nar_cache, &headers).await
 }
 
 /// Parse a NAR path into `(nar_hash, store_hash)`.
@@ -205,10 +216,14 @@ fn parse_nar_path(path: &str) -> Option<(&str, &str)> {
 }
 
 /// Try to serve a NAR from the local store via the disk cache.
+///
+/// Generates the compressed NAR to cache on first access, then serves
+/// from cache with range request support.
 async fn try_local_store_nar(
     hash: &str,
     expected_nar_hash: &str,
     nar_cache: &NarCache,
+    headers: &HeaderMap,
 ) -> Response {
     let Some(store_path) = find_store_path(hash).await else {
         return (StatusCode::NOT_FOUND, "Not found").into_response();
@@ -250,17 +265,69 @@ async fn try_local_store_nar(
     };
 
     tracing::info!("Serving cached NAR for {}", store_path.display());
-    let body = Body::from_stream(ReaderStream::new(file));
-    let content_length = cached.file_size.to_string();
-    (
-        StatusCode::OK,
-        [
-            ("content-type", "application/zstd"),
-            ("content-length", content_length.as_str()),
-        ],
-        body,
-    )
-        .into_response()
+    serve_cached_nar(file, cached.file_size, headers).await
+}
+
+/// Serve a cached NAR file, supporting HTTP Range requests.
+async fn serve_cached_nar(
+    mut file: tokio::fs::File,
+    total_size: u64,
+    headers: &HeaderMap,
+) -> Response {
+    // Check for Range header
+    let range: Option<ByteRange> = headers
+        .get("range")
+        .and_then(|v| v.to_str().ok())
+        .and_then(ByteRange::parse);
+
+    if let Some(range) = range {
+        let Some((offset, length)) = range.resolve(total_size) else {
+            return (
+                StatusCode::RANGE_NOT_SATISFIABLE,
+                [("content-range", format!("bytes */{total_size}").as_str())],
+            )
+                .into_response();
+        };
+
+        if let Err(e) = file.seek(std::io::SeekFrom::Start(offset)).await {
+            tracing::error!("Failed to seek in cached NAR: {}", e);
+            return (StatusCode::INTERNAL_SERVER_ERROR, "Seek failed").into_response();
+        }
+
+        let limited = file.take(length);
+        let stream = ReaderStream::new(limited);
+        let body = Body::from_stream(stream);
+
+        let end = offset + length - 1;
+        let content_range = format!("bytes {offset}-{end}/{total_size}");
+
+        (
+            StatusCode::PARTIAL_CONTENT,
+            [
+                ("content-type", "application/zstd".to_string()),
+                ("content-length", length.to_string()),
+                ("content-range", content_range),
+                ("accept-ranges", "bytes".to_string()),
+            ],
+            body,
+        )
+            .into_response()
+    } else {
+        // Full file
+        let stream = ReaderStream::new(file);
+        let body = Body::from_stream(stream);
+
+        (
+            StatusCode::OK,
+            [
+                ("content-type", "application/zstd".to_string()),
+                ("content-length", total_size.to_string()),
+                ("accept-ranges", "bytes".to_string()),
+            ],
+            body,
+        )
+            .into_response()
+    }
 }
 
 /// Query parameters for GET /providers/{hash}
