@@ -7,11 +7,13 @@ use axum::Json;
 use axum::body::Body;
 use axum::extract::Path;
 use axum::extract::State;
+use axum::http::HeaderMap;
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::response::Response;
 use serde::Deserialize;
 use serde::Serialize;
+use tokio::io::AsyncReadExt;
 use tokio_util::io::ReaderStream;
 
 use super::AppState;
@@ -170,7 +172,7 @@ pub async fn get_nar(State(state): State<Arc<AppState>>, Path(path): Path<String
         return (StatusCode::NOT_FOUND, "Not found").into_response();
     };
 
-    let local = try_local_store_nar(hash, nar_hash, &state.nar_cache).await;
+    let local = try_local_store_nar(hash, nar_hash, &state.nar_cache, None).await;
     if local.status() != StatusCode::NOT_FOUND {
         return local;
     }
@@ -182,9 +184,11 @@ pub async fn get_nar(State(state): State<Arc<AppState>>, Path(path): Path<String
 /// GET /local/nar/{path} — local-only NAR download (no peer fan-out)
 ///
 /// Used by peers to fetch NARs from this node's local store without
-/// triggering cascading fan-out across the cluster.
+/// triggering cascading fan-out across the cluster. Supports `Range`
+/// requests for resumable downloads.
 pub async fn get_local_nar(
     State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
     Path(path): Path<String>,
 ) -> Response {
     let Some((nar_hash, hash)) = parse_nar_path(&path) else {
@@ -192,7 +196,8 @@ pub async fn get_local_nar(
         return (StatusCode::NOT_FOUND, "Not found").into_response();
     };
 
-    try_local_store_nar(hash, nar_hash, &state.nar_cache).await
+    let range = parse_byte_range(&headers);
+    try_local_store_nar(hash, nar_hash, &state.nar_cache, range).await
 }
 
 /// Parse a NAR path into `(nar_hash, store_hash)`.
@@ -204,11 +209,41 @@ fn parse_nar_path(path: &str) -> Option<(&str, &str)> {
     (hash.len() == 32).then_some((nar_hash, hash))
 }
 
+/// Parse a `Range` header into `(start, Option<end>)`.
+///
+/// Supports `bytes=start-` (open-ended) and `bytes=start-end` (closed).
+/// Multi-range (comma-separated) and suffix ranges (`bytes=-N`) return `None`.
+fn parse_byte_range(headers: &HeaderMap) -> Option<(u64, Option<u64>)> {
+    let value = headers.get("range")?.to_str().ok()?;
+    let suffix = value.strip_prefix("bytes=")?;
+    // Reject multi-range
+    if suffix.contains(',') {
+        return None;
+    }
+    let (start_str, end_str) = suffix.split_once('-')?;
+    // Reject suffix ranges (empty start)
+    if start_str.is_empty() {
+        return None;
+    }
+    let start = start_str.parse::<u64>().ok()?;
+    let end = if end_str.is_empty() {
+        None
+    } else {
+        Some(end_str.parse::<u64>().ok()?)
+    };
+    Some((start, end))
+}
+
 /// Try to serve a NAR from the local store via the disk cache.
+///
+/// When `range` is `Some`, returns a `206 Partial Content` response for
+/// the requested byte range. Supports open-ended `(start, None)` and
+/// closed `(start, Some(end))` ranges.
 async fn try_local_store_nar(
     hash: &str,
     expected_nar_hash: &str,
     nar_cache: &NarCache,
+    range: Option<(u64, Option<u64>)>,
 ) -> Response {
     let Some(store_path) = find_store_path(hash).await else {
         return (StatusCode::NOT_FOUND, "Not found").into_response();
@@ -237,7 +272,7 @@ async fn try_local_store_nar(
     }
 
     // Get from cache or generate, opening the file under the RwLock
-    let (cached, file) = match nar_cache.ensure_and_open(hash, &store_path).await {
+    let (cached, mut file) = match nar_cache.ensure_and_open(hash, &store_path).await {
         Ok((cached, Some(file))) => (cached, file),
         Ok((_, None)) => {
             tracing::debug!("Cached NAR for {} evicted during open", hash);
@@ -249,19 +284,68 @@ async fn try_local_store_nar(
         }
     };
 
-    tracing::info!("Serving cached NAR for {}", store_path.display());
-    let body = Body::from_stream(ReaderStream::new(file));
-    let content_length = cached.file_size.to_string();
-    (
-        StatusCode::OK,
-        [
-            ("content-type", "application/zstd"),
-            ("content-length", content_length.as_str()),
-            ("x-ogygia-nar-file-hash", cached.file_hash.as_str()),
-        ],
-        body,
-    )
-        .into_response()
+    let file_size = cached.file_size;
+
+    match range {
+        Some((start, end)) => {
+            // Clamp end to file boundary
+            let end = end.map(|e| e.min(file_size - 1)).unwrap_or(file_size - 1);
+
+            if start >= file_size || (end < start) {
+                let content_range = format!("bytes */{}", file_size);
+                return (
+                    StatusCode::RANGE_NOT_SATISFIABLE,
+                    [("content-range", content_range.as_str())],
+                )
+                    .into_response();
+            }
+
+            if start > 0 {
+                use tokio::io::AsyncSeekExt;
+                if let Err(e) = file.seek(std::io::SeekFrom::Start(start)).await {
+                    tracing::error!("Failed to seek to {} for {}: {}", start, hash, e);
+                    return (StatusCode::INTERNAL_SERVER_ERROR, "Seek failed").into_response();
+                }
+            }
+
+            let length = end - start + 1;
+            let body = Body::from_stream(ReaderStream::new(file.take(length)));
+            let content_length = length.to_string();
+            let content_range = format!("bytes {}-{}/{}", start, end, file_size);
+            tracing::info!(
+                "Serving cached NAR for {} (range {}-{})",
+                store_path.display(),
+                start,
+                end,
+            );
+            (
+                StatusCode::PARTIAL_CONTENT,
+                [
+                    ("content-type", "application/zstd"),
+                    ("content-length", content_length.as_str()),
+                    ("content-range", content_range.as_str()),
+                    ("x-ogygia-nar-file-hash", cached.file_hash.as_str()),
+                ],
+                body,
+            )
+                .into_response()
+        }
+        None => {
+            tracing::info!("Serving cached NAR for {}", store_path.display());
+            let body = Body::from_stream(ReaderStream::new(file));
+            let content_length = file_size.to_string();
+            (
+                StatusCode::OK,
+                [
+                    ("content-type", "application/zstd"),
+                    ("content-length", content_length.as_str()),
+                    ("x-ogygia-nar-file-hash", cached.file_hash.as_str()),
+                ],
+                body,
+            )
+                .into_response()
+        }
+    }
 }
 
 /// Query parameters for GET /providers/{hash}
@@ -408,4 +492,69 @@ pub async fn rescan(
     );
 
     (StatusCode::OK, Json(RescanResponse { rescanned, errors })).into_response()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn headers_with_range(value: &str) -> HeaderMap {
+        let mut headers = HeaderMap::new();
+        headers.insert("range", value.parse().unwrap());
+        headers
+    }
+
+    #[test]
+    fn test_parse_byte_range_open_ended() {
+        assert_eq!(
+            parse_byte_range(&headers_with_range("bytes=0-")),
+            Some((0, None))
+        );
+        assert_eq!(
+            parse_byte_range(&headers_with_range("bytes=100-")),
+            Some((100, None))
+        );
+        assert_eq!(
+            parse_byte_range(&headers_with_range("bytes=999999-")),
+            Some((999999, None)),
+        );
+    }
+
+    #[test]
+    fn test_parse_byte_range_closed() {
+        assert_eq!(
+            parse_byte_range(&headers_with_range("bytes=0-499")),
+            Some((0, Some(499))),
+        );
+        assert_eq!(
+            parse_byte_range(&headers_with_range("bytes=100-200")),
+            Some((100, Some(200))),
+        );
+    }
+
+    #[test]
+    fn test_parse_byte_range_missing() {
+        assert_eq!(parse_byte_range(&HeaderMap::new()), None);
+    }
+
+    #[test]
+    fn test_parse_byte_range_suffix_range() {
+        // bytes=-500 (suffix range) is not supported
+        assert_eq!(parse_byte_range(&headers_with_range("bytes=-500")), None);
+    }
+
+    #[test]
+    fn test_parse_byte_range_multi_range() {
+        assert_eq!(
+            parse_byte_range(&headers_with_range("bytes=0-100,200-300")),
+            None,
+        );
+    }
+
+    #[test]
+    fn test_parse_byte_range_invalid() {
+        assert_eq!(parse_byte_range(&headers_with_range("invalid")), None);
+        assert_eq!(parse_byte_range(&headers_with_range("bytes=abc-")), None);
+        assert_eq!(parse_byte_range(&headers_with_range("bytes=0-abc")), None);
+    }
 }
