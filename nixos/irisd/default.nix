@@ -66,6 +66,17 @@ in
         - `trust.trusted_keys` (list of string) — Nix public signing
           keys trusted when fetching NARs from peers.
           Format: "name:base64-public-key".
+
+        - `cache.dir` (path) — directory for cached zstd-compressed
+          NAR files. Default: /var/cache/ogygia-irisd/nar.
+
+        - `cache.time_to_idle_secs` (int) — seconds before idle
+          cached NARs are evicted. Default: 3600. Set to 0 to
+          disable TTI eviction.
+
+        - `cache.max_size_bytes` (int) — maximum total cache size
+          in bytes. Default: 10737418240 (10 GiB). Set to 0 for
+          unlimited.
       '';
     };
 
@@ -104,6 +115,7 @@ in
         RestartSec = "60s";
         DynamicUser = true;
         RuntimeDirectory = "ogygia-irisd";
+        CacheDirectory = "ogygia-irisd";
 
         # Security hardening
         NoNewPrivileges = true;

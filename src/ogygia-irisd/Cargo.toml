@@ -38,6 +38,9 @@ sha2 = { workspace = true }
 hex = { workspace = true }
 siphasher = { workspace = true }
 
+# Cache
+moka = { workspace = true }
+
 # Compression
 async-compression = { workspace = true }
 

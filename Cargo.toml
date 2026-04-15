@@ -48,6 +48,9 @@ sha2 = "0.10"
 hex = "0.4"
 siphasher = "1"
 
+# Cache
+moka = { version = "0.12", features = ["future"] }
+
 # Compression
 async-compression = { version = "0.4", features = ["tokio", "zstd", "xz", "gzip"] }
 

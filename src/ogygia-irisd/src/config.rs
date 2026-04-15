@@ -17,6 +17,8 @@ pub struct Config {
     pub peers: PeersConfig,
     #[serde(default)]
     pub trust: TrustConfig,
+    #[serde(default)]
+    pub cache: CacheConfig,
 }
 
 /// HTTP server configuration
@@ -86,6 +88,42 @@ pub struct TrustConfig {
     pub trusted_keys: Vec<String>,
 }
 
+/// NAR disk cache configuration
+#[derive(Debug, Deserialize, Clone)]
+pub struct CacheConfig {
+    /// Directory for cached zstd-compressed NAR files
+    #[serde(default = "default_cache_dir")]
+    pub dir: PathBuf,
+    /// Seconds of idle time before a cached NAR is evicted (0 = no TTI)
+    #[serde(default = "default_time_to_idle_secs")]
+    pub time_to_idle_secs: u64,
+    /// Maximum total size in bytes of all cached NAR files (0 = unlimited)
+    #[serde(default = "default_max_size_bytes")]
+    pub max_size_bytes: u64,
+}
+
+fn default_cache_dir() -> PathBuf {
+    PathBuf::from("/var/cache/ogygia-irisd/nar")
+}
+
+fn default_time_to_idle_secs() -> u64 {
+    3600
+}
+
+fn default_max_size_bytes() -> u64 {
+    10 * 1024 * 1024 * 1024 // 10 GiB
+}
+
+impl Default for CacheConfig {
+    fn default() -> Self {
+        Self {
+            dir: default_cache_dir(),
+            time_to_idle_secs: default_time_to_idle_secs(),
+            max_size_bytes: default_max_size_bytes(),
+        }
+    }
+}
+
 /// Load configuration from file or default locations
 pub fn load_config(path: Option<&Path>) -> Result<Config> {
     let config_path = if let Some(p) = path {
@@ -153,6 +191,38 @@ trusted_keys = [
         assert!((config.bloom.false_positive_rate - 0.001).abs() < f64::EPSILON);
         assert_eq!(config.peers.urls.len(), 2);
         assert_eq!(config.trust.trusted_keys.len(), 2);
+    }
+
+    #[test]
+    fn test_parse_cache_config() {
+        let toml = r#"
+[server]
+listen = ["127.0.0.1:35742"]
+
+[cache]
+dir = "/tmp/nar-cache"
+time_to_idle_secs = 7200
+max_size_bytes = 5368709120
+"#;
+        let config: Config = toml::from_str(toml).unwrap();
+        assert_eq!(config.cache.dir, PathBuf::from("/tmp/nar-cache"));
+        assert_eq!(config.cache.time_to_idle_secs, 7200);
+        assert_eq!(config.cache.max_size_bytes, 5_368_709_120);
+    }
+
+    #[test]
+    fn test_cache_config_defaults() {
+        let toml = r#"
+[server]
+listen = ["127.0.0.1:35742"]
+"#;
+        let config: Config = toml::from_str(toml).unwrap();
+        assert_eq!(
+            config.cache.dir,
+            PathBuf::from("/var/cache/ogygia-irisd/nar")
+        );
+        assert_eq!(config.cache.time_to_idle_secs, 3600);
+        assert_eq!(config.cache.max_size_bytes, 10 * 1024 * 1024 * 1024);
     }
 
     #[test]

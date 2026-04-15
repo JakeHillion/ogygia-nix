@@ -18,6 +18,7 @@ use tracing::Level;
 use crate::bloom::local::LocalBloom;
 use crate::bloom::peers::PeerBlooms;
 use crate::config::Config;
+use crate::nix::cache::NarCache;
 
 /// Start HTTP servers on all configured listen addresses with graceful shutdown.
 pub async fn start(
@@ -25,6 +26,7 @@ pub async fn start(
     local_bloom: Arc<LocalBloom>,
     peer_blooms: Arc<PeerBlooms>,
     http_client: reqwest::Client,
+    nar_cache: Arc<NarCache>,
     token: CancellationToken,
 ) -> Result<()> {
     let state = Arc::new(AppState {
@@ -32,6 +34,7 @@ pub async fn start(
         local_bloom,
         peer_blooms,
         http_client,
+        nar_cache,
     });
 
     let app = create_router(state).layer(
