@@ -288,6 +288,90 @@ Ogygia detects the hostname using multiple fallback strategies:
 
 If hostname detection isn't working as expected, use the `OGYGIA_HOSTNAME` environment variable to override it
 
+### Irisd Peer-to-Peer Binary Cache
+
+Ogygia includes **ogygia-irisd**, a peer-to-peer Nix binary cache that enables distributed builds across your fleet without relying on a central cache server.
+
+#### Overview
+
+Irisd maintains a local index of your Nix store paths using a bloom filter, allowing peers to efficiently query which nodes have specific store paths. When a store path is needed, irisd checks peers' bloom filters to locate providers, then fetches NAR files directly from them.
+
+This aims to achieve a distributed cache across your nodes which:
+- Never gives a false negative (outside of bounded TTLs)
+- Gives very fast true negatives from the 2nd request onwards
+- Relies on standard Nix signatures and uses your existing Nix stores
+
+#### Security Considerations
+
+**⚠️ IMPORTANT: Run irisd only on a secure overlay network**
+
+Ogygia-irisd is designed to run on trusted private networks such as [Nebula](https://github.com/slackhq/nebula) or [Tailscale](https://tailscale.com/). While irisd implements standard security measures like NAR signature verification, it is **not hardened against denial-of-service (DoS) attacks** from untrusted network participants.
+
+Specifically, irisd:
+- Does not implement rate limiting on bloom filter queries or NAR downloads
+- Does not authenticate peers before serving bloom filters or NAR files
+- Assumes all peers on the network are trusted nodes in your fleet
+
+**You must:**
+- Run irisd on a private overlay network (Nebula, Tailscale, WireGuard mesh, etc.)
+- Ensure the overlay network is configured to only allow trusted nodes
+- Not expose irisd directly to the public internet or untrusted networks
+
+When Nebula is configured via `ogygia.nebula.ipv4`, the irisd module automatically includes your Nebula IP in the listen addresses.
+
+#### Configuration
+
+Enable irisd in your NixOS configuration:
+
+```nix
+{
+  ogygia.irisd = {
+    enable = true;
+    settings = {
+      server.listen = [ "10.0.0.1:35742" ];  # Your Nebula/Tailscale IP
+      peers.urls = [
+        "http://10.0.0.2:35742"  # Other irisd peers
+        "http://10.0.0.3:35742"
+      ];
+      trust.trusted_keys = [
+        "cache.example.com-1:abc123..."  # Nix signing keys
+      ];
+    };
+    configureNixDaemon = true;  # Use irisd as a substituter
+  };
+}
+```
+
+#### Pushing Store Paths
+
+Simply having a signed path stored in the local /nix/store is enough. If you want to handle signing & ensure the store is refreshed, run the following:
+
+```bash
+# Push specific paths
+ogygia iris push /nix/store/...-mypackage
+
+# Push with signing (sign paths before advertising)
+ogygia iris push --sign /nix/store/...-mypackage
+```
+
+#### Querying Providers
+
+Check which peers have a specific store path:
+
+```bash
+ogygia iris providers <store-path-hash>
+```
+
+This queries your local irisd, which checks peers' bloom filters and returns matching providers.
+
+#### How It Works
+
+1. **Local indexing**: Irisd scans `/nix/store` and builds a bloom filter of all paths
+2. **Peer discovery**: Each peer fetches bloom filters from configured peers periodically
+3. **Path lookup**: When Nix needs a path, irisd checks local and peer bloom filters
+4. **NAR serving**: If found locally, irisd serves the NAR; if on a peer, it redirects/proxies
+5. **Caching**: Downloaded NARs are cached locally with configurable TTL and size limits
+
 ## Cachix
 
 Pre-built binaries are available via Cachix:
