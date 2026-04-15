@@ -257,6 +257,7 @@ async fn try_local_store_nar(
         [
             ("content-type", "application/zstd"),
             ("content-length", content_length.as_str()),
+            ("x-ogygia-nar-file-hash", cached.file_hash.as_str()),
         ],
         body,
     )
