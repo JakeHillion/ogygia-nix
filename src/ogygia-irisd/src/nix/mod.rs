@@ -1,5 +1,5 @@
 //! Nix store interaction
 
-pub mod nar;
+pub mod cache;
 pub mod narinfo;
 pub mod store;

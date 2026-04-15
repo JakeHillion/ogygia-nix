@@ -10,12 +10,12 @@ use axum::extract::State;
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::response::Response;
-use futures::TryStreamExt;
 use serde::Deserialize;
 use serde::Serialize;
+use tokio_util::io::ReaderStream;
 
 use super::AppState;
-use crate::nix::nar::generate_nar_stream;
+use crate::nix::cache::NarCache;
 use crate::nix::narinfo::NarInfo;
 use crate::nix::narinfo::nar_hash_to_hex;
 use crate::nix::store::PathInfo;
@@ -68,7 +68,7 @@ pub async fn get_narinfo(
     };
 
     // 1. Try local store first
-    if let Some(narinfo) = try_local_store_narinfo(hash).await {
+    if let Some(narinfo) = try_local_store_narinfo(hash, &state.nar_cache).await {
         return (
             StatusCode::OK,
             [("content-type", "text/x-nix-narinfo")],
@@ -98,7 +98,10 @@ pub async fn get_narinfo(
 ///
 /// Used by peers to query this node's local store without triggering
 /// cascading fan-out across the cluster.
-pub async fn get_local_narinfo(Path(narinfo_path): Path<String>) -> Response {
+pub async fn get_local_narinfo(
+    State(state): State<Arc<AppState>>,
+    Path(narinfo_path): Path<String>,
+) -> Response {
     let hash = match narinfo_path.strip_suffix(".narinfo") {
         Some(h) => h,
         None => {
@@ -106,7 +109,7 @@ pub async fn get_local_narinfo(Path(narinfo_path): Path<String>) -> Response {
         }
     };
 
-    match try_local_store_narinfo(hash).await {
+    match try_local_store_narinfo(hash, &state.nar_cache).await {
         Some(narinfo) => (
             StatusCode::OK,
             [("content-type", "text/x-nix-narinfo")],
@@ -117,8 +120,11 @@ pub async fn get_local_narinfo(Path(narinfo_path): Path<String>) -> Response {
     }
 }
 
-/// Try to generate narinfo from local /nix/store path
-async fn try_local_store_narinfo(hash: &str) -> Option<NarInfo> {
+/// Try to generate narinfo from local /nix/store path.
+///
+/// Ensures the NAR is cached so the response includes the real compressed
+/// FileHash and FileSize (needed for integrity validation and range requests).
+async fn try_local_store_narinfo(hash: &str, nar_cache: &NarCache) -> Option<NarInfo> {
     let store_path = find_store_path(hash).await?;
 
     tracing::debug!("Found store path for {}: {}", hash, store_path.display());
@@ -135,9 +141,21 @@ async fn try_local_store_narinfo(hash: &str) -> Option<NarInfo> {
         }
     };
 
-    let narinfo = path_info.to_narinfo(hash);
-    tracing::info!("Generated narinfo for {} from local store", hash);
+    let mut narinfo = path_info.to_narinfo(hash);
 
+    // Generate/retrieve the cached NAR to get real FileHash and FileSize
+    match nar_cache.ensure(hash, &store_path).await {
+        Ok(cached) => {
+            narinfo.file_hash = cached.file_hash.clone();
+            narinfo.file_size = cached.file_size;
+        }
+        Err(e) => {
+            tracing::error!("Failed to generate NAR for {}: {}", store_path.display(), e);
+            return None;
+        }
+    }
+
+    tracing::info!("Generated narinfo for {} from local store", hash);
     Some(narinfo)
 }
 
@@ -152,7 +170,7 @@ pub async fn get_nar(State(state): State<Arc<AppState>>, Path(path): Path<String
         return (StatusCode::NOT_FOUND, "Not found").into_response();
     };
 
-    let local = try_local_store_nar(hash, nar_hash).await;
+    let local = try_local_store_nar(hash, nar_hash, &state.nar_cache).await;
     if local.status() != StatusCode::NOT_FOUND {
         return local;
     }
@@ -165,13 +183,16 @@ pub async fn get_nar(State(state): State<Arc<AppState>>, Path(path): Path<String
 ///
 /// Used by peers to fetch NARs from this node's local store without
 /// triggering cascading fan-out across the cluster.
-pub async fn get_local_nar(Path(path): Path<String>) -> Response {
+pub async fn get_local_nar(
+    State(state): State<Arc<AppState>>,
+    Path(path): Path<String>,
+) -> Response {
     let Some((nar_hash, hash)) = parse_nar_path(&path) else {
         tracing::warn!("Invalid NAR path format: {}", path);
         return (StatusCode::NOT_FOUND, "Not found").into_response();
     };
 
-    try_local_store_nar(hash, nar_hash).await
+    try_local_store_nar(hash, nar_hash, &state.nar_cache).await
 }
 
 /// Parse a NAR path into `(nar_hash, store_hash)`.
@@ -183,8 +204,12 @@ fn parse_nar_path(path: &str) -> Option<(&str, &str)> {
     (hash.len() == 32).then_some((nar_hash, hash))
 }
 
-/// Try to stream a NAR from the local store, verifying the NarHash matches.
-async fn try_local_store_nar(hash: &str, expected_nar_hash: &str) -> Response {
+/// Try to serve a NAR from the local store via the disk cache.
+async fn try_local_store_nar(
+    hash: &str,
+    expected_nar_hash: &str,
+    nar_cache: &NarCache,
+) -> Response {
     let Some(store_path) = find_store_path(hash).await else {
         return (StatusCode::NOT_FOUND, "Not found").into_response();
     };
@@ -211,17 +236,31 @@ async fn try_local_store_nar(hash: &str, expected_nar_hash: &str) -> Response {
         _ => {}
     }
 
-    match generate_nar_stream(&store_path).await {
-        Ok(stream) => {
-            tracing::info!("Streaming NAR for {}", store_path.display());
-            let body = Body::from_stream(stream.map_err(|e| std::io::Error::other(e.to_string())));
-            (StatusCode::OK, [("content-type", "application/zstd")], body).into_response()
+    // Get from cache or generate, opening the file under the RwLock
+    let (cached, file) = match nar_cache.ensure_and_open(hash, &store_path).await {
+        Ok((cached, Some(file))) => (cached, file),
+        Ok((_, None)) => {
+            tracing::debug!("Cached NAR for {} evicted during open", hash);
+            return (StatusCode::NOT_FOUND, "Not found").into_response();
         }
         Err(e) => {
             tracing::error!("Failed to generate NAR for {}: {}", store_path.display(), e);
-            (StatusCode::INTERNAL_SERVER_ERROR, "Failed to generate NAR").into_response()
+            return (StatusCode::INTERNAL_SERVER_ERROR, "Failed to generate NAR").into_response();
         }
-    }
+    };
+
+    tracing::info!("Serving cached NAR for {}", store_path.display());
+    let body = Body::from_stream(ReaderStream::new(file));
+    let content_length = cached.file_size.to_string();
+    (
+        StatusCode::OK,
+        [
+            ("content-type", "application/zstd"),
+            ("content-length", content_length.as_str()),
+        ],
+        body,
+    )
+        .into_response()
 }
 
 /// Query parameters for GET /providers/{hash}

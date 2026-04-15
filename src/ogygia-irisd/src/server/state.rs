@@ -13,6 +13,7 @@ use futures::stream::FuturesUnordered;
 use crate::bloom::local::LocalBloom;
 use crate::bloom::peers::PeerBlooms;
 use crate::config::Config;
+use crate::nix::cache::NarCache;
 use crate::nix::narinfo::NarInfo;
 use crate::nix::narinfo::nar_hash_to_sri;
 
@@ -22,6 +23,7 @@ pub struct AppState {
     pub local_bloom: Arc<LocalBloom>,
     pub peer_blooms: Arc<PeerBlooms>,
     pub http_client: reqwest::Client,
+    pub nar_cache: Arc<NarCache>,
 }
 
 impl AppState {

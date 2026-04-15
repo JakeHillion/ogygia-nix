@@ -5,6 +5,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use std::time::Instant;
 
+use anyhow::Context;
 use anyhow::Result;
 use clap::Parser;
 use tokio::signal;
@@ -66,6 +67,27 @@ async fn main() -> Result<()> {
         .timeout(Duration::from_secs(30))
         .build()
         .expect("failed to build HTTP client");
+
+    // Initialize NAR disk cache
+    let nar_cache: Arc<nix::cache::NarCache> = Arc::new(
+        nix::cache::NarCache::new(&config.cache)
+            .await
+            .context("Failed to initialize NAR cache")?,
+    );
+    tracing::info!("NAR cache dir: {}", config.cache.dir.display());
+    tracing::info!(
+        "NAR cache limits: max_size={}B, tti={}s",
+        config.cache.max_size_bytes,
+        config.cache.time_to_idle_secs,
+    );
+
+    let recovered: usize = nar_cache.recover().await.unwrap_or_else(|e| {
+        tracing::warn!("NAR cache recovery failed: {}", e);
+        0
+    });
+    if recovered > 0 {
+        tracing::info!("NAR cache: recovered {} entries from disk", recovered);
+    }
 
     // Cancellation token for coordinated shutdown
     let token = CancellationToken::new();
@@ -139,6 +161,7 @@ async fn main() -> Result<()> {
         local_bloom,
         peer_blooms,
         http_client,
+        nar_cache,
         token.clone(),
     )));
 
