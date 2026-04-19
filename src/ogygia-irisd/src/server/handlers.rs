@@ -461,7 +461,10 @@ pub async fn rescan(
         };
 
         if !info.is_serveable() {
-            tracing::warn!("rescan: path has no signatures: {}", path_str);
+            tracing::warn!(
+                "rescan: path is not serveable (neither signed nor content-addressed): {}",
+                path_str
+            );
             errors += 1;
             continue;
         }

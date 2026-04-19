@@ -118,7 +118,10 @@ impl StoreWatcher {
             self.bloom.insert(hash);
             tracing::debug!("Indexed new store path: {}", store_path);
         } else {
-            tracing::debug!("Skipping unsigned store path: {}", store_path);
+            tracing::debug!(
+                "Skipping not-serveable store path (neither signed nor content-addressed): {}",
+                store_path
+            );
         }
     }
 

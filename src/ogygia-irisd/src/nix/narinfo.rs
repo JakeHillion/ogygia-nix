@@ -84,6 +84,38 @@ impl NarInfo {
         })
     }
 
+    /// Check if this narinfo has a meaningful content-addressed (CA) field.
+    ///
+    /// Returns true if the CA field is present and contains non-whitespace content.
+    /// Empty or whitespace-only CA fields are not considered valid CA paths.
+    fn has_ca(&self) -> bool {
+        self.ca.as_ref().is_some_and(|s| !s.trim().is_empty())
+    }
+
+    /// Check if this narinfo is trusted for fetching from peers.
+    ///
+    /// A narinfo is trusted if:
+    /// - It is content-addressed (has a meaningful CA field), OR
+    /// - It has at least one signature from a trusted key, OR
+    /// - No trusted keys are configured (no trust restriction)
+    ///
+    /// This matches Nix's behavior where content-addressed paths are self-verifying
+    /// and don't require signatures.
+    pub fn is_trusted(&self, trusted_keys: &[String]) -> bool {
+        // Content-addressed paths are inherently trusted (self-verifying)
+        if self.has_ca() {
+            return true;
+        }
+
+        // If no trusted keys are configured, no trust restriction applies
+        if trusted_keys.is_empty() {
+            return true;
+        }
+
+        // Otherwise, require a trusted signature
+        self.has_trusted_signature(trusted_keys)
+    }
+
     /// Parse a narinfo file
     pub fn parse(content: &str) -> Result<Self> {
         let mut fields: HashMap<&str, &str> = HashMap::new();
@@ -258,5 +290,103 @@ Sig: my-cache-1:qrstuvwxyz123456
         assert!(!info.has_trusted_signature(&untrusted));
 
         assert!(!info.has_trusted_signature(&[]));
+    }
+
+    /// Helper to create a base NarInfo for testing
+    fn base_narinfo() -> NarInfo {
+        NarInfo {
+            store_path: "/nix/store/abc123-test".to_string(),
+            url: "nar/test.nar.zst".to_string(),
+            compression: Compression::Zstd,
+            file_hash: "sha256:abc".to_string(),
+            file_size: 100,
+            nar_hash: "sha256:def".to_string(),
+            nar_size: 200,
+            references: vec![],
+            deriver: None,
+            signatures: vec![],
+            ca: None,
+        }
+    }
+
+    #[test]
+    fn test_is_trusted_ca_no_sigs_with_trusted_keys() {
+        // CA path with no signatures, trusted keys configured → is_trusted returns true
+        let info = NarInfo {
+            ca: Some("fixed:sha256:abc".to_string()),
+            ..base_narinfo()
+        };
+        let trusted_keys = vec!["cache.nixos.org-1:publickey".to_string()];
+        assert!(info.is_trusted(&trusted_keys));
+    }
+
+    #[test]
+    fn test_is_trusted_ca_no_sigs_no_trusted_keys() {
+        // CA path with no signatures, no trusted keys → is_trusted returns true
+        let info = NarInfo {
+            ca: Some("fixed:sha256:abc".to_string()),
+            ..base_narinfo()
+        };
+        assert!(info.is_trusted(&[]));
+    }
+
+    #[test]
+    fn test_is_trusted_ca_with_trusted_sig() {
+        // CA path with trusted signature → is_trusted returns true
+        let info = NarInfo {
+            ca: Some("fixed:sha256:abc".to_string()),
+            signatures: vec!["cache.nixos.org-1:sig".to_string()],
+            ..base_narinfo()
+        };
+        let trusted_keys = vec!["cache.nixos.org-1:publickey".to_string()];
+        assert!(info.is_trusted(&trusted_keys));
+    }
+
+    #[test]
+    fn test_is_trusted_non_ca_with_trusted_sig() {
+        // Non-CA path with trusted signature → is_trusted returns true
+        let info = NarInfo {
+            signatures: vec!["cache.nixos.org-1:sig".to_string()],
+            ..base_narinfo()
+        };
+        let trusted_keys = vec!["cache.nixos.org-1:publickey".to_string()];
+        assert!(info.is_trusted(&trusted_keys));
+    }
+
+    #[test]
+    fn test_is_trusted_non_ca_without_sig() {
+        // Non-CA path without trusted signature → is_trusted returns false
+        let info = base_narinfo();
+        let trusted_keys = vec!["cache.nixos.org-1:publickey".to_string()];
+        assert!(!info.is_trusted(&trusted_keys));
+    }
+
+    #[test]
+    fn test_is_trusted_non_ca_empty_trusted_keys() {
+        // Non-CA path with empty trusted keys → is_trusted returns true (no trust restriction)
+        let info = base_narinfo();
+        assert!(info.is_trusted(&[]));
+    }
+
+    #[test]
+    fn test_is_trusted_empty_ca_string() {
+        // CA field with empty string Some("") → treated as non-CA (returns false without signatures)
+        let info = NarInfo {
+            ca: Some("".to_string()),
+            ..base_narinfo()
+        };
+        let trusted_keys = vec!["cache.nixos.org-1:publickey".to_string()];
+        assert!(!info.is_trusted(&trusted_keys));
+    }
+
+    #[test]
+    fn test_is_trusted_whitespace_ca_string() {
+        // CA field with whitespace Some("  ") → treated as non-CA
+        let info = NarInfo {
+            ca: Some("  ".to_string()),
+            ..base_narinfo()
+        };
+        let trusted_keys = vec!["cache.nixos.org-1:publickey".to_string()];
+        assert!(!info.is_trusted(&trusted_keys));
     }
 }

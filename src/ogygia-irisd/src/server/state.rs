@@ -58,16 +58,20 @@ impl AppState {
                         continue;
                     };
 
-                    if !trusted_keys.is_empty() && !narinfo.has_trusted_signature(trusted_keys) {
+                    if !narinfo.is_trusted(trusted_keys) {
                         tracing::debug!(
-                            "narinfo {} from {} has no trusted signature, skipping",
+                            "narinfo {} from {} is not trusted (no CA field or trusted signature), skipping",
                             hash,
                             peer_url
                         );
                         continue;
                     }
 
-                    tracing::info!("narinfo {} fetched from peer {}", hash, peer_url);
+                    if narinfo.ca.is_some() {
+                        tracing::info!("narinfo {} fetched from peer {} (content-addressed)", hash, peer_url);
+                    } else {
+                        tracing::info!("narinfo {} fetched from peer {}", hash, peer_url);
+                    }
                     return Some((narinfo, peer_url));
                 }
 
@@ -123,9 +127,9 @@ impl AppState {
                         continue;
                     };
 
-                    if !trusted_keys.is_empty() && !narinfo.has_trusted_signature(trusted_keys) {
+                    if !narinfo.is_trusted(trusted_keys) {
                         tracing::debug!(
-                            "narinfo {} from {} has no trusted signature, skipping",
+                            "narinfo {} from {} is not trusted (no CA field or trusted signature), skipping",
                             hash,
                             peer_url
                         );
@@ -140,7 +144,11 @@ impl AppState {
                     let nar_url = format!("{}/local/{}", peer_url.trim_end_matches('/'), narinfo.url);
                     match stream_nar_from_url(&self.http_client, &nar_url).await {
                         Some(response) => {
-                            tracing::info!("Proxying NAR {} from peer {}", hash, peer_url);
+                            if narinfo.ca.is_some() {
+                                tracing::info!("Proxying NAR {} from peer {} (content-addressed)", hash, peer_url);
+                            } else {
+                                tracing::info!("Proxying NAR {} from peer {}", hash, peer_url);
+                            }
                             return response;
                         }
                         None => continue,
