@@ -26,6 +26,8 @@ jobs:
       with:
         extra_nix_config: |
           accept-flake-config = true
+          extra-substituters = https://nixcache.jakehillion.me
+          extra-trusted-public-keys = nixcache.jakehillion.me-1:HQsjYdrcs3ilS/ngtlbTQXU4Xfsm+va5NN7yoK0wKMg=
           max-jobs = 2
 
     - name: Enter CI devShell

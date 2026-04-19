@@ -372,17 +372,17 @@ This queries your local irisd, which checks peers' bloom filters and returns mat
 4. **NAR serving**: If found locally, irisd serves the NAR; if on a peer, it redirects/proxies
 5. **Caching**: Downloaded NARs are cached locally with configurable TTL and size limits
 
-## Cachix
+## Binary Cache
 
-Pre-built binaries are available via Cachix:
+Pre-built binaries are available from the project's Nix cache:
 
 ```nix
 nixConfig = {
   extra-substituters = [
-    "https://ogygia.cachix.org"
+    "https://nixcache.jakehillion.me"
   ];
   extra-trusted-public-keys = [
-    "ogygia.cachix.org-1:xb4bnMPeWgSP81Xs0Vl7ZU4Ez7Ul65qp/EoZ40pDaWo="
+    "nixcache.jakehillion.me-1:HQsjYdrcs3ilS/ngtlbTQXU4Xfsm+va5NN7yoK0wKMg="
   ];
 };
 ```
