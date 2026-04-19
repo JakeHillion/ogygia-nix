@@ -1647,6 +1647,7 @@ dependencies = [
  "anyhow",
  "clap",
  "etcd-client",
+ "futures",
  "hostname",
  "reqwest",
  "serde",

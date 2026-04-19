@@ -3,6 +3,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use anyhow::anyhow;
 use axum::Json;
 use axum::body::Body;
 use axum::extract::Path;
@@ -435,6 +436,30 @@ pub struct RescanResponse {
     pub errors: usize,
 }
 
+/// Request body for POST /pull
+#[derive(Debug, Deserialize)]
+pub struct PullRequest {
+    pub paths: Vec<PathBuf>,
+}
+
+/// Response body for POST /pull
+#[derive(Debug, Serialize)]
+pub struct PullResponse {
+    pub pulled: usize,
+    pub skipped: usize,
+    pub failed: usize,
+    pub details: Vec<PathResult>,
+    pub errors: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct PathResult {
+    pub path: PathBuf,
+    pub status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
 /// POST /rescan - rescan store paths and insert hashes into bloom
 ///
 /// This endpoint is called by `ogygia iris push` after signing paths.
@@ -501,6 +526,174 @@ pub async fn rescan(
     );
 
     (StatusCode::OK, Json(RescanResponse { rescanned, errors })).into_response()
+}
+
+/// POST /pull - pull store paths from peers
+///
+/// For each path in the request:
+/// 1. Validates the path starts with `/nix/store/` and extracts the 32-char hash
+/// 2. Checks if the path already exists locally (skipped if serveable)
+/// 3. For missing paths, fetches narinfo from peers with trusted-signature validation
+/// 4. Fetches the NAR from the peer and validates its hash against the narinfo
+/// 5. Caches the NAR to disk and moka cache
+/// 6. Inserts the hash into the local bloom filter (preventing false positives on failure)
+pub async fn pull(
+    State(state): State<Arc<AppState>>,
+    Json(request): Json<PullRequest>,
+) -> Response {
+    let mut pulled = 0;
+    let mut skipped = 0;
+    let mut failed = 0;
+    let mut details = Vec::new();
+    let mut errors = Vec::new();
+
+    for path in &request.paths {
+        let hash = match extract_hash_from_path(path) {
+            Ok(h) => h,
+            Err(reason) => {
+                tracing::warn!("pull: {}: {}", reason, path.to_string_lossy());
+                failed += 1;
+                details.push(PathResult {
+                    path: path.clone(),
+                    status: "failed".to_string(),
+                    error: Some(reason.to_string()),
+                });
+                continue;
+            }
+        };
+
+        if let Some(store_path) = find_store_path(&hash).await
+            && let Ok(info) = PathInfo::from_store_path(&store_path).await
+            && info.is_serveable()
+        {
+            tracing::info!(
+                "pull: path already available locally: {}",
+                path.to_string_lossy()
+            );
+            state.local_bloom.insert(&hash);
+            skipped += 1;
+            details.push(PathResult {
+                path: path.clone(),
+                status: "skipped".to_string(),
+                error: None,
+            });
+            continue;
+        }
+
+        match state.try_peer_narinfo_all(&hash).await {
+            Some((narinfo, peer_url)) => {
+                let nar_url = format!("{}/local/{}", peer_url.trim_end_matches('/'), narinfo.url);
+
+                let store_name = PathBuf::from(&narinfo.store_path)
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or(&hash)
+                    .to_string();
+
+                let fetch_result: Result<Arc<crate::nix::cache::CachedNar>, Arc<anyhow::Error>> =
+                    match state.http_client.get(&nar_url).send().await {
+                        Ok(response) if response.status().is_success() => {
+                            match response.bytes().await {
+                                Ok(fetched_bytes) => {
+                                    state
+                                        .nar_cache
+                                        .cache_fetched_nar(
+                                            &hash,
+                                            &store_name,
+                                            &narinfo.file_hash,
+                                            &fetched_bytes,
+                                        )
+                                        .await
+                                }
+                                Err(e) => Err(Arc::new(anyhow!(
+                                    "failed to read NAR body for {}: {}",
+                                    hash,
+                                    e
+                                ))),
+                            }
+                        }
+                        Ok(response) => Err(Arc::new(anyhow!(
+                            "peer returned {} for NAR {}",
+                            response.status(),
+                            hash
+                        ))),
+                        Err(e) => Err(Arc::new(anyhow!("failed to fetch NAR for {}: {}", hash, e))),
+                    };
+
+                match fetch_result {
+                    Ok(_) => {
+                        tracing::info!("pull: fetched and cached NAR for {}", hash);
+                        state.local_bloom.insert(&hash);
+                        pulled += 1;
+                        details.push(PathResult {
+                            path: path.clone(),
+                            status: "pulled".to_string(),
+                            error: None,
+                        });
+                    }
+                    Err(e) => {
+                        let err = format!("NAR fetch/cache failed for {}: {}", hash, e);
+                        tracing::warn!("pull: {}", err);
+                        failed += 1;
+                        errors.push(err.clone());
+                        details.push(PathResult {
+                            path: path.clone(),
+                            status: "failed".to_string(),
+                            error: Some(err),
+                        });
+                    }
+                }
+            }
+            None => {
+                let err = format!("no peer has a trusted narinfo for {}", hash);
+                tracing::warn!("pull: {}", err);
+                failed += 1;
+                errors.push(err.clone());
+                details.push(PathResult {
+                    path: path.clone(),
+                    status: "failed".to_string(),
+                    error: Some(err),
+                });
+            }
+        }
+    }
+
+    tracing::info!(
+        "pull complete: {} pulled, {} skipped, {} failed",
+        pulled,
+        skipped,
+        failed
+    );
+
+    (
+        StatusCode::OK,
+        Json(PullResponse {
+            pulled,
+            skipped,
+            failed,
+            details,
+            errors,
+        }),
+    )
+        .into_response()
+}
+
+fn extract_hash_from_path(path: &std::path::Path) -> Result<String, &'static str> {
+    let path_str = path.to_string_lossy();
+
+    if !path_str.starts_with("/nix/store/") {
+        return Err("path must start with /nix/store/");
+    }
+
+    match path_str
+        .strip_prefix("/nix/store/")
+        .and_then(|s| s.get(..32))
+    {
+        Some(h) if h.len() == 32 && h.chars().all(|c| c.is_ascii_alphanumeric()) => {
+            Ok(h.to_string())
+        }
+        _ => Err("invalid hash in path"),
+    }
 }
 
 #[cfg(test)]
@@ -638,5 +831,71 @@ mod tests {
                 .expect("content-type");
             assert_eq!(content_type, "application/octet-stream");
         }
+    }
+
+    #[test]
+    fn test_extract_hash_valid_path() {
+        let path = PathBuf::from("/nix/store/abc123def456ghi789jkl012mno345pq-hello-2.10");
+        assert_eq!(
+            extract_hash_from_path(&path),
+            Ok("abc123def456ghi789jkl012mno345pq".to_string())
+        );
+    }
+
+    #[test]
+    fn test_extract_hash_rejects_non_store_path() {
+        let path = PathBuf::from("/tmp/some-file");
+        assert_eq!(
+            extract_hash_from_path(&path),
+            Err("path must start with /nix/store/")
+        );
+    }
+
+    #[test]
+    fn test_extract_hash_rejects_short_hash() {
+        let path = PathBuf::from("/nix/store/abc123-package");
+        assert_eq!(extract_hash_from_path(&path), Err("invalid hash in path"));
+    }
+
+    #[test]
+    fn test_extract_hash_rejects_special_chars() {
+        let path = PathBuf::from("/nix/store/abc123def456ghi789jkl012mno345!q-pkg");
+        assert_eq!(extract_hash_from_path(&path), Err("invalid hash in path"));
+    }
+
+    #[test]
+    fn test_pull_response_serialization() {
+        let response = PullResponse {
+            pulled: 2,
+            skipped: 1,
+            failed: 1,
+            details: vec![
+                PathResult {
+                    path: PathBuf::from("/nix/store/abc123def456ghi789jkl012mno345pq-foo"),
+                    status: "pulled".to_string(),
+                    error: None,
+                },
+                PathResult {
+                    path: PathBuf::from("/nix/store/xyz789abc123def456ghi012jkl345mno-bar"),
+                    status: "skipped".to_string(),
+                    error: None,
+                },
+                PathResult {
+                    path: PathBuf::from("/nix/store/11111111111111111111111111111111-baz"),
+                    status: "failed".to_string(),
+                    error: Some(
+                        "no peer has a trusted narinfo for 11111111111111111111111111111111"
+                            .to_string(),
+                    ),
+                },
+            ],
+            errors: vec![
+                "no peer has a trusted narinfo for 11111111111111111111111111111111".to_string(),
+            ],
+        };
+        let json = serde_json::to_string(&response).unwrap();
+        assert!(json.contains("\"pulled\":2"));
+        assert!(json.contains("\"skipped\":1"));
+        assert!(json.contains("\"failed\":1"));
     }
 }

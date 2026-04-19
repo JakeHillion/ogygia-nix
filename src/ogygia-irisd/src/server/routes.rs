@@ -21,12 +21,17 @@ use super::handlers;
 /// Local-only routes (used for peer-to-peer, no fan-out):
 /// - GET /local/`<hash>`.narinfo - local-only store path info
 /// - GET /local/nar/`<path>` - local-only NAR download
+///
+/// Push/pull routes:
+/// - POST /rescan - rescan paths for updated signatures
+/// - POST /pull - pull paths from peers
 pub fn create_router(state: Arc<AppState>) -> Router {
     Router::new()
         .route("/nix-cache-info", get(handlers::nix_cache_info))
         .route("/bloom", get(handlers::get_bloom))
         .route("/providers/{hash}", get(handlers::get_providers))
         .route("/rescan", post(handlers::rescan))
+        .route("/pull", post(handlers::pull))
         // Local-only endpoints (no peer fan-out) — used by peers
         .route("/local/{narinfo_path}", get(handlers::get_local_narinfo))
         .route("/local/nar/{*path}", get(handlers::get_local_nar))
