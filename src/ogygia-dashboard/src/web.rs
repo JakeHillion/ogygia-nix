@@ -574,6 +574,48 @@ fn generate_git_graph_html(
     font-weight: 500;
 }
 
+.host-badge.unknown {
+    background: #f3f4f6;
+    color: #6b7280;
+    border: 1px solid #d1d5db;
+}
+
+.unknown-hosts {
+    margin: 16px 0;
+    padding: 12px;
+    background: #fffbeb;
+    border-radius: 6px;
+    border: 1px solid #fcd34d;
+}
+
+.unknown-hosts-title {
+    font-weight: 600;
+    color: #92400e;
+    margin-bottom: 8px;
+}
+
+.unknown-hosts-list {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+}
+
+.unknown-host-item {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 13px;
+}
+
+.unknown-host-name {
+    font-weight: 500;
+    color: #1f2937;
+}
+
+.unknown-host-states {
+    color: #6b7280;
+}
+
 .legend {
     margin-top: 20px;
     padding: 12px;
@@ -864,6 +906,60 @@ fn generate_git_graph_html(
         ));
 
         html.push_str(r#"</div>"#); // Close commit-row
+    }
+
+    // Collect hosts with invalid (None) state values
+    let unknown_hosts: Vec<_> = host_states
+        .host_states
+        .iter()
+        .filter_map(|(hostname, states)| {
+            let invalid_states: Vec<_> = [
+                (
+                    crate::nixos::CommitState::Current,
+                    states[crate::nixos::CommitState::Current],
+                ),
+                (
+                    crate::nixos::CommitState::Booted,
+                    states[crate::nixos::CommitState::Booted],
+                ),
+                (
+                    crate::nixos::CommitState::NextBoot,
+                    states[crate::nixos::CommitState::NextBoot],
+                ),
+            ]
+            .iter()
+            .filter(|(_, oid)| oid.is_none())
+            .map(|(state, _)| state.as_ref().to_string())
+            .collect();
+
+            if invalid_states.is_empty() {
+                None
+            } else {
+                Some((hostname.clone(), invalid_states))
+            }
+        })
+        .collect();
+
+    if !unknown_hosts.is_empty() {
+        html.push_str(r#"<div class="unknown-hosts">"#);
+        html.push_str(
+            r#"<div class="unknown-hosts-title">Hosts with invalid state data from etcd</div>"#,
+        );
+        html.push_str(r#"<div class="unknown-hosts-list">"#);
+
+        for (hostname, invalid_states) in &unknown_hosts {
+            let clean_hostname = match &config.hostname_strip_suffix {
+                Some(suffix) => hostname.replace(suffix.as_str(), ""),
+                None => hostname.to_string(),
+            };
+            html.push_str(&format!(
+                r#"<div class="unknown-host-item"><span class="unknown-host-name">{}</span><span class="unknown-host-states">({})</span></div>"#,
+                clean_hostname,
+                invalid_states.join(", ")
+            ));
+        }
+
+        html.push_str(r#"</div></div>"#);
     }
 
     // Add legend
