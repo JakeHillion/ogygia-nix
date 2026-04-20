@@ -59,3 +59,6 @@ thiserror = { workspace = true }
 
 # Filesystem watching
 notify = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
