@@ -336,8 +336,9 @@ mod tests {
         let local = LocalBloom::new(0.01, 0.1);
         local.insert("abc123def456ghi789jkl012mno345pq");
         local.insert("xyz789abc123def456ghi012jkl345mno");
+        local.finish_rebuild();
 
-        let data = local.serialize().unwrap();
+        let data = local.serialize().unwrap().unwrap();
         let bloom = deserialize_bloom(&data, local.num_bits(), local.num_hashes()).unwrap();
 
         assert!(bloom.contains("abc123def456ghi789jkl012mno345pq"));

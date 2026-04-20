@@ -104,22 +104,35 @@ async fn main() -> Result<()> {
     // Rebuild channel: watcher sends rebuild requests, scanner receives
     let (rebuild_tx, rebuild_rx) = tokio::sync::mpsc::channel::<()>(1);
 
-    // Initial store scan (must complete before serving)
-    let scanner = store::scanner::StoreScanner::new(Arc::clone(&local_bloom), rebuild_rx);
-    let stats = scanner.scan("Store scan").await?;
-    tracing::info!(
-        "Store scan: {} paths, {} indexed",
-        stats.total_paths,
-        stats.indexed,
-    );
-
     // Spawn background tasks
     let mut tasks: Vec<JoinHandle<Result<()>>> = Vec::new();
 
-    // Rebuild loop (services rebuild requests from the watcher)
-    tasks.push(tokio::spawn(
-        async move { scanner.run_rebuild_loop().await },
-    ));
+    // HTTP server: started before the store scan so we serve peer lookups
+    // immediately. GET /bloom returns 503 until the initial scan completes.
+    tasks.push(tokio::spawn(server::start(
+        config,
+        Arc::clone(&local_bloom),
+        Arc::clone(&peer_blooms),
+        http_client,
+        nar_cache,
+        token.clone(),
+    )));
+
+    {
+        let scanner = store::scanner::StoreScanner::new(Arc::clone(&local_bloom), rebuild_rx);
+        let local_bloom = Arc::clone(&local_bloom);
+
+        tasks.push(tokio::spawn(async move {
+            let stats = scanner.scan("Store scan").await?;
+            tracing::info!(
+                "Store scan: {} paths, {} indexed",
+                stats.total_paths,
+                stats.indexed,
+            );
+            local_bloom.finish_rebuild();
+            scanner.run_rebuild_loop().await
+        }));
+    }
 
     // Store watcher (optional, runs until cancelled)
     if !cli.no_watch {
@@ -154,16 +167,6 @@ async fn main() -> Result<()> {
             }
         }));
     }
-
-    // HTTP server (runs until token is cancelled)
-    tasks.push(tokio::spawn(server::start(
-        config,
-        local_bloom,
-        peer_blooms,
-        http_client,
-        nar_cache,
-        token.clone(),
-    )));
 
     // Wait for all tasks — if any returns an error, propagate it.
     let futs = tasks.into_iter().map(|h| async move {

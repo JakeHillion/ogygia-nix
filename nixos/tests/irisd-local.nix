@@ -23,8 +23,14 @@ pkgs.testers.nixosTest {
     assert "WantMassQuery: 1" in result, f"Missing WantMassQuery in: {result}"
     print("nix-cache-info endpoint works")
 
-    # Test 2: Verify /bloom endpoint returns data
-    machine.succeed("curl -sf http://127.0.0.1:35742/bloom -o /tmp/bloom.bin")
+    # Test 2: Verify /bloom endpoint returns data (may return 503 while indexing)
+    machine.succeed(
+        "for i in $(seq 1 30); do "
+        "if curl -sf http://127.0.0.1:35742/bloom -o /tmp/bloom.bin; then "
+        "echo 'bloom ready'; exit 0; fi; "
+        "sleep 0.5; "
+        "done; exit 1"
+    )
     bloom_size = int(machine.succeed("stat -c %s /tmp/bloom.bin").strip())
     assert bloom_size > 4, f"Bloom data too small: {bloom_size} bytes"
     print(f"bloom endpoint returned {bloom_size} bytes")

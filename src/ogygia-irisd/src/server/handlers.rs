@@ -40,10 +40,16 @@ pub async fn nix_cache_info(State(state): State<Arc<AppState>>) -> impl IntoResp
 /// GET /bloom — return serialized local bloom filter
 pub async fn get_bloom(State(state): State<Arc<AppState>>) -> Response {
     match state.local_bloom.serialize() {
-        Ok(data) => (
+        Ok(Some(data)) => (
             StatusCode::OK,
             [("content-type", "application/octet-stream")],
             data,
+        )
+            .into_response(),
+        Ok(None) => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            [("retry-after", "300")],
+            "Store indexing in progress",
         )
             .into_response(),
         Err(e) => {
@@ -559,5 +565,73 @@ mod tests {
         assert_eq!(parse_byte_range(&headers_with_range("invalid")), None);
         assert_eq!(parse_byte_range(&headers_with_range("bytes=abc-")), None);
         assert_eq!(parse_byte_range(&headers_with_range("bytes=0-abc")), None);
+    }
+
+    mod bloom_readiness {
+        use std::time::Duration;
+
+        use super::*;
+        use crate::bloom::local::LocalBloom;
+        use crate::bloom::peers::PeerBlooms;
+        use crate::config::CacheConfig;
+        use crate::nix::cache::NarCache;
+
+        async fn make_state(bloom_ready: bool) -> Arc<AppState> {
+            let config = crate::config::Config {
+                server: crate::config::ServerConfig {
+                    listen: vec!["127.0.0.1:0".to_string()],
+                    priority: 30,
+                },
+                bloom: Default::default(),
+                peers: Default::default(),
+                trust: Default::default(),
+                cache: CacheConfig {
+                    dir: tempfile::tempdir().unwrap().path().to_path_buf(),
+                    time_to_idle_secs: 0,
+                    max_size_bytes: 0,
+                },
+            };
+            let nar_cache = Arc::new(NarCache::new(&config.cache).await.unwrap());
+            let local_bloom = Arc::new(LocalBloom::new(0.01, 0.1));
+            if bloom_ready {
+                local_bloom.finish_rebuild();
+            }
+            Arc::new(AppState {
+                config: Arc::new(config),
+                local_bloom,
+                peer_blooms: Arc::new(PeerBlooms::new(Duration::from_secs(300), 0, 0)),
+                http_client: reqwest::Client::new(),
+                nar_cache,
+            })
+        }
+
+        #[tokio::test]
+        async fn test_get_bloom_503_before_ready() {
+            let state = make_state(false).await;
+            let response = get_bloom(State(state)).await;
+            assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+            let retry_after = response
+                .headers()
+                .get("retry-after")
+                .expect("retry-after header");
+            assert_eq!(retry_after, "300");
+            let body = axum::body::to_bytes(response.into_body(), 1024)
+                .await
+                .unwrap();
+            let body = String::from_utf8_lossy(&body);
+            assert!(body.contains("indexing in progress"));
+        }
+
+        #[tokio::test]
+        async fn test_get_bloom_200_after_ready() {
+            let state = make_state(true).await;
+            let response = get_bloom(State(state)).await;
+            assert_eq!(response.status(), StatusCode::OK);
+            let content_type = response
+                .headers()
+                .get("content-type")
+                .expect("content-type");
+            assert_eq!(content_type, "application/octet-stream");
+        }
     }
 }

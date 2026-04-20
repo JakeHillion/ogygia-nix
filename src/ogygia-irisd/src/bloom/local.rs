@@ -14,7 +14,7 @@ use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
 
 use anyhow::Result;
-use arc_swap::ArcSwap;
+use arc_swap::ArcSwapOption;
 use fastbloom::AtomicBloomFilter;
 
 use super::BLOOM_SEED;
@@ -66,19 +66,18 @@ impl BloomState {
 /// Local bloom filter with phased replacement for safe rebuilds.
 ///
 /// Two slots hold the bloom state:
-/// - `read_bloom` (`ArcSwap<AtomicBloomFilter>`): serves
-///   `serialize()`. Only the filter — no counters. During a rebuild
-///   this still points to the old filter so existing paths remain
-///   visible.
+/// - `read_bloom` (`ArcSwapOption<AtomicBloomFilter>`): serves
+///   `serialize()`. Starts as `None` and becomes `Some` after the
+///   initial store scan completes. `None` means the bloom is not yet
+///   ready — callers should return 503. During a rebuild this still
+///   points to the old filter so existing paths remain visible.
 /// - `write_bloom` (`RwLock<BloomState>`): receives `insert()` and
 ///   `mark_deletion()` calls via the read lock (cheap, concurrent).
 ///   A rebuild takes the write lock to swap in a fresh state,
 ///   serializing the swap against ongoing inserts. Counters live here
 ///   so they're always consistent with the filter they describe.
-///
-/// Normal operation: both slots share the same `Arc<AtomicBloomFilter>`.
 pub struct LocalBloom {
-    read_bloom: ArcSwap<AtomicBloomFilter>,
+    read_bloom: ArcSwapOption<AtomicBloomFilter>,
     write_bloom: RwLock<BloomState>,
     num_bits: usize,
     num_hashes: u32,
@@ -87,6 +86,9 @@ pub struct LocalBloom {
 
 impl LocalBloom {
     /// Create a new local bloom filter sized for the given false-positive rate.
+    ///
+    /// The read slot starts as `None` — `serialize()` will return `Ok(None)`
+    /// until `finish_rebuild()` is called after the initial store scan.
     pub fn new(false_positive_rate: f64, rebuild_threshold: f64) -> Self {
         let (num_bits, num_hashes) = bloom_params(false_positive_rate, ESTIMATED_ENTRIES);
 
@@ -99,9 +101,8 @@ impl LocalBloom {
         );
 
         let state = BloomState::new(num_bits, num_hashes);
-        let read_bloom = ArcSwap::from(Arc::clone(&state.filter));
         Self {
-            read_bloom,
+            read_bloom: ArcSwapOption::empty(),
             write_bloom: RwLock::new(state),
             num_bits,
             num_hashes,
@@ -142,13 +143,20 @@ impl LocalBloom {
     /// Serialize the bloom filter for the `/bloom` HTTP endpoint.
     ///
     /// Uses the shared wire format from `bloom::wire`.
-    pub fn serialize(&self) -> Result<Vec<u8>> {
+    /// Returns `Ok(None)` if the bloom is not yet ready (initial scan not
+    /// complete). Returns `Ok(Some(data))` with the serialized filter
+    /// otherwise.
+    pub fn serialize(&self) -> Result<Option<Vec<u8>>> {
+        let filter = self.read_bloom.load();
+        let filter = match filter.as_ref() {
+            Some(f) => f,
+            None => return Ok(None),
+        };
         let header = super::wire::BloomHeader {
             num_hashes: self.num_hashes,
             num_bits: self.num_bits as u64,
         };
-        let filter = self.read_bloom.load();
-        Ok(super::wire::serialize(&header, filter.iter()))
+        Ok(Some(super::wire::serialize(&header, filter.iter())))
     }
 
     /// Begin a rebuild: swap the write slot to a fresh empty state.
@@ -170,7 +178,7 @@ impl LocalBloom {
             let state = self.write_bloom.read().expect("write_bloom poisoned");
             Arc::clone(&state.filter)
         };
-        self.read_bloom.store(filter);
+        self.read_bloom.store(Some(filter));
     }
 
     /// Number of bits in the bloom filter (for peer bloom size validation).
@@ -204,7 +212,10 @@ mod tests {
         bloom.insert("abc123def456ghi789jkl012mno345pq");
         bloom.insert("xyz789abc123def456ghi012jkl345mno");
 
-        let data = bloom.serialize().unwrap();
+        // Promote write filter to read slot so serialize() works
+        bloom.finish_rebuild();
+
+        let data = bloom.serialize().unwrap().unwrap();
         let (num_bits, num_hashes) = bloom_params(0.01, ESTIMATED_ENTRIES);
 
         // Deserialize via the wire module and validate header.
@@ -237,5 +248,17 @@ mod tests {
         // Optimal: m ≈ 5.75M bits, k = 10
         assert!(bits > 5_700_000 && bits < 5_800_000);
         assert_eq!(hashes, 10);
+    }
+
+    #[test]
+    fn not_ready_until_finish_rebuild() {
+        let bloom = LocalBloom::new(0.01, 0.1);
+        assert!(bloom.serialize().unwrap().is_none());
+
+        bloom.insert("abc123def456ghi789jkl012mno345pq");
+        assert!(bloom.serialize().unwrap().is_none());
+
+        bloom.finish_rebuild();
+        assert!(bloom.serialize().unwrap().is_some());
     }
 }
