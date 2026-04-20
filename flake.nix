@@ -217,9 +217,9 @@
         }) // {
       nixosModules.default = { pkgs, ... }: {
         imports = [ ./nixos ];
-        _module.args.ogygia-irisd = self.packages.${pkgs.system}.ogygia-irisd;
-        _module.args.ogygia-hostinfod = self.packages.${pkgs.system}.ogygia-hostinfod;
-        _module.args.ogygia-dashboard = self.packages.${pkgs.system}.ogygia-dashboard;
+        _module.args.ogygia-irisd = self.packages.${pkgs.stdenv.hostPlatform.system}.ogygia-irisd;
+        _module.args.ogygia-hostinfod = self.packages.${pkgs.stdenv.hostPlatform.system}.ogygia-hostinfod;
+        _module.args.ogygia-dashboard = self.packages.${pkgs.stdenv.hostPlatform.system}.ogygia-dashboard;
       };
 
       ci = nixpkgs.lib.genAttrs [ "aarch64-linux" "x86_64-linux" ] (system:
