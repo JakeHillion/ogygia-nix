@@ -91,13 +91,30 @@ impl Etcd {
         states.host_states.clear();
 
         for kv in resp.kvs() {
-            let key = kv.key_str()?;
-            let value = kv.value_str()?;
+            let key = match kv.key_str() {
+                Ok(k) => k,
+                Err(e) => {
+                    tracing::warn!("Skipping etcd key with invalid UTF-8: {e}");
+                    continue;
+                }
+            };
+            let value = match kv.value_str() {
+                Ok(v) => v,
+                Err(e) => {
+                    tracing::warn!("Skipping etcd key '{key}' with invalid UTF-8 value: {e}");
+                    continue;
+                }
+            };
 
             if let Some((host, commit_state)) = parse_key(key, prefix) {
-                let commit = Oid::from_str(value)?;
-                states.host_states.entry(host.to_string()).or_default()[commit_state] =
-                    Some(commit);
+                let commit = Oid::from_str(value).ok();
+                if commit.is_none() {
+                    tracing::warn!(
+                        "Invalid git OID for host '{host}' state '{state}' (value: '{value}')",
+                        state = commit_state.as_ref()
+                    );
+                }
+                states.host_states.entry(host.to_string()).or_default()[commit_state] = commit;
             }
         }
 
@@ -125,31 +142,53 @@ impl Etcd {
                     continue;
                 };
 
-                let key = kv.key_str()?;
+                let key = match kv.key_str() {
+                    Ok(k) => k,
+                    Err(e) => {
+                        tracing::warn!("Skipping etcd watch event with invalid key UTF-8: {e}");
+                        continue;
+                    }
+                };
                 let Some((host, commit_state)) = parse_key(key, prefix) else {
                     continue;
                 };
 
                 match event.event_type() {
                     EventType::Put => {
-                        let value = kv.value_str()?;
-                        let commit = Oid::from_str(value)?;
+                        let value = match kv.value_str() {
+                            Ok(v) => v,
+                            Err(e) => {
+                                tracing::warn!(
+                                    "Invalid UTF-8 value for host '{host}' state '{state}': {e}",
+                                    state = commit_state.as_ref()
+                                );
+                                continue;
+                            }
+                        };
+                        let commit = Oid::from_str(value).ok();
+                        if commit.is_none() {
+                            tracing::warn!(
+                                "Invalid git OID for host '{host}' state '{state}' (value: '{value}')",
+                                state = commit_state.as_ref()
+                            );
+                        }
 
                         let mut guard = self.states.lock().await;
                         let states = Arc::make_mut(&mut *guard);
-                        let old = states.host_states.entry(host.to_string()).or_default()
-                            [commit_state]
-                            .replace(commit);
+                        let entry = states.host_states.entry(host.to_string()).or_default();
+                        let old = entry[commit_state].take();
+                        entry[commit_state] = commit;
 
                         states.version += 1;
 
                         let old_str = old.map(|c| c.to_string()[..12].to_string());
+                        let new_str = commit.as_ref().map(|c| c.to_string()[..12].to_string());
                         tracing::info!(
                             "Host '{}' state '{}' changed from {} to {}",
                             host,
                             commit_state.as_ref(),
                             old_str.as_deref().unwrap_or("None"),
-                            &commit.to_string()[..12]
+                            new_str.as_deref().unwrap_or("None (invalid)"),
                         );
                     }
                     EventType::Delete => {
