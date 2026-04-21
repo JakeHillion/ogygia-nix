@@ -66,10 +66,10 @@ impl BloomState {
 /// Local bloom filter with phased replacement for safe rebuilds.
 ///
 /// Two slots hold the bloom state:
-/// - `read_bloom` (`ArcSwap<AtomicBloomFilter>`): serves `contains()`
-///   and `serialize()`. Only the filter — no counters. During a
-///   rebuild this still points to the old filter so existing paths
-///   remain visible.
+/// - `read_bloom` (`ArcSwap<AtomicBloomFilter>`): serves
+///   `serialize()`. Only the filter — no counters. During a rebuild
+///   this still points to the old filter so existing paths remain
+///   visible.
 /// - `write_bloom` (`RwLock<BloomState>`): receives `insert()` and
 ///   `mark_deletion()` calls via the read lock (cheap, concurrent).
 ///   A rebuild takes the write lock to swap in a fresh state,
@@ -117,11 +117,6 @@ impl LocalBloom {
         let state = self.write_bloom.read().expect("write_bloom poisoned");
         state.filter.insert(hash);
         state.element_count.fetch_add(1, Ordering::Relaxed);
-    }
-
-    /// Check if a store path hash might be in the bloom filter.
-    pub fn contains(&self, hash: &str) -> bool {
-        self.read_bloom.load().contains(hash)
     }
 
     /// Record a deletion (bloom filters cannot remove elements).

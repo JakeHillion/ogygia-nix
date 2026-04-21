@@ -373,7 +373,7 @@ pub async fn get_providers(
     axum::extract::Query(query): axum::extract::Query<ProvidersQuery>,
 ) -> Response {
     // Check local store
-    let local = state.local_bloom.contains(&hash) && find_store_path(&hash).await.is_some();
+    let local = find_store_path(&hash).await.is_some();
 
     // Check peers via bloom lookup
     let peer_urls = &state.config.peers.urls;
