@@ -60,6 +60,12 @@ in
         - `bloom.peer_bloom_ttl_secs` (int) — how long a peer's bloom
           filter is cached before re-fetching.
 
+        - `bloom.peer_bloom_max_age_secs` (int) — maximum age for a
+          peer's bloom filter before it is discarded. Between
+          `peer_bloom_ttl_secs` and this value, stale blooms are served
+          while a background re-fetch is attempted. Defaults to
+          2× `peer_bloom_ttl_secs`.
+
         - `peers.urls` (list of string) — peer irisd HTTP URLs for
           bloom-based store path lookup.
 

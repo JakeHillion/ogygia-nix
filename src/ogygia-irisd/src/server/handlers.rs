@@ -599,7 +599,12 @@ mod tests {
             Arc::new(AppState {
                 config: Arc::new(config),
                 local_bloom,
-                peer_blooms: Arc::new(PeerBlooms::new(Duration::from_secs(300), 0, 0)),
+                peer_blooms: Arc::new(PeerBlooms::new(
+                    Duration::from_secs(300),
+                    Duration::from_secs(600),
+                    0,
+                    0,
+                )),
                 http_client: reqwest::Client::new(),
                 nar_cache,
             })

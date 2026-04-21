@@ -3,13 +3,13 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
-use std::time::Instant;
 
 use anyhow::Context;
 use anyhow::Result;
 use clap::Parser;
 use tokio::signal;
 use tokio::task::JoinHandle;
+use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 use tracing_subscriber::EnvFilter;
 
@@ -57,6 +57,7 @@ async fn main() -> Result<()> {
     ));
     let peer_blooms = Arc::new(bloom::peers::PeerBlooms::new(
         Duration::from_secs(config.bloom.peer_bloom_ttl_secs),
+        Duration::from_secs(config.bloom.max_age_secs()),
         local_bloom.num_bits(),
         local_bloom.num_hashes(),
     ));
@@ -154,7 +155,7 @@ async fn main() -> Result<()> {
                     .next_eviction_time()
                     .await
                     .map(|t| t.saturating_duration_since(Instant::now()))
-                    .unwrap_or(peer_blooms.ttl());
+                    .unwrap_or(peer_blooms.max_age());
                 tokio::select! {
                     _ = token.cancelled() => {
                         tracing::info!("Peer bloom eviction shutting down");

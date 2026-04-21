@@ -47,6 +47,9 @@ pub struct BloomConfig {
     /// Peer bloom cache TTL in seconds
     #[serde(default = "default_peer_bloom_ttl_secs")]
     pub peer_bloom_ttl_secs: u64,
+    /// Maximum age for peer bloom cache in seconds (defaults to 2× TTL)
+    #[serde(default)]
+    pub peer_bloom_max_age_secs: Option<u64>,
 }
 
 fn default_false_positive_rate() -> f64 {
@@ -61,12 +64,22 @@ fn default_peer_bloom_ttl_secs() -> u64 {
     300
 }
 
+impl BloomConfig {
+    /// Returns the maximum age for peer bloom cache in seconds.
+    /// Defaults to 2× the TTL if not explicitly configured.
+    pub fn max_age_secs(&self) -> u64 {
+        self.peer_bloom_max_age_secs
+            .unwrap_or(self.peer_bloom_ttl_secs * 2)
+    }
+}
+
 impl Default for BloomConfig {
     fn default() -> Self {
         Self {
             false_positive_rate: default_false_positive_rate(),
             rebuild_threshold: default_rebuild_threshold(),
             peer_bloom_ttl_secs: default_peer_bloom_ttl_secs(),
+            peer_bloom_max_age_secs: None,
         }
     }
 }
@@ -147,6 +160,15 @@ pub fn load_config(path: Option<&Path>) -> Result<Config> {
 
     let config: Config = toml::from_str(&content)
         .with_context(|| format!("Failed to parse config file: {}", config_path.display()))?;
+
+    // Validate bloom configuration: max_age must be >= ttl
+    if config.bloom.max_age_secs() < config.bloom.peer_bloom_ttl_secs {
+        anyhow::bail!(
+            "bloom.peer_bloom_max_age_secs ({}) must be >= bloom.peer_bloom_ttl_secs ({})",
+            config.bloom.max_age_secs(),
+            config.bloom.peer_bloom_ttl_secs
+        );
+    }
 
     Ok(config)
 }
@@ -233,5 +255,59 @@ listen = ["127.0.0.1:35742"]
 "#;
         let config: Config = toml::from_str(toml).unwrap();
         assert!(config.trust.trusted_keys.is_empty());
+    }
+
+    #[test]
+    fn test_parse_config_max_age_default() {
+        let toml = r#"
+[server]
+listen = ["127.0.0.1:35742"]
+
+[bloom]
+peer_bloom_ttl_secs = 300
+"#;
+        let config: Config = toml::from_str(toml).unwrap();
+        assert_eq!(config.bloom.peer_bloom_ttl_secs, 300);
+        assert_eq!(config.bloom.max_age_secs(), 600);
+    }
+
+    #[test]
+    fn test_parse_config_max_age_explicit() {
+        let toml = r#"
+[server]
+listen = ["127.0.0.1:35742"]
+
+[bloom]
+peer_bloom_ttl_secs = 300
+peer_bloom_max_age_secs = 900
+"#;
+        let config: Config = toml::from_str(toml).unwrap();
+        assert_eq!(config.bloom.peer_bloom_ttl_secs, 300);
+        assert_eq!(config.bloom.max_age_secs(), 900);
+    }
+
+    #[test]
+    fn test_config_max_age_validation() {
+        let toml = r#"
+[server]
+listen = ["127.0.0.1:35742"]
+
+[bloom]
+peer_bloom_ttl_secs = 300
+peer_bloom_max_age_secs = 200
+"#;
+        // Write to a temp file and test load_config validation
+        let temp_dir = std::env::temp_dir();
+        let config_path = temp_dir.join("test_invalid_max_age.toml");
+        std::fs::write(&config_path, toml).unwrap();
+
+        let result = load_config(Some(&config_path));
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(err_msg.contains("peer_bloom_max_age_secs"));
+        assert!(err_msg.contains("peer_bloom_ttl_secs"));
+
+        // Clean up
+        let _ = std::fs::remove_file(&config_path);
     }
 }
