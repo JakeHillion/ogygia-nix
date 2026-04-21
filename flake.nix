@@ -59,7 +59,13 @@
             };
           };
 
-          src = craneLib.cleanCargoSource (craneLib.path ./.);
+          src = lib.fileset.toSource {
+            root = ./.;
+            fileset = lib.fileset.unions [
+              (craneLib.fileset.commonCargoSources ./.)
+              ./src/ogygia-dashboard/src/web.css
+            ];
+          };
           inherit (craneLib.crateNameFromCargoToml { inherit src; }) version;
 
           fileSetForCrate = crate:
@@ -71,6 +77,16 @@
                 (craneLib.fileset.commonCargoSources crate)
               ];
             };
+
+          dashboardSrc = lib.fileset.toSource {
+            root = ./.;
+            fileset = lib.fileset.unions [
+              ./Cargo.toml
+              ./Cargo.lock
+              (craneLib.fileset.commonCargoSources ./src/ogygia-dashboard)
+              ./src/ogygia-dashboard/src/web.css
+            ];
+          };
 
           commonArgs = {
             inherit src;
@@ -111,7 +127,7 @@
           ogygia-dashboard = craneLib.buildPackage (individualCrateArgs // {
             pname = "ogygia-dashboard";
             cargoExtraArgs = "-p ogygia-dashboard";
-            src = fileSetForCrate ./src/ogygia-dashboard;
+            src = dashboardSrc;
             postInstall = ''
               ${pkgs.patchelf}/bin/patchelf --set-rpath "${lib.makeLibraryPath [ pkgs.openssl ]}" $out/bin/ogygia-dashboard
             '';
