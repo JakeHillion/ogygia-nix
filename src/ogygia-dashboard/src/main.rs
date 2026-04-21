@@ -55,6 +55,7 @@ async fn main() -> Result<()> {
 
     let app = Router::new()
         .route("/", get(web::index))
+        .route("/web.css", get(web::css))
         .route("/nixos/commits", get(web::nixos_commits_html))
         .with_state(app_state);
 
