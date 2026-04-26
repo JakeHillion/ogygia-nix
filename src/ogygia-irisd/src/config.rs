@@ -50,6 +50,15 @@ pub struct BloomConfig {
     /// Maximum age for peer bloom cache in seconds (defaults to 2× TTL)
     #[serde(default)]
     pub peer_bloom_max_age_secs: Option<u64>,
+    /// CUSUM reference value for burst detection
+    #[serde(default = "default_burst_k")]
+    pub burst_k: f64,
+    /// CUSUM decision threshold for burst detection (0.0 = disabled)
+    #[serde(default = "default_burst_h")]
+    pub burst_h: f64,
+    /// Max seconds to defer rebuilds during burst (0 = disabled)
+    #[serde(default = "default_burst_max_cooldown_secs")]
+    pub burst_max_cooldown_secs: u64,
 }
 
 fn default_false_positive_rate() -> f64 {
@@ -62,6 +71,18 @@ fn default_rebuild_threshold() -> f64 {
 
 fn default_peer_bloom_ttl_secs() -> u64 {
     300
+}
+
+fn default_burst_k() -> f64 {
+    1.0
+}
+
+fn default_burst_h() -> f64 {
+    0.0
+}
+
+fn default_burst_max_cooldown_secs() -> u64 {
+    0
 }
 
 impl BloomConfig {
@@ -80,6 +101,9 @@ impl Default for BloomConfig {
             rebuild_threshold: default_rebuild_threshold(),
             peer_bloom_ttl_secs: default_peer_bloom_ttl_secs(),
             peer_bloom_max_age_secs: None,
+            burst_k: default_burst_k(),
+            burst_h: default_burst_h(),
+            burst_max_cooldown_secs: default_burst_max_cooldown_secs(),
         }
     }
 }
@@ -167,6 +191,15 @@ pub fn load_config(path: Option<&Path>) -> Result<Config> {
             "bloom.peer_bloom_max_age_secs ({}) must be >= bloom.peer_bloom_ttl_secs ({})",
             config.bloom.max_age_secs(),
             config.bloom.peer_bloom_ttl_secs
+        );
+    }
+
+    // Validate burst configuration: if burst detection is enabled, cooldown must be > 0
+    if config.bloom.burst_h > 0.0 && config.bloom.burst_max_cooldown_secs == 0 {
+        anyhow::bail!(
+            "bloom.burst_max_cooldown_secs must be > 0 when bloom.burst_h is enabled (got burst_h={}, burst_max_cooldown_secs={})",
+            config.bloom.burst_h,
+            config.bloom.burst_max_cooldown_secs
         );
     }
 
@@ -308,6 +341,78 @@ peer_bloom_max_age_secs = 200
         assert!(err_msg.contains("peer_bloom_ttl_secs"));
 
         // Clean up
+        let _ = std::fs::remove_file(&config_path);
+    }
+
+    #[test]
+    fn test_burst_config_defaults() {
+        let toml = r#"
+[server]
+listen = ["127.0.0.1:35742"]
+"#;
+        let config: Config = toml::from_str(toml).unwrap();
+        assert!((config.bloom.burst_k - 1.0).abs() < f64::EPSILON);
+        assert!((config.bloom.burst_h - 0.0).abs() < f64::EPSILON);
+        assert_eq!(config.bloom.burst_max_cooldown_secs, 0);
+    }
+
+    #[test]
+    fn test_burst_config_explicit() {
+        let toml = r#"
+[server]
+listen = ["127.0.0.1:35742"]
+
+[bloom]
+burst_k = 2.0
+burst_h = 5.0
+burst_max_cooldown_secs = 60
+"#;
+        let config: Config = toml::from_str(toml).unwrap();
+        assert!((config.bloom.burst_k - 2.0).abs() < f64::EPSILON);
+        assert!((config.bloom.burst_h - 5.0).abs() < f64::EPSILON);
+        assert_eq!(config.bloom.burst_max_cooldown_secs, 60);
+    }
+
+    #[test]
+    fn test_burst_config_validation_rejects_zero_cooldown() {
+        let toml = r#"
+[server]
+listen = ["127.0.0.1:35742"]
+
+[bloom]
+burst_h = 5.0
+burst_max_cooldown_secs = 0
+"#;
+        let temp_dir = std::env::temp_dir();
+        let config_path = temp_dir.join("test_invalid_burst.toml");
+        std::fs::write(&config_path, toml).unwrap();
+
+        let result = load_config(Some(&config_path));
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(err_msg.contains("burst_max_cooldown_secs"));
+        assert!(err_msg.contains("burst_h"));
+
+        let _ = std::fs::remove_file(&config_path);
+    }
+
+    #[test]
+    fn test_burst_config_validation_accepts_disabled() {
+        let toml = r#"
+[server]
+listen = ["127.0.0.1:35742"]
+
+[bloom]
+burst_h = 0.0
+burst_max_cooldown_secs = 0
+"#;
+        let temp_dir = std::env::temp_dir();
+        let config_path = temp_dir.join("test_disabled_burst.toml");
+        std::fs::write(&config_path, toml).unwrap();
+
+        let result = load_config(Some(&config_path));
+        assert!(result.is_ok());
+
         let _ = std::fs::remove_file(&config_path);
     }
 }

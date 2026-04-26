@@ -2,6 +2,7 @@
 
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::time::Duration;
 
 use anyhow::Context;
@@ -111,7 +112,7 @@ async fn main() -> Result<()> {
     // HTTP server: started before the store scan so we serve peer lookups
     // immediately. GET /bloom returns 503 until the initial scan completes.
     tasks.push(tokio::spawn(server::start(
-        config,
+        Arc::clone(&config),
         Arc::clone(&local_bloom),
         Arc::clone(&peer_blooms),
         http_client,
@@ -139,8 +140,17 @@ async fn main() -> Result<()> {
     if !cli.no_watch {
         let bloom = Arc::clone(&local_bloom);
         let token = token.clone();
+        let burst_detector = Arc::new(Mutex::new(bloom::burst::BurstDetector::new(
+            config.bloom.burst_k,
+            config.bloom.burst_h,
+            Duration::from_secs(config.bloom.burst_max_cooldown_secs),
+        )));
         tasks.push(tokio::spawn(async move {
-            let watcher = Arc::new(store::watcher::StoreWatcher::new(bloom, rebuild_tx));
+            let watcher = Arc::new(store::watcher::StoreWatcher::new(
+                bloom,
+                rebuild_tx,
+                burst_detector,
+            ));
             watcher.start(token).await
         }));
     }
