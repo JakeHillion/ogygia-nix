@@ -30,35 +30,24 @@ jobs:
           extra-trusted-public-keys = nixcache.jakehillion.me-1:HQsjYdrcs3ilS/ngtlbTQXU4Xfsm+va5NN7yoK0wKMg=
           max-jobs = 2
 
+    - name: Setup Nix S3 cache
+      uses: testquorum/nix-s3-generations@v0.1.3
+      with:
+        s3-endpoint: https://28e45df51086264c6d9cf2b5e6ecc190.r2.cloudflarestorage.com
+        bucket: jakehillion-nix
+        public-key: nixcache.jakehillion.me-1:HQsjYdrcs3ilS/ngtlbTQXU4Xfsm+va5NN7yoK0wKMg=
+        private-key: ${{ secrets.NIX_SIGNING_KEY }}
+        region: auto
+        aws-access-key-id: ${{ secrets.R2_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+
     - name: Enter CI devShell
       uses: nicknovitski/nix-develop@9be7cfb4b10451d3390a75dc18ad0465bed4932a # v1
       with:
         arguments: .#ci
 
     - name: Build all outputs
-      run: nix-fast-build --no-nom --skip-cached --flake '.#ci' -j 2 --eval-workers 4
+      run: nix-fast-build --no-nom --flake '.#ci' -j 2 --eval-workers 4
 
     - name: Flake check
       run: nix flake check
-
-    - name: Sign and push to R2
-      if: always()
-      run: |
-        if [ -z "$SIGNING_KEY" ]; then
-          echo "No signing key available; skipping sign+push."
-          exit 0
-        fi
-        echo "$SIGNING_KEY" > /tmp/nix-signing-key
-        trap 'rm -f /tmp/nix-signing-key' EXIT
-        paths=$(nix path-info --all --json \
-          | jq -r 'to_entries[] | select(.value.ultimate == true) | .key')
-        if [ -z "$paths" ]; then
-          echo "No ultimate paths to sign; skipping."
-          exit 0
-        fi
-        echo "$paths" | xargs nix store sign --key-file /tmp/nix-signing-key
-        echo "$paths" | xargs nix copy --to 's3://jakehillion-nix?endpoint=https://28e45df51086264c6d9cf2b5e6ecc190.r2.cloudflarestorage.com&region=auto'
-      env:
-        SIGNING_KEY: ${{ secrets.NIX_SIGNING_KEY }}
-        AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
-        AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
