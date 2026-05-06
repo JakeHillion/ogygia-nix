@@ -41,11 +41,7 @@ impl Etcd {
             let endpoints = config.etcd.endpoints.clone();
             let prefix = prefix.clone();
             async move {
-                loop {
-                    let Some(me) = weak.upgrade() else {
-                        break;
-                    };
-
+                while let Some(me) = weak.upgrade() {
                     if let Err(e) = me.watch_loop(&endpoints, &prefix).await {
                         tracing::error!("etcd watch error: {e}, reconnecting...");
                     }
