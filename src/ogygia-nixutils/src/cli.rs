@@ -12,6 +12,7 @@ use async_stream::try_stream;
 use futures::Stream;
 use futures::StreamExt;
 use futures::pin_mut;
+use serde::de::DeserializeOwned;
 use tokio::io::AsyncBufReadExt;
 use tokio::io::AsyncWriteExt;
 use tokio::io::BufReader;
@@ -54,6 +55,37 @@ impl Default for NixCli {
 }
 
 impl NixCli {
+    /// Evaluate a Nix installable to JSON via `nix eval --json <installable>`,
+    /// optionally transforming it with `--apply <expr>`, and deserialize the
+    /// result into `T`.
+    ///
+    /// `installable` is passed through verbatim, so the caller owns the
+    /// `flakeref#attr.path` string and any attribute quoting it needs.
+    pub async fn eval_json<T: DeserializeOwned>(
+        &self,
+        installable: &str,
+        apply: Option<&str>,
+    ) -> Result<T> {
+        let mut cmd = Command::new(&*self.bin);
+        cmd.args(["eval", "--json"]).arg(installable);
+        if let Some(expr) = apply {
+            cmd.args(["--apply", expr]);
+        }
+
+        let output = cmd
+            .output()
+            .await
+            .with_context(|| format!("failed to spawn nix eval for {installable}"))?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(anyhow!("nix eval {installable} failed: {}", stderr.trim()));
+        }
+
+        serde_json::from_slice(&output.stdout)
+            .with_context(|| format!("failed to parse nix eval output for {installable}"))
+    }
+
     /// Sign the store paths in `paths` with the key in `key_file`.
     pub async fn sign_paths<P>(&self, key_file: &Path, paths: impl Stream<Item = P>) -> Result<()>
     where

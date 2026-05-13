@@ -239,6 +239,12 @@
               ogygiaModule = self.nixosModules.default;
             };
 
+            ogygia-nebula-module = import ./nixos/tests/nebula-module.nix {
+              inherit pkgs;
+              inherit (nixpkgs) lib;
+              ogygiaModule = self.nixosModules.default;
+            };
+
           } // lib.optionalAttrs (system == "x86_64-linux") {
             ogygia-irisd-local = import ./nixos/tests/irisd-local.nix {
               inherit pkgs system;
