@@ -86,6 +86,16 @@ impl Nix {
         self.db().await?.is_ultimate(store_path).await
     }
 
+    /// Evaluate a Nix installable to JSON, optionally transforming it with an
+    /// `--apply` expression, and deserialize the result into `T`.
+    pub async fn eval_json<T: serde::de::DeserializeOwned>(
+        &self,
+        installable: &str,
+        apply: Option<&str>,
+    ) -> Result<T> {
+        self.cli().eval_json(installable, apply).await
+    }
+
     /// Sign the store paths in `paths` with the key in `key_file`. Paths that
     /// already carry the key's signature are re-signed harmlessly; filter them
     /// out beforehand to avoid the work.

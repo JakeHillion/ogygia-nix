@@ -19,12 +19,6 @@ in
       example = "https://git.example.com/user/nixos.git";
     };
 
-    nebula.ipv4 = lib.mkOption {
-      type = lib.types.nullOr lib.types.str;
-      default = null;
-      description = "This node's Nebula IPv4 address for internal P2P communication.";
-      example = "172.20.0.1";
-    };
   };
 
   imports = [
@@ -33,6 +27,7 @@ in
     ./config-generator
     ./etcd
     ./irisd
+    ./nebula
     ./hostinfod
     ./dashboard
   ];

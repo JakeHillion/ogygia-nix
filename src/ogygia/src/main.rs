@@ -27,6 +27,8 @@
 
 #[cfg(feature = "irisd")]
 mod iris;
+#[cfg(feature = "nebula")]
+mod nebula;
 mod status;
 
 use std::process;
@@ -52,6 +54,9 @@ enum Command {
     /// Interact with irisd binary cache
     #[cfg(feature = "irisd")]
     Iris(iris::IrisArgs),
+    /// Manage Nebula CA, host keys, and certificates
+    #[cfg(feature = "nebula")]
+    Nebula(nebula::NebulaArgs),
 }
 
 impl Command {
@@ -60,6 +65,8 @@ impl Command {
             Command::Status => status::show_status(),
             #[cfg(feature = "irisd")]
             Command::Iris(args) => args.run(),
+            #[cfg(feature = "nebula")]
+            Command::Nebula(args) => args.run(),
         }
     }
 }
