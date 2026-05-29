@@ -126,7 +126,7 @@ impl Etcd {
 
     async fn watch_loop(&self, endpoints: &[String], prefix: &str) -> Result<()> {
         let mut client = Client::connect(endpoints, None).await?;
-        let (_watcher, mut stream) = client
+        let mut stream = client
             .watch(prefix, Some(WatchOptions::new().with_prefix()))
             .await?;
 
