@@ -24,7 +24,7 @@ Named after Calypso's mythical island, Ogygia aims to help you build your own pr
 - **🎯 Impact Analysis**: Identify which hosts are affected by configuration changes before deployment
 - **📊 Fleet Visibility**: Real-time monitoring of what's running across your entire infrastructure
 - **🏗️ Distributed Builds**: Seamlessly leverage your fleet's compute power for faster Nix builds
-- **⚡ Distributed Systems**: First-class support for building resilient clusters (ZooKeeper, etcd, and beyond)
+- **⚡ Distributed Systems**: First-class support for building resilient clusters (etcd and beyond)
 
 Whether you're managing a handful of servers or orchestrating a complex distributed system, Ogygia is designed to grow with your infrastructure while maintaining the simplicity and reproducibility that makes Nix powerful.
 
@@ -111,7 +111,7 @@ ogygia status
 
 #### Local-Only Mode
 
-When ZooKeeper is not configured, the status command shows only the local host:
+When etcd is not configured, the status command shows only the local host:
 
 ```
 Ogygia config not found; showing local data only.
@@ -241,41 +241,32 @@ The status display shows "unknown" in these cases:
 - The etcd key is missing (publisher hasn't written data yet)
 - The system state path doesn't exist yet (e.g., before first reboot)
 
-### ZooKeeper Fleet Visibility
+#### Troubleshooting
 
-Ogygia can also connect to ZooKeeper to provide fleet-wide visibility. The status command will prefer etcd if both are configured.
+**Connection Failures**
 
-#### Configuration
+If the CLI cannot connect to etcd, it will display an error and fall back to local-only mode:
 
-```nix
-{
-  ogygia = {
-    enable = true;
-    domain = "example.com";
-    zookeeper = {
-      enable = true;
-      endpoints = [
-        "zk1.internal:2181"
-        "zk2.internal:2181"
-        "zk3.internal:2181"
-      ];
-      namespace = "/nixos/versions";
-      timeoutSeconds = 10;
-    };
-  };
-}
+```
+etcd fleet state (/nixos/versions via /run/current-system/sw/share/ogygia/config.toml):
+Failed to read etcd from /run/current-system/sw/share/ogygia/config.toml: failed to connect to etcd at ["http://etcd1:2379"]. Check that the endpoints are reachable and the etcd service is running. Connection timeout: 10s. Showing local data only.
+Host           ⚡ current    🥾 booted      🔜 next boot
+-------------------------------------------------------
+* web01 (local) a1b2c3d4e5f6  a1b2c3d4e5f6  g7h8i9j0k1l2
 ```
 
-#### ZooKeeper Data Structure
+**Common Issues:**
+- **etcd not running**: Ensure the etcd service is running on the configured endpoints
+- **Network connectivity**: Verify the host can reach the etcd endpoints (check firewall rules)
+- **Namespace doesn't exist**: This is normal before the publisher daemon creates the keys
+- **Permission denied**: Check etcd ACLs if authentication is enabled
 
-Same structure as etcd:
-```
-/nixos/versions/
-├── web01/
-│   ├── current
-│   ├── booted
-│   └── nextboot
-```
+**"unknown" Revisions**
+
+The status display shows "unknown" in these cases:
+- The build revision file doesn't exist (system not built with Ogygia enabled)
+- The etcd key is missing (publisher hasn't written data yet)
+- The system state path doesn't exist yet (e.g., before first reboot)
 
 **Hostname Detection Issues**
 
@@ -286,11 +277,9 @@ Ogygia detects the hostname using multiple fallback strategies:
 4. `hostname` command (short name)
 5. `gethostname()` syscall
 
-If hostname detection isn't working as expected, use the `OGYGIA_HOSTNAME` environment variable to override it
+If hostname detection isn't working as expected, use the `OGYGIA_HOSTNAME` environment variable to override it.
 
 ### Irisd Peer-to-Peer Binary Cache
-
-Ogygia includes **ogygia-irisd**, a peer-to-peer Nix binary cache that enables distributed builds across your fleet without relying on a central cache server.
 
 #### Overview
 

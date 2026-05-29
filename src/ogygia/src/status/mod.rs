@@ -6,7 +6,7 @@
 //! 1. **Local-only mode**: Shows revision information for the current host by
 //!    reading from standard NixOS system state paths.
 //!
-//! 2. **Fleet mode**: Connects to etcd or ZooKeeper to display
+//! 2. **Fleet mode**: Connects to etcd to display
 //!    revision information for all hosts in the fleet that have published their state.
 //!
 //! ## Architecture
@@ -27,12 +27,12 @@
 //!
 //! ## Note on Write Side
 //!
-//! This module only **reads** from etcd/ZooKeeper. A separate publisher daemon
+//! This module only **reads** from etcd. A separate publisher daemon
 //! (not included here) is responsible for writing host state.
 //!
 //! ## Module Organization
 //!
-//! - `state`: State gathering logic (filesystem, etcd, ZooKeeper, config loading)
+//! - `state`: State gathering logic (filesystem, etcd, config loading)
 //! - `display`: Rendering and formatting logic (tables, truncation, trimming)
 //! - `tests`: Unit tests for both state and display modules
 
@@ -48,7 +48,6 @@ use state::HostMatcher;
 use state::collect_local_state;
 use state::detect_hostname;
 use state::fetch_etcd_state;
-use state::fetch_zookeeper_state;
 use state::load_cli_config;
 use tracing::info;
 use tracing::warn;
@@ -59,7 +58,7 @@ use tracing::warn;
 /// 1. Loading configuration (if available)
 /// 2. Detecting the local hostname
 /// 3. Collecting local system state
-/// 4. Optionally fetching fleet state from etcd or ZooKeeper
+/// 4. Optionally fetching fleet state from etcd
 /// 5. Rendering the status table
 ///
 /// If no backend is configured or connection fails, gracefully falls back
@@ -76,7 +75,6 @@ pub fn show_status() -> Result<()> {
 
     match cli_config.as_ref() {
         Some(cli_config) => {
-            // Prefer etcd, fallback to ZooKeeper (deprecated)
             if let Some(etcd) = cli_config.etcd.as_ref() {
                 info!(
                     namespace = %etcd.namespace,
@@ -107,42 +105,10 @@ pub fn show_status() -> Result<()> {
                         print_host_table(&[local_state], domain_suffix);
                     }
                 }
-            } else if let Some(zookeeper) = cli_config.zookeeper.as_ref() {
-                warn!(
-                    "ZooKeeper support is deprecated and will be removed in a future version. \
-                     Please migrate to etcd, which is more actively supported and will receive all future features."
-                );
-                info!(
-                    namespace = %zookeeper.namespace,
-                    config = %cli_config.path.display(),
-                    "ZooKeeper fleet state"
-                );
-
-                match fetch_zookeeper_state(zookeeper, Some(&host_matcher)) {
-                    Ok(remote_states) => {
-                        // Combine local and remote states
-                        let mut all_states = vec![local_state];
-                        all_states.extend(remote_states);
-
-                        if all_states.len() == 1 {
-                            info!("only the local host is currently registered in ZooKeeper");
-                        }
-
-                        print_host_table(&all_states, domain_suffix);
-                    }
-                    Err(error) => {
-                        warn!(
-                            config = %cli_config.path.display(),
-                            %error,
-                            "failed to read ZooKeeper, showing local data only"
-                        );
-                        print_host_table(&[local_state], domain_suffix);
-                    }
-                }
             } else {
                 info!(
                     config = %cli_config.path.display(),
-                    "etcd/ZooKeeper settings not found, showing local data only"
+                    "etcd settings not found, showing local data only"
                 );
                 print_host_table(&[local_state], domain_suffix);
             }

@@ -6,7 +6,7 @@ let
 
   tomlFormat = pkgs.formats.toml { };
 
-  # Build config data from all enabled backends
+  # Build config data from etcd backend
   etcdEnabled = cfg.etcd.endpoints != [ ];
   configData = {
     ogygia = {
@@ -16,12 +16,6 @@ let
         endpoints = cfg.etcd.endpoints;
         namespace = cfg.etcd.namespace;
         timeout_seconds = cfg.etcd.timeoutSeconds;
-      };
-    } // lib.optionalAttrs cfg.zookeeper.enable {
-      zookeeper = {
-        endpoints = cfg.zookeeper.endpoints;
-        namespace = cfg.zookeeper.namespace;
-        timeout_seconds = cfg.zookeeper.timeoutSeconds;
       };
     };
   };
@@ -34,8 +28,8 @@ let
   '';
 in
 {
-  # This module provides the shared config package that all backends contribute to
-  config = lib.mkIf (cfg.enable && cliCfg.enable && (etcdEnabled || cfg.zookeeper.enable)) {
+  # This module provides the shared config package that the etcd backend contributes to
+  config = lib.mkIf (cfg.enable && cliCfg.enable && etcdEnabled) {
     ogygia.cliConfig.package = configPackage;
 
     environment = {

@@ -11,12 +11,6 @@ allow = [
     "CC0-1.0",
 ]
 
-[advisories]
-ignore = [
-    # net2 is an indirect dependency via zookeeper; no patched release exists yet.
-    "RUSTSEC-2020-0016",
-]
-
 [bans]
 multiple-versions = "warn"
 wildcards = "allow"
