@@ -3,7 +3,6 @@
 //! This module handles all data collection from:
 //! - Local filesystem (reading system state paths and build revision files)
 //! - etcd (fetching fleet-wide host state)
-//! - ZooKeeper (fetching fleet-wide host state)
 //! - Configuration files (loading TOML config)
 //! - Hostname detection (environment, commands, syscalls)
 //!
@@ -25,15 +24,11 @@ use etcd_client::ConnectOptions;
 use etcd_client::GetOptions;
 use hostname::get as get_hostname;
 use serde::Deserialize;
-use zookeeper::WatchedEvent;
-use zookeeper::Watcher;
-use zookeeper::ZkError;
-use zookeeper::ZooKeeper;
 
 /// Number of system states tracked per host (current, booted, next boot).
 pub const STATE_COUNT: usize = 3;
 
-/// Minimum ZooKeeper connection timeout in seconds.
+/// Minimum connection timeout in seconds.
 const MIN_TIMEOUT_SECONDS: u64 = 1;
 
 /// Relative path from system closure to the build revision file.
@@ -53,7 +48,7 @@ const CONFIG_OVERRIDE_ENV: &str = "OGYGIA_CONFIG";
 pub struct SystemStateData {
     /// Absolute path on the local filesystem where this system state is stored.
     pub base_path: &'static str,
-    /// Name of the key in etcd/ZooKeeper under the host's namespace that stores this state.
+    /// Name of the key in etcd under the host's namespace that stores this state.
     pub key_name: &'static str,
 }
 
@@ -82,7 +77,7 @@ pub type StateValues = [Option<String>; STATE_COUNT];
 /// Display formatting (truncation, domain trimming) is handled elsewhere.
 #[derive(Clone, Debug)]
 pub struct HostState {
-    /// Full hostname (FQDN or short name, as stored in etcd/ZooKeeper or detected locally).
+    /// Full hostname (FQDN or short name, as stored in etcd or detected locally).
     pub host: String,
     /// Build revisions for current, booted, and next boot states (full strings, not truncated).
     pub values: StateValues,
@@ -99,25 +94,12 @@ pub struct CliConfig {
     pub domain_suffix: Option<String>,
     /// Optional etcd connection configuration.
     pub etcd: Option<EtcdCliConfig>,
-    /// Optional ZooKeeper connection configuration.
-    pub zookeeper: Option<ZookeeperCliConfig>,
 }
 
 /// Processed etcd configuration ready for connection.
 #[derive(Debug)]
 pub struct EtcdCliConfig {
     /// List of etcd endpoints in "http://host:port" format.
-    pub endpoints: Vec<String>,
-    /// Normalized namespace path (starts with /, no trailing /).
-    pub namespace: String,
-    /// Connection timeout duration.
-    pub timeout: Duration,
-}
-
-/// Processed ZooKeeper configuration ready for connection.
-#[derive(Debug)]
-pub struct ZookeeperCliConfig {
-    /// List of ZooKeeper endpoints in "host:port" format.
     pub endpoints: Vec<String>,
     /// Normalized namespace path (starts with /, no trailing /).
     pub namespace: String,
@@ -162,85 +144,6 @@ fn read_revision(base_path: &Path) -> Option<String> {
         }
         Err(error) => Some(format!("error: {}", error)),
     }
-}
-
-/// Fetches host state data from ZooKeeper.
-///
-/// Connects to ZooKeeper, lists all hosts under the configured namespace,
-/// and reads their build revisions for all three system states.
-///
-/// Returns raw data with full hostnames (no domain trimming) and full revision
-/// strings (no truncation).
-///
-/// # Arguments
-///
-/// * `config` - ZooKeeper connection and namespace configuration
-/// * `exclude_host` - Optional hostname matcher to exclude (typically the local host)
-///
-/// # Returns
-///
-/// A vector of host state rows, sorted alphabetically by hostname.
-/// Missing znodes are represented as `None`.
-pub fn fetch_zookeeper_state(
-    config: &ZookeeperCliConfig,
-    exclude_host: Option<&HostMatcher>,
-) -> Result<Vec<HostState>> {
-    let connection_string = config.endpoints.join(",");
-    let zk =
-        ZooKeeper::connect(&connection_string, config.timeout, NoopWatcher).with_context(|| {
-            format!(
-                "failed to connect to ZooKeeper at {}. \
-                 Check that the endpoints are reachable and the ZooKeeper service is running. \
-                 Connection timeout: {:?}",
-                connection_string, config.timeout
-            )
-        })?;
-
-    let hosts = zk.get_children(&config.namespace, false).with_context(|| {
-        format!(
-            "failed to list hosts under {}. \
-                 The namespace may not exist yet, or you may not have read permissions. \
-                 This is normal if no publisher daemon has written data yet",
-            config.namespace
-        )
-    })?;
-
-    let mut rows = Vec::with_capacity(hosts.len());
-    for host in hosts {
-        if exclude_host
-            .map(|matcher| matcher.matches(&host))
-            .unwrap_or(false)
-        {
-            continue;
-        }
-
-        let mut values = empty_state_values();
-        let host_path = join_zk_path(&config.namespace, &host);
-
-        for (idx, state) in SYSTEM_STATE_DATA.iter().enumerate() {
-            let path = join_zk_path(&host_path, state.key_name);
-            match zk.get_data(&path, false) {
-                Ok((data, _)) => {
-                    if let Some(value) = parse_zk_revision_bytes(&data) {
-                        values[idx] = Some(value);
-                    }
-                }
-                Err(ZkError::NoNode) => { /* missing state is acceptable */ }
-                Err(error) => {
-                    return Err(anyhow!(error)).with_context(|| format!("failed to read {path}"));
-                }
-            }
-        }
-
-        rows.push(HostState {
-            host,
-            values,
-            is_local: false,
-        });
-    }
-
-    rows.sort_by(|a, b| a.host.cmp(&b.host));
-    Ok(rows)
 }
 
 /// Fetches host state data from etcd.
@@ -392,36 +295,6 @@ fn parse_etcd_value(data: &[u8]) -> Option<String> {
     }
 }
 
-/// Parses build revision bytes from ZooKeeper znode data.
-///
-/// Returns the full revision string (not truncated).
-/// Returns `None` if the data is not valid UTF-8, is empty, or contains only whitespace.
-fn parse_zk_revision_bytes(data: &[u8]) -> Option<String> {
-    let text = std::str::from_utf8(data).ok()?.trim();
-    if text.is_empty() {
-        None
-    } else {
-        Some(text.to_string())
-    }
-}
-
-/// Joins two ZooKeeper path components, handling slashes correctly.
-///
-/// ZooKeeper paths are always forward-slash separated strings (not platform-specific
-/// filesystem paths), so we need custom logic to handle edge cases like root paths
-/// and ensure no double slashes.
-pub fn join_zk_path(prefix: &str, child: &str) -> String {
-    if prefix == "/" {
-        format!("/{}", child.trim_start_matches('/'))
-    } else {
-        format!(
-            "{}/{}",
-            prefix.trim_end_matches('/'),
-            child.trim_start_matches('/')
-        )
-    }
-}
-
 /// Loads the Ogygia CLI configuration from the filesystem.
 ///
 /// Searches for configuration files in the following order:
@@ -448,13 +321,12 @@ pub fn load_cli_config() -> Result<Option<CliConfig>> {
             path,
             domain_suffix: None,
             etcd: None,
-            zookeeper: None,
         }));
     };
 
     let domain_suffix = ogygia_cfg.domain.and_then(|d| normalize_domain(&d));
 
-    // Parse etcd configuration (preferred)
+    // Parse etcd configuration
     let etcd = match ogygia_cfg.etcd {
         Some(raw_etcd) => {
             if raw_etcd.endpoints.is_empty() {
@@ -495,47 +367,14 @@ pub fn load_cli_config() -> Result<Option<CliConfig>> {
         None => None,
     };
 
-    // Parse ZooKeeper configuration
-    let zookeeper = match ogygia_cfg.zookeeper {
-        Some(raw_zk) => {
-            if raw_zk.endpoints.is_empty() {
-                return Err(anyhow!(
-                    "ZooKeeper config {} does not define any endpoints. \
-                     Add endpoints in the format [\"host1:2181\", \"host2:2181\"]",
-                    path.display()
-                ));
-            }
-
-            // Validate endpoint format
-            for endpoint in &raw_zk.endpoints {
-                if !endpoint.contains(':') {
-                    return Err(anyhow!(
-                        "Invalid ZooKeeper endpoint '{}' in {}. \
-                         Endpoints must be in 'host:port' format (e.g., 'zk1.example.com:2181')",
-                        endpoint,
-                        path.display()
-                    ));
-                }
-            }
-
-            Some(ZookeeperCliConfig {
-                endpoints: raw_zk.endpoints,
-                namespace: normalize_namespace(&raw_zk.namespace),
-                timeout: Duration::from_secs(raw_zk.timeout_seconds.max(MIN_TIMEOUT_SECONDS)),
-            })
-        }
-        None => None,
-    };
-
     Ok(Some(CliConfig {
         path,
         domain_suffix,
         etcd,
-        zookeeper,
     }))
 }
 
-/// Normalizes a ZooKeeper namespace path.
+/// Normalizes a namespace path.
 ///
 /// Ensures the path:
 /// - Starts with `/`
@@ -609,9 +448,6 @@ struct RawOgygiaConfig {
     /// etcd connection settings.
     #[serde(default)]
     etcd: Option<RawEtcdConfig>,
-    /// ZooKeeper connection settings.
-    #[serde(default)]
-    zookeeper: Option<RawZookeeperConfig>,
 }
 
 /// Raw etcd configuration section from TOML.
@@ -628,20 +464,6 @@ struct RawEtcdConfig {
     timeout_seconds: u64,
 }
 
-/// Raw ZooKeeper configuration section from TOML.
-#[derive(Debug, Deserialize)]
-struct RawZookeeperConfig {
-    /// List of ZooKeeper server endpoints (e.g., ["zk1:2181", "zk2:2181"]).
-    #[serde(default)]
-    endpoints: Vec<String>,
-    /// ZooKeeper namespace path where host data is stored.
-    #[serde(default = "default_zookeeper_namespace")]
-    namespace: String,
-    /// Connection timeout in seconds.
-    #[serde(default = "default_timeout_seconds")]
-    timeout_seconds: u64,
-}
-
 /// Default connection timeout in seconds.
 const fn default_timeout_seconds() -> u64 {
     10
@@ -650,21 +472,6 @@ const fn default_timeout_seconds() -> u64 {
 /// Default etcd namespace for host data storage.
 fn default_etcd_namespace() -> String {
     "/ogygia".to_string()
-}
-
-/// Default ZooKeeper namespace for host data storage.
-fn default_zookeeper_namespace() -> String {
-    "/nixos/versions".to_string()
-}
-
-/// No-op watcher for ZooKeeper connections.
-///
-/// We don't need to react to ZooKeeper events since we only perform
-/// one-shot reads, so this watcher does nothing.
-struct NoopWatcher;
-
-impl Watcher for NoopWatcher {
-    fn handle(&self, _: WatchedEvent) {}
 }
 
 /// Detects the current hostname using multiple fallback strategies.

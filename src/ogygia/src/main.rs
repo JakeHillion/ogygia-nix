@@ -2,12 +2,12 @@
 //!
 //! Ogygia is a read-only CLI tool for viewing NixOS system build revisions
 //! across a fleet of hosts. It can operate in local-only mode (reading from
-//! the local filesystem) or fleet mode (fetching data from ZooKeeper).
+//! the local filesystem) or fleet mode (fetching data from etcd).
 //!
 //! # Usage
 //!
 //! ```bash
-//! # View status (local only if ZooKeeper not configured)
+//! # View status (local only if etcd not configured)
 //! ogygia status
 //!
 //! # Override configuration file location
@@ -47,7 +47,7 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Show build commits for the local host and ZooKeeper fleet
+    /// Show build commits for the local host and etcd fleet
     Status,
     /// Interact with irisd binary cache
     #[cfg(feature = "irisd")]
