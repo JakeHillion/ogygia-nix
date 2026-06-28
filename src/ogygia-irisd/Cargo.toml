@@ -13,6 +13,9 @@ toml = { workspace = true }
 hostname = { workspace = true }
 strum = { workspace = true }
 
+# Nix store database access
+ogygia-nixutils = { path = "../ogygia-nixutils" }
+
 # HTTP server
 axum = { workspace = true }
 tokio = { workspace = true }
@@ -46,7 +49,6 @@ async-compression = { workspace = true }
 
 # Serialization
 bincode = { workspace = true }
-serde_json = { workspace = true }
 
 # Logging
 tracing = { workspace = true }

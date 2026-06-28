@@ -47,6 +47,14 @@ sha2 = "0.10"
 hex = "0.4"
 siphasher = "1"
 
+# Nix store database (read-only SQLite access via an async connection pool)
+rusqlite = { version = "0.38", features = ["bundled"] }
+deadpool-sqlite = "0.13"
+
+# Integration testing against a real Nix store
+testcontainers = "0.27"
+rstest = "0.26"
+
 # Cache
 moka = { version = "0.12", features = ["future"] }
 
