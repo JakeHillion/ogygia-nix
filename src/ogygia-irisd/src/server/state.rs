@@ -10,6 +10,7 @@ use axum::response::Response;
 use bytes::Bytes;
 use futures::StreamExt;
 use futures::stream::FuturesUnordered;
+use ogygia_nixutils::NixDb;
 
 use crate::bloom::local::LocalBloom;
 use crate::bloom::peers::PeerBlooms;
@@ -25,6 +26,7 @@ pub struct AppState {
     pub peer_blooms: Arc<PeerBlooms>,
     pub http_client: reqwest::Client,
     pub nar_cache: Arc<NarCache>,
+    pub nix_db: NixDb,
 }
 
 impl AppState {

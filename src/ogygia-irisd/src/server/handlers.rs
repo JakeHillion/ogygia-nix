@@ -17,11 +17,9 @@ use tokio::io::AsyncReadExt;
 use tokio_util::io::ReaderStream;
 
 use super::AppState;
-use crate::nix::cache::NarCache;
 use crate::nix::narinfo::NarInfo;
 use crate::nix::narinfo::nar_hash_to_hex;
-use crate::nix::store::PathInfo;
-use crate::nix::store::find_store_path;
+use crate::nix::narinfo::narinfo_from_path_info;
 
 /// GET /nix-cache-info
 pub async fn nix_cache_info(State(state): State<Arc<AppState>>) -> impl IntoResponse {
@@ -76,7 +74,7 @@ pub async fn get_narinfo(
     };
 
     // 1. Try local store first
-    if let Some(narinfo) = try_local_store_narinfo(hash, &state.nar_cache).await {
+    if let Some(narinfo) = try_local_store_narinfo(&state, hash).await {
         return (
             StatusCode::OK,
             [("content-type", "text/x-nix-narinfo")],
@@ -117,7 +115,7 @@ pub async fn get_local_narinfo(
         }
     };
 
-    match try_local_store_narinfo(hash, &state.nar_cache).await {
+    match try_local_store_narinfo(&state, hash).await {
         Some(narinfo) => (
             StatusCode::OK,
             [("content-type", "text/x-nix-narinfo")],
@@ -132,27 +130,23 @@ pub async fn get_local_narinfo(
 ///
 /// Ensures the NAR is cached so the response includes the real compressed
 /// FileHash and FileSize (needed for integrity validation and range requests).
-async fn try_local_store_narinfo(hash: &str, nar_cache: &NarCache) -> Option<NarInfo> {
-    let store_path = find_store_path(hash).await?;
-
-    tracing::debug!("Found store path for {}: {}", hash, store_path.display());
-
-    let path_info = match PathInfo::from_store_path(&store_path).await {
-        Ok(info) => info,
+async fn try_local_store_narinfo(state: &AppState, hash: &str) -> Option<NarInfo> {
+    let path_info = match state.nix_db.find_path_info(hash).await {
+        Ok(Some(info)) => info,
+        Ok(None) => return None,
         Err(e) => {
-            tracing::warn!(
-                "Failed to get path-info for {}: {}",
-                store_path.display(),
-                e
-            );
+            tracing::warn!("Failed to query Nix database for {}: {}", hash, e);
             return None;
         }
     };
 
-    let mut narinfo = path_info.to_narinfo(hash);
+    let store_path = PathBuf::from(&path_info.path);
+    tracing::debug!("Found store path for {}: {}", hash, store_path.display());
+
+    let mut narinfo = narinfo_from_path_info(&path_info);
 
     // Generate/retrieve the cached NAR to get real FileHash and FileSize
-    match nar_cache.ensure(hash, &store_path).await {
+    match state.nar_cache.ensure(hash, &store_path).await {
         Ok(cached) => {
             narinfo.file_hash = cached.file_hash.clone();
             narinfo.file_size = cached.file_size;
@@ -178,7 +172,7 @@ pub async fn get_nar(State(state): State<Arc<AppState>>, Path(path): Path<String
         return (StatusCode::NOT_FOUND, "Not found").into_response();
     };
 
-    let local = try_local_store_nar(hash, nar_hash, &state.nar_cache, None).await;
+    let local = try_local_store_nar(&state, hash, nar_hash, None).await;
     if local.status() != StatusCode::NOT_FOUND {
         return local;
     }
@@ -203,7 +197,7 @@ pub async fn get_local_nar(
     };
 
     let range = parse_byte_range(&headers);
-    try_local_store_nar(hash, nar_hash, &state.nar_cache, range).await
+    try_local_store_nar(&state, hash, nar_hash, range).await
 }
 
 /// Parse a NAR path into `(nar_hash, store_hash)`.
@@ -246,39 +240,35 @@ fn parse_byte_range(headers: &HeaderMap) -> Option<(u64, Option<u64>)> {
 /// the requested byte range. Supports open-ended `(start, None)` and
 /// closed `(start, Some(end))` ranges.
 async fn try_local_store_nar(
+    state: &AppState,
     hash: &str,
     expected_nar_hash: &str,
-    nar_cache: &NarCache,
     range: Option<(u64, Option<u64>)>,
 ) -> Response {
-    let Some(store_path) = find_store_path(hash).await else {
-        return (StatusCode::NOT_FOUND, "Not found").into_response();
+    let path_info = match state.nix_db.find_path_info(hash).await {
+        Ok(Some(info)) => info,
+        Ok(None) => return (StatusCode::NOT_FOUND, "Not found").into_response(),
+        Err(e) => {
+            tracing::warn!("Failed to query Nix database for {}: {}", hash, e);
+            return (StatusCode::NOT_FOUND, "Not found").into_response();
+        }
     };
 
+    let store_path = PathBuf::from(&path_info.path);
+
     // Verify the local NarHash matches what the URL claims
-    match PathInfo::from_store_path(&store_path).await {
-        Ok(info) if nar_hash_to_hex(&info.nar_hash) != expected_nar_hash => {
-            tracing::debug!(
-                "Local NarHash mismatch for {}: expected {}, got {}",
-                hash,
-                expected_nar_hash,
-                nar_hash_to_hex(&info.nar_hash)
-            );
-            return (StatusCode::NOT_FOUND, "Not found").into_response();
-        }
-        Err(e) => {
-            tracing::warn!(
-                "Failed to get path-info for {}: {}",
-                store_path.display(),
-                e
-            );
-            return (StatusCode::NOT_FOUND, "Not found").into_response();
-        }
-        _ => {}
+    if nar_hash_to_hex(&path_info.nar_hash) != expected_nar_hash {
+        tracing::debug!(
+            "Local NarHash mismatch for {}: expected {}, got {}",
+            hash,
+            expected_nar_hash,
+            nar_hash_to_hex(&path_info.nar_hash)
+        );
+        return (StatusCode::NOT_FOUND, "Not found").into_response();
     }
 
     // Get from cache or generate, opening the file under the RwLock
-    let (cached, mut file) = match nar_cache.ensure_and_open(hash, &store_path).await {
+    let (cached, mut file) = match state.nar_cache.ensure_and_open(hash, &store_path).await {
         Ok((cached, Some(file))) => (cached, file),
         Ok((_, None)) => {
             tracing::debug!("Cached NAR for {} evicted during open", hash);
@@ -379,7 +369,13 @@ pub async fn get_providers(
     axum::extract::Query(query): axum::extract::Query<ProvidersQuery>,
 ) -> Response {
     // Check local store
-    let local = find_store_path(&hash).await.is_some();
+    let local = state
+        .nix_db
+        .find_store_path(&hash)
+        .await
+        .ok()
+        .flatten()
+        .is_some();
 
     // Check peers via bloom lookup
     let peer_urls = &state.config.peers.urls;
@@ -456,17 +452,21 @@ pub async fn rescan(
             continue;
         }
 
-        // Query path info and verify serveability
-        let info = match PathInfo::from_store_path(path).await {
-            Ok(info) => info,
+        // Query the Nix database and verify serveability
+        let serveable = match state.nix_db.is_path_serveable(&path_str).await {
+            Ok(s) => s,
             Err(e) => {
-                tracing::warn!("rescan: failed to query path info for {}: {}", path_str, e);
+                tracing::warn!(
+                    "rescan: failed to query Nix database for {}: {}",
+                    path_str,
+                    e
+                );
                 errors += 1;
                 continue;
             }
         };
 
-        if !info.is_serveable() {
+        if !serveable {
             tracing::warn!(
                 "rescan: path is not serveable (neither signed nor content-addressed): {}",
                 path_str
@@ -607,6 +607,7 @@ mod tests {
                 )),
                 http_client: reqwest::Client::new(),
                 nar_cache,
+                nix_db: ogygia_nixutils::NixDb::open_in_memory().await.unwrap(),
             })
         }
 

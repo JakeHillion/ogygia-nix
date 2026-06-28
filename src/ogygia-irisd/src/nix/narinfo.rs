@@ -6,6 +6,7 @@ use anyhow::Result;
 use anyhow::anyhow;
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
+use ogygia_nixutils::PathInfo;
 
 /// Convert a NarHash from SRI base64 format (`sha256-BASE64==`) to bare hex.
 /// Hashes without the SRI prefix are returned unchanged.
@@ -234,6 +235,51 @@ impl NarInfo {
     }
 }
 
+/// Build a [`NarInfo`] from store-path metadata.
+///
+/// `FileHash`/`FileSize` are set to placeholders (the uncompressed NAR hash and
+/// size); the caller fills in the real compressed values after generating the
+/// NAR. The NAR URL encodes the NarHash so NAR requests are self-describing.
+pub fn narinfo_from_path_info(info: &PathInfo) -> NarInfo {
+    // Store path name without the `/nix/store/` prefix.
+    let store_name = info.path.strip_prefix("/nix/store/").unwrap_or(&info.path);
+
+    // Encode the NarHash in the URL so NAR requests are self-describing and we
+    // don't need server-side state to match a narinfo to its NAR.
+    let url = format!(
+        "nar/{}/{}.nar.zst",
+        nar_hash_to_hex(&info.nar_hash),
+        store_name
+    );
+
+    // References and deriver are reported as bare store names, not full paths.
+    let references: Vec<String> = info
+        .references
+        .iter()
+        .filter_map(|r| r.strip_prefix("/nix/store/"))
+        .map(String::from)
+        .collect();
+    let deriver = info
+        .deriver
+        .as_ref()
+        .and_then(|d| d.strip_prefix("/nix/store/").map(String::from));
+
+    NarInfo {
+        store_path: info.path.clone(),
+        url,
+        compression: Compression::Zstd,
+        // Placeholders until the NAR is generated and compressed.
+        file_hash: info.nar_hash.clone(),
+        file_size: info.nar_size,
+        nar_hash: info.nar_hash.clone(),
+        nar_size: info.nar_size,
+        references,
+        deriver,
+        signatures: info.signatures.clone(),
+        ca: info.ca.clone(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -250,6 +296,44 @@ Deriver: xyz789abc123def456ghi012jkl345mno-hello-2.10.drv
 Sig: cache.nixos.org-1:abcdefghijklmnop
 Sig: my-cache-1:qrstuvwxyz123456
 "#;
+
+    #[test]
+    fn test_narinfo_from_path_info() {
+        let path_info = PathInfo {
+            path: "/nix/store/abc123def456ghi789jkl012mno345pq-hello-2.10".to_string(),
+            nar_hash: "sha256-ASNFZ4mrze8=".to_string(),
+            nar_size: 12345,
+            references: vec!["/nix/store/xyz789abc123def456ghi012jkl345mno-glibc-2.35".to_string()],
+            deriver: Some(
+                "/nix/store/drv123abc456def789ghi012jkl345mno-hello-2.10.drv".to_string(),
+            ),
+            signatures: vec!["cache.nixos.org-1:signature123".to_string()],
+            ca: None,
+        };
+
+        let narinfo = narinfo_from_path_info(&path_info);
+
+        assert_eq!(
+            narinfo.store_path,
+            "/nix/store/abc123def456ghi789jkl012mno345pq-hello-2.10"
+        );
+        assert_eq!(
+            narinfo.url,
+            "nar/0123456789abcdef/abc123def456ghi789jkl012mno345pq-hello-2.10.nar.zst"
+        );
+        assert_eq!(narinfo.compression, Compression::Zstd);
+        assert_eq!(narinfo.nar_hash, "sha256-ASNFZ4mrze8=");
+        assert_eq!(narinfo.nar_size, 12345);
+        assert_eq!(
+            narinfo.references,
+            vec!["xyz789abc123def456ghi012jkl345mno-glibc-2.35"]
+        );
+        assert_eq!(
+            narinfo.deriver.as_deref(),
+            Some("drv123abc456def789ghi012jkl345mno-hello-2.10.drv")
+        );
+        assert_eq!(narinfo.signatures.len(), 1);
+    }
 
     #[test]
     fn test_parse_narinfo() {

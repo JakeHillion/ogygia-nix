@@ -7,6 +7,7 @@ use std::time::Duration;
 use anyhow::Context;
 use anyhow::Result;
 use clap::Parser;
+use ogygia_nixutils::NixDb;
 use tokio::signal;
 use tokio::task::JoinHandle;
 use tokio::time::Instant;
@@ -90,6 +91,11 @@ async fn main() -> Result<()> {
         tracing::info!("NAR cache: recovered {} entries from disk", recovered);
     }
 
+    // Open the Nix database (read-only). A single connection pool is shared,
+    // cheaply cloned, across the HTTP server, scanner, and watcher.
+    let nix_db = NixDb::open().await.context("Failed to open Nix database")?;
+    tracing::info!("Opened Nix database");
+
     // Cancellation token for coordinated shutdown
     let token = CancellationToken::new();
 
@@ -116,20 +122,18 @@ async fn main() -> Result<()> {
         Arc::clone(&peer_blooms),
         http_client,
         nar_cache,
+        nix_db.clone(),
         token.clone(),
     )));
 
     {
-        let scanner = store::scanner::StoreScanner::new(Arc::clone(&local_bloom), rebuild_rx);
+        let scanner =
+            store::scanner::StoreScanner::new(Arc::clone(&local_bloom), nix_db.clone(), rebuild_rx);
         let local_bloom = Arc::clone(&local_bloom);
 
         tasks.push(tokio::spawn(async move {
             let stats = scanner.scan("Store scan").await?;
-            tracing::info!(
-                "Store scan: {} paths, {} indexed",
-                stats.total_paths,
-                stats.indexed,
-            );
+            tracing::info!("Store scan: {} indexed", stats.indexed);
             local_bloom.finish_rebuild();
             scanner.run_rebuild_loop().await
         }));
@@ -138,9 +142,10 @@ async fn main() -> Result<()> {
     // Store watcher (optional, runs until cancelled)
     if !cli.no_watch {
         let bloom = Arc::clone(&local_bloom);
+        let nix_db = nix_db.clone();
         let token = token.clone();
         tasks.push(tokio::spawn(async move {
-            let watcher = Arc::new(store::watcher::StoreWatcher::new(bloom, rebuild_tx));
+            let watcher = Arc::new(store::watcher::StoreWatcher::new(bloom, nix_db, rebuild_tx));
             watcher.start(token).await
         }));
     }
