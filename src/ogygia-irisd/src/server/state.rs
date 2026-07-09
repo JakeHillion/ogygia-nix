@@ -1,5 +1,6 @@
 //! Shared application state and peer lookup logic.
 
+use std::collections::HashSet;
 use std::pin::Pin;
 use std::sync::Arc;
 
@@ -28,6 +29,36 @@ pub struct AppState {
 }
 
 impl AppState {
+    /// Check if a fetched narinfo is trusted and log the result.
+    ///
+    /// Returns `Some((narinfo, peer_url))` if trusted, `None` otherwise.
+    fn check_narinfo_trusted(
+        &self,
+        narinfo: NarInfo,
+        peer_url: String,
+        hash: &str,
+    ) -> Option<(NarInfo, String)> {
+        let trusted_keys = &self.config.trust.trusted_keys;
+        if !narinfo.is_trusted(trusted_keys) {
+            tracing::debug!(
+                "narinfo {} from {} is not trusted (no CA field or trusted signature), skipping",
+                hash,
+                peer_url
+            );
+            return None;
+        }
+        if narinfo.ca.is_some() {
+            tracing::info!(
+                "narinfo {} fetched from peer {} (content-addressed)",
+                hash,
+                peer_url
+            );
+        } else {
+            tracing::info!("narinfo {} fetched from peer {}", hash, peer_url);
+        }
+        Some((narinfo, peer_url))
+    }
+
     /// Try to fetch narinfo from peer via bloom filter lookup.
     ///
     /// Streams bloom lookups concurrently with narinfo fetches: as each
@@ -38,8 +69,6 @@ impl AppState {
         if peer_urls.is_empty() {
             return None;
         }
-
-        let trusted_keys = &self.config.trust.trusted_keys;
 
         let mut candidate_rx = self
             .peer_blooms
@@ -54,25 +83,10 @@ impl AppState {
                 biased;
 
                 Some(result) = narinfo_futs.next() => {
-                    let Some((peer_url, narinfo)): Option<(String, NarInfo)> = result else {
-                        continue;
-                    };
-
-                    if !narinfo.is_trusted(trusted_keys) {
-                        tracing::debug!(
-                            "narinfo {} from {} is not trusted (no CA field or trusted signature), skipping",
-                            hash,
-                            peer_url
-                        );
-                        continue;
-                    }
-
-                    if narinfo.ca.is_some() {
-                        tracing::info!("narinfo {} fetched from peer {} (content-addressed)", hash, peer_url);
-                    } else {
-                        tracing::info!("narinfo {} fetched from peer {}", hash, peer_url);
-                    }
-                    return Some((narinfo, peer_url));
+                    if let Some((peer_url, narinfo)) = result
+                        && let Some(r) = self.check_narinfo_trusted(narinfo, peer_url, hash) {
+                            return Some(r);
+                        }
                 }
 
                 Some(peer_url) = candidate_rx.recv() => {
@@ -84,6 +98,89 @@ impl AppState {
                 }
 
                 else => break,
+            }
+        }
+
+        None
+    }
+
+    /// Try to fetch narinfo from all peers (bloom-positive first, then the rest).
+    ///
+    /// Streams bloom lookups concurrently with narinfo fetches: as each
+    /// peer's bloom becomes available and matches the hash, a narinfo fetch
+    /// is started immediately. Once all blooms have resolved, any remaining
+    /// peers that were not bloom-positive are queried directly.
+    ///
+    /// This avoids double-querying bloom-positive peers: each peer is
+    /// queried at most once, either via the bloom-driven fast path or the
+    /// fallback direct query.
+    pub(super) async fn try_peer_narinfo_all(&self, hash: &str) -> Option<(NarInfo, String)> {
+        let peer_urls = &self.config.peers.urls;
+        if peer_urls.is_empty() {
+            return None;
+        }
+
+        let client = self.http_client.clone();
+        let hash = hash.to_string();
+
+        let mut queried = HashSet::new();
+        let mut narinfo_futs = FuturesUnordered::new();
+
+        let mut candidate_rx = self
+            .peer_blooms
+            .lookup_stream(peer_urls, &hash, &client)
+            .await;
+
+        loop {
+            tokio::select! {
+                biased;
+
+                Some(result) = narinfo_futs.next() => {
+                    if let Some((peer_url, narinfo)) = result
+                        && let Some(r) = self.check_narinfo_trusted(narinfo, peer_url, &hash) {
+                            return Some(r);
+                        }
+                }
+
+                Some(peer_url) = candidate_rx.recv() => {
+                    queried.insert(peer_url.clone());
+                    narinfo_futs.push(fetch_narinfo_from_peer(
+                        client.clone(),
+                        peer_url,
+                        hash.clone(),
+                    ));
+                }
+
+                else => break,
+            }
+        }
+
+        let remaining: Vec<String> = peer_urls
+            .iter()
+            .filter(|url| !queried.contains(*url))
+            .cloned()
+            .collect();
+
+        if !remaining.is_empty() {
+            tracing::info!(
+                "no bloom match for {}, querying {} remaining peers directly",
+                hash,
+                remaining.len()
+            );
+            for peer_url in remaining {
+                narinfo_futs.push(fetch_narinfo_from_peer(
+                    client.clone(),
+                    peer_url,
+                    hash.clone(),
+                ));
+            }
+        }
+
+        while let Some(result) = narinfo_futs.next().await {
+            if let Some((peer_url, narinfo)) = result
+                && let Some(r) = self.check_narinfo_trusted(narinfo, peer_url, &hash)
+            {
+                return Some(r);
             }
         }
 

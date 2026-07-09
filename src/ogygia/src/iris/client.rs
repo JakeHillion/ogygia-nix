@@ -23,6 +23,21 @@ struct RescanRequest {
     paths: Vec<PathBuf>,
 }
 
+/// Response from the pull endpoint
+#[derive(Debug, Deserialize)]
+pub struct PullResponse {
+    pub pulled: usize,
+    pub skipped: usize,
+    pub failed: usize,
+    pub errors: Vec<String>,
+}
+
+/// Request body for pull endpoint
+#[derive(Debug, Serialize)]
+struct PullRequest {
+    paths: Vec<PathBuf>,
+}
+
 /// Client for communicating with irisd
 pub struct IrisdClient {
     base_url: String,
@@ -90,5 +105,50 @@ impl IrisdClient {
             .json()
             .await
             .context("Failed to parse rescan response")
+    }
+
+    /// Request irisd to pull specified store paths from peers.
+    ///
+    /// This fetches NARs for missing paths from configured peers,
+    /// validates them, and caches them locally.
+    pub async fn pull<I, P>(&self, paths: I) -> Result<PullResponse>
+    where
+        I: IntoIterator<Item = P>,
+        P: AsRef<Path>,
+    {
+        let paths: Vec<PathBuf> = paths
+            .into_iter()
+            .map(|p| p.as_ref().to_path_buf())
+            .collect();
+        let request = PullRequest { paths };
+
+        let url = format!("{}/pull", self.base_url);
+
+        let response = self
+            .client
+            .post(&url)
+            .json(&request)
+            .send()
+            .await
+            .with_context(|| format!("Failed to send POST request to {}", url))?;
+
+        let status = response.status();
+
+        if !status.is_success() {
+            let body = response
+                .text()
+                .await
+                .unwrap_or_else(|_| "unknown error".to_string());
+            return Err(anyhow!(
+                "irisd returned error {}: {}",
+                status.as_u16(),
+                body
+            ));
+        }
+
+        response
+            .json()
+            .await
+            .context("Failed to parse pull response")
     }
 }
