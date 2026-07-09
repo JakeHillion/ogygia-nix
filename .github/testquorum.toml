@@ -1,0 +1,5 @@
+[managers.nix]
+attrset = "ci"
+
+[managers.cargo]
+nextest_archive = "nix://.#ci.${SYSTEM}.ogygia-nextest-archive"

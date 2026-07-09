@@ -20,6 +20,8 @@ jobs:
     steps:
     - name: Checkout code
       uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+      with:
+        fetch-depth: 0
 
     - name: Install Nix
       uses: cachix/install-nix-action@8aa03977d8d733052d78f4e008a241fd1dbf36b3 # v31
@@ -46,8 +48,7 @@ jobs:
       with:
         arguments: .#ci
 
-    - name: Build all outputs
-      run: nix-fast-build --no-nom --flake '.#ci' -j 2 --eval-workers 4
-
-    - name: Flake check
-      run: nix flake check
+    - name: Run tests
+      uses: testquorum/action@668f94d477b166a6dc9b8599f74f9e4d93dfc95f # main
+      with:
+        token: ${{ secrets.TESTQUORUM_TOKEN }}
