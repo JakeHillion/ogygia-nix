@@ -24,12 +24,9 @@
 
     advisory-db.url = "github:rustsec/advisory-db";
     advisory-db.flake = false;
-
-    nix-fast-build.url = "github:Mic92/nix-fast-build";
-    nix-fast-build.inputs.nixpkgs.follows = "nixpkgs";
   };
 
-  outputs = { self, nixpkgs, flake-utils, treefmt-nix, fenix, crane, advisory-db, nix-fast-build }:
+  outputs = { self, nixpkgs, flake-utils, treefmt-nix, fenix, crane, advisory-db }:
     flake-utils.lib.eachSystem [ "aarch64-linux" "x86_64-linux" ]
       (system:
         let
@@ -133,10 +130,35 @@
             '';
           });
 
+          ogygia-nextest-archive = craneLib.buildPackage (commonArgs // {
+            pname = "ogygia-nextest-archive";
+            inherit version cargoArtifacts;
+            doCheck = false;
+            doNotPostBuildInstallCargoBinaries = true;
+            nativeBuildInputs = commonArgs.nativeBuildInputs ++ [
+              pkgs.cargo-nextest
+              pkgs.zstd
+            ];
+            buildPhase = ''
+              runHook preBuild
+              cargo nextest archive --workspace --archive-file archive.tar.zst
+              # Decompress so Nix can scan the tar for store-path references and
+              # retain the test binaries' runtime deps; compressed, they're hidden.
+              unzstd archive.tar.zst
+              runHook postBuild
+            '';
+            installPhase = ''
+              runHook preInstall
+              mkdir -p $out
+              cp archive.tar $out/
+              runHook postInstall
+            '';
+          });
+
         in
         {
           packages = {
-            inherit ogygia ogygia-irisd ogygia-hostinfod ogygia-dashboard;
+            inherit ogygia ogygia-irisd ogygia-hostinfod ogygia-dashboard ogygia-nextest-archive;
             default = ogygia;
           };
 
@@ -151,8 +173,9 @@
 
           devShells.ci = pkgs.mkShell {
             packages = [
-              pkgs.jq
-              nix-fast-build.packages.${system}.nix-fast-build
+              toolchain
+              pkgs.cargo-nextest
+              pkgs.zstd
             ];
           };
 
@@ -180,13 +203,6 @@
             ogygia-deny = craneLib.cargoDeny {
               inherit src;
             };
-
-            ogygia-nextest = craneLib.cargoNextest (commonArgs // {
-              inherit cargoArtifacts;
-              partitions = 1;
-              partitionType = "count";
-              cargoNextestPartitionsExtraArgs = "--no-tests=pass";
-            });
 
             ogygia-cli-config = import ./nixos/tests/cli-config.nix {
               inherit pkgs;
