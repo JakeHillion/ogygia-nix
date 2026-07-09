@@ -9,9 +9,11 @@
 //! it with a cluster-derived measurement.
 
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::sync::RwLock;
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
+use std::time::Instant;
 
 use anyhow::Result;
 use arc_swap::ArcSwapOption;
@@ -82,6 +84,7 @@ pub struct LocalBloom {
     num_bits: usize,
     num_hashes: u32,
     rebuild_threshold: f64,
+    last_rebuild_at: Mutex<Instant>,
 }
 
 impl LocalBloom {
@@ -107,6 +110,7 @@ impl LocalBloom {
             num_bits,
             num_hashes,
             rebuild_threshold,
+            last_rebuild_at: Mutex::new(Instant::now()),
         }
     }
 
@@ -179,6 +183,10 @@ impl LocalBloom {
             Arc::clone(&state.filter)
         };
         self.read_bloom.store(Some(filter));
+        *self
+            .last_rebuild_at
+            .lock()
+            .expect("last_rebuild_at poisoned") = Instant::now();
     }
 
     /// Number of bits in the bloom filter (for peer bloom size validation).
@@ -191,14 +199,25 @@ impl LocalBloom {
         self.num_hashes
     }
 
+    /// Number of elements currently in the bloom filter.
     pub fn element_count(&self) -> usize {
         let state = self.write_bloom.read().expect("write_bloom poisoned");
         state.element_count.load(Ordering::Relaxed)
     }
 
+    /// Number of deletions recorded since the last rebuild.
     pub fn deletion_count(&self) -> usize {
         let state = self.write_bloom.read().expect("write_bloom poisoned");
         state.deletion_count.load(Ordering::Relaxed)
+    }
+
+    /// Timestamp of the most recent rebuild completion.
+    #[allow(dead_code)]
+    pub fn last_rebuild_at(&self) -> Instant {
+        *self
+            .last_rebuild_at
+            .lock()
+            .expect("last_rebuild_at poisoned")
     }
 }
 
@@ -260,5 +279,26 @@ mod tests {
 
         bloom.finish_rebuild();
         assert!(bloom.serialize().unwrap().is_some());
+    }
+
+    #[test]
+    fn last_rebuild_at_updates_on_finish_rebuild() {
+        let bloom = LocalBloom::new(0.01, 0.1);
+        let before = bloom.last_rebuild_at();
+
+        std::thread::sleep(std::time::Duration::from_millis(10));
+
+        bloom.insert("abc123def456ghi789jkl012mno345pq");
+        bloom.finish_rebuild();
+
+        let after = bloom.last_rebuild_at();
+        assert!(
+            after > before,
+            "last_rebuild_at should advance after finish_rebuild"
+        );
+        assert!(
+            after.elapsed() < std::time::Duration::from_secs(1),
+            "last_rebuild_at should be very recent"
+        );
     }
 }

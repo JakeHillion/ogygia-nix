@@ -6,6 +6,8 @@
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::Mutex;
+use std::time::Instant;
 
 use anyhow::Result;
 use notify::Config;
@@ -24,12 +26,21 @@ use crate::nix::store::PathInfo;
 pub struct StoreWatcher {
     bloom: Arc<LocalBloom>,
     rebuild_tx: mpsc::Sender<()>,
+    burst_detector: Arc<Mutex<crate::bloom::burst::BurstDetector>>,
 }
 
 impl StoreWatcher {
     /// Create a new store watcher with a channel for requesting rebuilds.
-    pub fn new(bloom: Arc<LocalBloom>, rebuild_tx: mpsc::Sender<()>) -> Self {
-        Self { bloom, rebuild_tx }
+    pub fn new(
+        bloom: Arc<LocalBloom>,
+        rebuild_tx: mpsc::Sender<()>,
+        burst_detector: Arc<Mutex<crate::bloom::burst::BurstDetector>>,
+    ) -> Self {
+        Self {
+            bloom,
+            rebuild_tx,
+            burst_detector,
+        }
     }
 
     /// Start watching /nix/store for new and removed paths
@@ -130,13 +141,41 @@ impl StoreWatcher {
         self.bloom.mark_deletion();
         tracing::debug!("Noted store path removal: {}", store_path);
 
-        if self.bloom.needs_rebuild() {
+        self.burst_detector
+            .lock()
+            .expect("burst_detector poisoned")
+            .observe_deletion();
+
+        let bloom = &self.bloom;
+        let deletion_ratio = if bloom.element_count() == 0 {
+            0.0
+        } else {
+            bloom.deletion_count() as f64 / bloom.element_count() as f64
+        };
+
+        let now = Instant::now();
+        self.burst_detector
+            .lock()
+            .expect("burst_detector poisoned")
+            .tick(now);
+
+        let should_rebuild = self
+            .burst_detector
+            .lock()
+            .expect("burst_detector poisoned")
+            .should_rebuild(deletion_ratio, now);
+
+        if should_rebuild && self.bloom.needs_rebuild() {
             tracing::info!(
                 "Bloom filter deletion threshold exceeded ({} deletions / {} elements), requesting rebuild",
                 self.bloom.deletion_count(),
                 self.bloom.element_count(),
             );
             let _ = self.rebuild_tx.try_send(());
+            self.burst_detector
+                .lock()
+                .expect("burst_detector poisoned")
+                .mark_rebuilt(now);
         }
     }
 }
