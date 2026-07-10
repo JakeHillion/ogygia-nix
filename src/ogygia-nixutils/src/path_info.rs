@@ -6,6 +6,8 @@ use anyhow::Context;
 use anyhow::Result;
 use serde::Deserialize;
 
+use crate::types::NarHash;
+
 /// Information about a store path.
 ///
 /// These are exactly the fields reported by `nix path-info --json` that
@@ -19,8 +21,8 @@ use serde::Deserialize;
 pub struct PathInfo {
     /// Full store path.
     pub path: String,
-    /// NAR hash in SRI format (`sha256-<base64>`).
-    pub nar_hash: String,
+    /// NAR content hash.
+    pub nar_hash: NarHash,
     /// NAR size in bytes.
     pub nar_size: u64,
     /// References (other store paths this path depends on), sorted by path.
@@ -70,20 +72,23 @@ pub fn parse_path_info_json(json: &str) -> Result<Vec<PathInfo>> {
     let infos: HashMap<String, Option<PathInfoJson>> =
         serde_json::from_str(json).context("failed to parse path-info JSON")?;
 
-    Ok(infos
-        .into_iter()
-        .filter_map(|(path, info)| {
-            info.map(|info| PathInfo {
-                path,
-                nar_hash: info.nar_hash,
-                nar_size: info.nar_size,
-                references: info.references,
-                deriver: info.deriver,
-                signatures: info.signatures,
-                ca: info.ca,
-            })
-        })
-        .collect())
+    let mut result = Vec::new();
+    for (path, info) in infos {
+        // A null value means the path is not in the store; drop it.
+        let Some(info) = info else { continue };
+        let nar_hash = NarHash::from_sri(&info.nar_hash)
+            .with_context(|| format!("invalid NarHash for {path}"))?;
+        result.push(PathInfo {
+            path,
+            nar_hash,
+            nar_size: info.nar_size,
+            references: info.references,
+            deriver: info.deriver,
+            signatures: info.signatures,
+            ca: info.ca,
+        });
+    }
+    Ok(result)
 }
 
 #[cfg(test)]
@@ -114,7 +119,7 @@ mod tests {
         );
         assert_eq!(
             info.nar_hash,
-            "sha256-S0ymvFDCaeUfZSW1veq0gU12WoV80qZSXcgyllwCzZY="
+            NarHash::from_sri("sha256-S0ymvFDCaeUfZSW1veq0gU12WoV80qZSXcgyllwCzZY=").unwrap()
         );
         assert_eq!(info.nar_size, 12345);
         assert_eq!(info.references.len(), 1);

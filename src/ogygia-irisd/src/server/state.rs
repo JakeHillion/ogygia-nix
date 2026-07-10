@@ -10,6 +10,7 @@ use axum::response::Response;
 use bytes::Bytes;
 use futures::StreamExt;
 use futures::stream::FuturesUnordered;
+use ogygia_nixutils::NarHash;
 use ogygia_nixutils::NixDb;
 
 use crate::bloom::local::LocalBloom;
@@ -17,7 +18,6 @@ use crate::bloom::peers::PeerBlooms;
 use crate::config::Config;
 use crate::nix::cache::NarCache;
 use crate::nix::narinfo::NarInfo;
-use crate::nix::narinfo::nar_hash_to_sri;
 
 /// Shared application state
 pub struct AppState {
@@ -113,9 +113,19 @@ impl AppState {
             .lookup_stream(peer_urls, hash, &self.http_client)
             .await;
 
-        // Convert the hex hash from the URL to SRI format once, so we can
-        // compare directly against each peer's NarHash without repeated conversion.
-        let expected_sri = nar_hash_to_sri(expected_nar_hash);
+        // Parse the hex NarHash from the URL once so we can compare each peer's
+        // NarHash by digest, regardless of how the peer encodes it.
+        let expected = match NarHash::from_hex(expected_nar_hash) {
+            Ok(h) => h,
+            Err(e) => {
+                tracing::debug!(
+                    "Invalid NarHash {} in NAR request: {}",
+                    expected_nar_hash,
+                    e
+                );
+                return (StatusCode::NOT_FOUND, "Not found").into_response();
+            }
+        };
 
         let client = self.http_client.clone();
         let mut narinfo_futs = FuturesUnordered::new();
@@ -139,7 +149,7 @@ impl AppState {
                     }
 
                     // Skip peers whose NarHash doesn't match the one in the URL
-                    if narinfo.nar_hash != expected_sri {
+                    if NarHash::from_sri(&narinfo.nar_hash).ok() != Some(expected) {
                         continue;
                     }
 
