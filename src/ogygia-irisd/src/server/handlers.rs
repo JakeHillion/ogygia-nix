@@ -12,6 +12,7 @@ use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::response::Response;
 use ogygia_nixutils::NarHash;
+use ogygia_nixutils::StoreHash;
 use serde::Deserialize;
 use serde::Serialize;
 use tokio::io::AsyncReadExt;
@@ -138,7 +139,8 @@ pub async fn get_local_narinfo(
 /// Ensures the NAR is cached so the response includes the real compressed
 /// FileHash and FileSize (needed for integrity validation and range requests).
 async fn try_local_store_narinfo(state: &AppState, hash: &str) -> Option<NarInfo> {
-    let path_info = match state.nix_db.find_path_info(hash).await {
+    let store_hash = hash.parse::<StoreHash>().ok()?;
+    let path_info = match state.nix_db.find_path_info(&store_hash).await {
         Ok(Some(info)) => info,
         Ok(None) => return None,
         Err(e) => {
@@ -252,7 +254,11 @@ async fn try_local_store_nar(
     expected_nar_hash: &str,
     range: Option<(u64, Option<u64>)>,
 ) -> Response {
-    let path_info = match state.nix_db.find_path_info(hash).await {
+    let store_hash = match hash.parse::<StoreHash>() {
+        Ok(h) => h,
+        Err(_) => return (StatusCode::NOT_FOUND, "Not found").into_response(),
+    };
+    let path_info = match state.nix_db.find_path_info(&store_hash).await {
         Ok(Some(info)) => info,
         Ok(None) => return (StatusCode::NOT_FOUND, "Not found").into_response(),
         Err(e) => {
@@ -376,13 +382,16 @@ pub async fn get_providers(
     axum::extract::Query(query): axum::extract::Query<ProvidersQuery>,
 ) -> Response {
     // Check local store
-    let local = state
-        .nix_db
-        .find_store_path(&hash)
-        .await
-        .ok()
-        .flatten()
-        .is_some();
+    let local = match hash.parse::<StoreHash>() {
+        Ok(store_hash) => state
+            .nix_db
+            .find_store_path(&store_hash)
+            .await
+            .ok()
+            .flatten()
+            .is_some(),
+        Err(_) => false,
+    };
 
     // Check peers via bloom lookup
     let peer_urls = &state.config.peers.urls;
@@ -482,20 +491,21 @@ pub async fn rescan(
             continue;
         }
 
-        // Extract hash from path
+        // Extract and validate the store-path hash.
         let hash = match path_str
             .strip_prefix("/nix/store/")
             .and_then(|s| s.get(..32))
+            .and_then(|h| h.parse::<StoreHash>().ok())
         {
-            Some(h) if h.len() == 32 && h.chars().all(|c| c.is_ascii_alphanumeric()) => h,
-            _ => {
+            Some(h) => h,
+            None => {
                 tracing::warn!("rescan: invalid hash in path: {}", path_str);
                 errors += 1;
                 continue;
             }
         };
 
-        state.local_bloom.insert(hash);
+        state.local_bloom.insert(hash.as_str());
         rescanned += 1;
 
         tracing::info!("rescan: indexed {}", path_str);
