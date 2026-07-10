@@ -17,3 +17,4 @@ pub use db::NixDb;
 pub use path_info::PathInfo;
 pub use path_info::parse_path_info_json;
 pub use types::NarHash;
+pub use types::StoreHash;

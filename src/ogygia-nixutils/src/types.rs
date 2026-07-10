@@ -92,6 +92,55 @@ fn expect_sha256(s: &str, sep: char) -> Result<&str> {
     Ok(payload)
 }
 
+/// The 32-character nixbase32 hash that prefixes a `/nix/store/<hash>-<name>`
+/// store path.
+///
+/// Validated on construction — 32 characters drawn from Nix's base32 alphabet —
+/// so a value of this type is always a well-formed store-path hash and can't be
+/// confused with an arbitrary string when used as a database lookup key.
+#[derive(Clone, PartialEq, Eq, Hash)]
+pub struct StoreHash(String);
+
+impl StoreHash {
+    /// Length of a store-path hash in nixbase32 characters.
+    const LEN: usize = 32;
+
+    /// The hash as its 32-character nixbase32 string.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::str::FromStr for StoreHash {
+    type Err = anyhow::Error;
+
+    /// Parse and validate a 32-character nixbase32 store-path hash.
+    fn from_str(s: &str) -> Result<Self> {
+        if s.len() != Self::LEN {
+            bail!(
+                "store-path hash must be {} characters, got {}: {s}",
+                Self::LEN,
+                s.len(),
+            );
+        }
+        if let Some(c) = s.chars().find(|&c| !is_nixbase32(c)) {
+            bail!("invalid nixbase32 character {c:?} in store-path hash: {s}");
+        }
+        Ok(Self(s.to_owned()))
+    }
+}
+
+impl std::fmt::Display for StoreHash {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+/// Nix's base32 alphabet: digits plus lowercase consonants, omitting `e o u t`.
+fn is_nixbase32(c: char) -> bool {
+    matches!(c, '0'..='9' | 'a'..='d' | 'f'..='n' | 'p'..='s' | 'v'..='z')
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -136,5 +185,36 @@ mod tests {
     #[test]
     fn nar_hash_from_hex_rejects_wrong_length() {
         assert!(NarHash::from_hex("abcd").is_err());
+    }
+
+    #[test]
+    fn store_hash_accepts_valid() {
+        let s = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let hash: StoreHash = s.parse().unwrap();
+        assert_eq!(hash.as_str(), s);
+        assert_eq!(hash.to_string(), s);
+    }
+
+    #[test]
+    fn store_hash_rejects_wrong_length() {
+        assert!(
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                .parse::<StoreHash>()
+                .is_err()
+        ); // 31
+        assert!(
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                .parse::<StoreHash>()
+                .is_err()
+        ); // 33
+    }
+
+    #[test]
+    fn store_hash_rejects_chars_outside_nixbase32() {
+        // e, o, u, t and uppercase are not in Nix's base32 alphabet.
+        for bad in ['e', 'o', 'u', 't', 'A'] {
+            let s = format!("{bad}{}", "a".repeat(31));
+            assert!(s.parse::<StoreHash>().is_err(), "should reject {bad:?}");
+        }
     }
 }

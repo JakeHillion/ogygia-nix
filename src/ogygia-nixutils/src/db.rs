@@ -21,6 +21,7 @@ use rusqlite::OptionalExtension;
 
 use crate::path_info::PathInfo;
 use crate::types::NarHash;
+use crate::types::StoreHash;
 
 /// Default path to the Nix SQLite database.
 const DEFAULT_DB_PATH: &str = "/nix/var/nix/db/db.sqlite";
@@ -134,11 +135,11 @@ impl NixDb {
         Ok(value)
     }
 
-    /// Find a store path by its 32-character hash prefix.
+    /// Find a store path by its store-path hash.
     ///
     /// Uses the unique index on `ValidPaths.path` for an O(log n) prefix
     /// lookup instead of scanning the `/nix/store` directory.
-    pub async fn find_store_path(&self, hash: &str) -> Result<Option<PathBuf>> {
+    pub async fn find_store_path(&self, hash: &StoreHash) -> Result<Option<PathBuf>> {
         let pattern = format!("/nix/store/{hash}-*");
         let path = self
             .query(move |conn| {
@@ -151,14 +152,14 @@ impl NixDb {
         Ok(path.map(PathBuf::from))
     }
 
-    /// Look up full path information by 32-character hash prefix.
+    /// Look up full path information by store-path hash.
     ///
     /// Returns the same [`PathInfo`] that `nix path-info --json` would, but via
     /// a direct, index-backed SQLite query and join. The `hash` column in the
     /// database is `<algo>:<hex>`; it is converted to the SRI form expected by
     /// narinfo consumers. Empty `deriver`/`ca` columns are normalised to `None`
     /// to match the command's `null` output.
-    pub async fn find_path_info(&self, hash: &str) -> Result<Option<PathInfo>> {
+    pub async fn find_path_info(&self, hash: &StoreHash) -> Result<Option<PathInfo>> {
         let pattern = format!("/nix/store/{hash}-*");
 
         let raw = self
@@ -228,17 +229,19 @@ impl NixDb {
     ///
     /// A path is serveable if it has signatures or is content-addressed. Used
     /// by the store scanner to populate the bloom filter in a single query.
-    pub async fn serveable_hashes(&self) -> Result<Vec<String>> {
-        self.query(|conn| {
-            let mut stmt = conn.prepare_cached(
-                "SELECT SUBSTR(path, 12, 32) FROM ValidPaths \
-                 WHERE (sigs IS NOT NULL AND sigs != '') \
-                    OR (ca IS NOT NULL AND ca != '')",
-            )?;
-            stmt.query_map([], |row| row.get::<_, String>(0))?
-                .collect::<rusqlite::Result<Vec<_>>>()
-        })
-        .await
+    pub async fn serveable_hashes(&self) -> Result<Vec<StoreHash>> {
+        let raw: Vec<String> = self
+            .query(|conn| {
+                let mut stmt = conn.prepare_cached(
+                    "SELECT SUBSTR(path, 12, 32) FROM ValidPaths \
+                     WHERE (sigs IS NOT NULL AND sigs != '') \
+                        OR (ca IS NOT NULL AND ca != '')",
+                )?;
+                stmt.query_map([], |row| row.get::<_, String>(0))?
+                    .collect::<rusqlite::Result<Vec<_>>>()
+            })
+            .await?;
+        raw.iter().map(|h| h.parse()).collect()
     }
 
     /// Check whether a store path is serveable (signed or content-addressed).
@@ -431,13 +434,13 @@ chmod -R a+rw /work
 
         for store_path in &paths {
             // "/nix/store/" is 11 chars; the hash is the next 32.
-            let hash = &store_path[11..43];
+            let hash: StoreHash = store_path[11..43].parse().expect("valid store hash");
             let expected = golden
                 .get(store_path)
                 .unwrap_or_else(|| panic!("path missing from golden: {store_path}"));
 
             let actual = db
-                .find_path_info(hash)
+                .find_path_info(&hash)
                 .await
                 .expect("find_path_info query")
                 .unwrap_or_else(|| panic!("path missing from NixDb: {store_path}"));
@@ -455,7 +458,7 @@ chmod -R a+rw /work
 
             // The hash prefix must resolve back to the full store path.
             assert_eq!(
-                db.find_store_path(hash)
+                db.find_store_path(&hash)
                     .await
                     .expect("find_store_path query")
                     .as_deref(),
@@ -472,6 +475,7 @@ chmod -R a+rw /work
             .await
             .expect("serveable_hashes query")
             .into_iter()
+            .map(|h| h.as_str().to_owned())
             .collect();
         for store_path in &paths {
             let hash = &store_path[11..43];

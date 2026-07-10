@@ -14,6 +14,7 @@ use notify::RecommendedWatcher;
 use notify::RecursiveMode;
 use notify::Watcher;
 use ogygia_nixutils::NixDb;
+use ogygia_nixutils::StoreHash;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
@@ -101,12 +102,12 @@ impl StoreWatcher {
     ///
     /// Only indexes the path if it is serveable (signed or content-addressed).
     async fn process_create(&self, store_path: &str) {
-        let hash = match store_path
+        let Some(hash) = store_path
             .strip_prefix("/nix/store/")
             .and_then(|s| s.get(..32))
-        {
-            Some(h) if h.len() == 32 => h,
-            _ => return,
+            .and_then(|h| h.parse::<StoreHash>().ok())
+        else {
+            return;
         };
 
         let serveable = match self.nix_db.is_path_serveable(store_path).await {
@@ -118,7 +119,7 @@ impl StoreWatcher {
         };
 
         if serveable {
-            self.bloom.insert(hash);
+            self.bloom.insert(hash.as_str());
             tracing::debug!("Indexed new store path: {}", store_path);
         } else {
             tracing::debug!(

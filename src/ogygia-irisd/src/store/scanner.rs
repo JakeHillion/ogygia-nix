@@ -66,7 +66,7 @@ impl StoreScanner {
 
         let indexed = hashes.len();
         for hash in &hashes {
-            self.bloom.insert(hash);
+            self.bloom.insert(hash.as_str());
         }
 
         tracing::info!("{}: {} paths indexed", label, indexed);
