@@ -11,6 +11,7 @@ use axum::http::HeaderMap;
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::response::Response;
+use ogygia_nixutils::NarHash;
 use serde::Deserialize;
 use serde::Serialize;
 use tokio::io::AsyncReadExt;
@@ -18,7 +19,6 @@ use tokio_util::io::ReaderStream;
 
 use super::AppState;
 use crate::nix::narinfo::NarInfo;
-use crate::nix::narinfo::nar_hash_to_hex;
 use crate::nix::narinfo::narinfo_from_path_info;
 
 /// GET /nix-cache-info
@@ -87,8 +87,15 @@ pub async fn get_narinfo(
     if let Some((mut narinfo, _)) = state.try_peer_narinfo(hash).await {
         // Rewrite the URL to use our format with the NarHash encoded as hex,
         // so the NAR request will be self-describing regardless of the peer's format.
+        let nar_hash = match NarHash::from_sri(&narinfo.nar_hash) {
+            Ok(h) => h,
+            Err(e) => {
+                tracing::warn!("Peer narinfo {} has invalid NarHash: {}", hash, e);
+                return (StatusCode::NOT_FOUND, "Not found").into_response();
+            }
+        };
         let filename = narinfo.url.rsplit('/').next().unwrap_or(&narinfo.url);
-        narinfo.url = format!("nar/{}/{}", nar_hash_to_hex(&narinfo.nar_hash), filename);
+        narinfo.url = format!("nar/{}/{}", nar_hash.to_hex(), filename);
         return (
             StatusCode::OK,
             [("content-type", "text/x-nix-narinfo")],
@@ -257,12 +264,12 @@ async fn try_local_store_nar(
     let store_path = PathBuf::from(&path_info.path);
 
     // Verify the local NarHash matches what the URL claims
-    if nar_hash_to_hex(&path_info.nar_hash) != expected_nar_hash {
+    if path_info.nar_hash.to_hex() != expected_nar_hash {
         tracing::debug!(
             "Local NarHash mismatch for {}: expected {}, got {}",
             hash,
             expected_nar_hash,
-            nar_hash_to_hex(&path_info.nar_hash)
+            path_info.nar_hash.to_hex()
         );
         return (StatusCode::NOT_FOUND, "Not found").into_response();
     }

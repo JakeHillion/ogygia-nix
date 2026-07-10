@@ -19,8 +19,8 @@ use deadpool_sqlite::Pool;
 use deadpool_sqlite::Runtime;
 use rusqlite::OptionalExtension;
 
-use crate::hash::hex_hash_to_sri;
 use crate::path_info::PathInfo;
+use crate::types::NarHash;
 
 /// Default path to the Nix SQLite database.
 const DEFAULT_DB_PATH: &str = "/nix/var/nix/db/db.sqlite";
@@ -204,7 +204,8 @@ impl NixDb {
             return Ok(None);
         };
 
-        let nar_hash = hex_hash_to_sri(&row.hash)?;
+        let nar_hash = NarHash::from_db_str(&row.hash)
+            .with_context(|| format!("invalid NAR hash for {}", row.path))?;
         let signatures: Vec<String> = row
             .sigs
             .as_deref()

@@ -10,9 +10,10 @@
 //! verified by the testcontainers-based tests in `db.rs`.
 
 pub mod db;
-pub mod hash;
 pub mod path_info;
+pub mod types;
 
 pub use db::NixDb;
 pub use path_info::PathInfo;
 pub use path_info::parse_path_info_json;
+pub use types::NarHash;
