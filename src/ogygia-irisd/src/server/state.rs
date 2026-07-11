@@ -12,7 +12,7 @@ use futures::StreamExt;
 use futures::stream::FuturesUnordered;
 use ogygia_nixutils::NarHash;
 use ogygia_nixutils::NarInfo;
-use ogygia_nixutils::NixDb;
+use ogygia_nixutils::Nix;
 
 use crate::bloom::local::LocalBloom;
 use crate::bloom::peers::PeerBlooms;
@@ -26,7 +26,7 @@ pub struct AppState {
     pub peer_blooms: Arc<PeerBlooms>,
     pub http_client: reqwest::Client,
     pub nar_cache: Arc<NarCache>,
-    pub nix_db: NixDb,
+    pub nix: Nix,
 }
 
 impl AppState {

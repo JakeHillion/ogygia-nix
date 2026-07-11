@@ -8,7 +8,7 @@
 use std::sync::Arc;
 
 use anyhow::Result;
-use ogygia_nixutils::NixDb;
+use ogygia_nixutils::Nix;
 use tokio::sync::mpsc;
 
 use crate::bloom::local::LocalBloom;
@@ -16,16 +16,16 @@ use crate::bloom::local::LocalBloom;
 /// Store scanner for indexing existing paths
 pub struct StoreScanner {
     bloom: Arc<LocalBloom>,
-    nix_db: NixDb,
+    nix: Nix,
     rebuild_rx: mpsc::Receiver<()>,
 }
 
 impl StoreScanner {
     /// Create a new store scanner with a channel for rebuild requests.
-    pub fn new(bloom: Arc<LocalBloom>, nix_db: NixDb, rebuild_rx: mpsc::Receiver<()>) -> Self {
+    pub fn new(bloom: Arc<LocalBloom>, nix: Nix, rebuild_rx: mpsc::Receiver<()>) -> Self {
         Self {
             bloom,
-            nix_db,
+            nix,
             rebuild_rx,
         }
     }
@@ -62,7 +62,7 @@ impl StoreScanner {
     pub async fn scan(&self, label: &str) -> Result<ScanStats> {
         tracing::info!("{}: starting...", label);
 
-        let hashes = self.nix_db.serveable_hashes().await?;
+        let hashes = self.nix.serveable_hashes().await?;
 
         let indexed = hashes.len();
         for hash in &hashes {
