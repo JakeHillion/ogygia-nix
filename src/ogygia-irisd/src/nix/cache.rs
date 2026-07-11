@@ -15,9 +15,8 @@ use std::time::Duration;
 use anyhow::Context;
 use anyhow::Result;
 use async_compression::tokio::bufread::ZstdEncoder;
-use base64::Engine;
-use base64::engine::general_purpose::STANDARD;
 use moka::future::Cache;
+use ogygia_nixutils::NarHash;
 use sha2::Digest;
 use sha2::Sha256;
 use tokio::io::AsyncReadExt;
@@ -36,8 +35,8 @@ pub struct CachedNar {
     /// so the fd keeps the inode alive even after unlink.
     path: tokio::sync::RwLock<Option<PathBuf>>,
 
-    /// SHA-256 of the compressed file content, in SRI format (`sha256-BASE64==`).
-    pub file_hash: String,
+    /// SHA-256 of the compressed file content.
+    pub file_hash: NarHash,
 
     /// Size of the compressed file in bytes.
     pub file_size: u64,
@@ -310,8 +309,7 @@ async fn generate_cached_nar(cache_dir: &Path, store_path: &Path) -> Result<Arc<
         ));
     }
 
-    let digest = hasher.finalize();
-    let file_hash = format!("sha256-{}", STANDARD.encode(digest));
+    let file_hash = NarHash::from_bytes(hasher.finalize().into());
 
     tokio::fs::rename(&tmp_path, &final_path)
         .await
@@ -336,8 +334,8 @@ async fn generate_cached_nar(cache_dir: &Path, store_path: &Path) -> Result<Arc<
     }))
 }
 
-/// Compute the SHA-256 hash of a file in SRI format.
-async fn hash_file(path: &Path) -> Result<String> {
+/// Compute the SHA-256 hash of a file.
+async fn hash_file(path: &Path) -> Result<NarHash> {
     let mut file = tokio::fs::File::open(path).await?;
     let mut hasher = Sha256::new();
     let mut buf = vec![0u8; 8192];
@@ -348,6 +346,5 @@ async fn hash_file(path: &Path) -> Result<String> {
         }
         hasher.update(&buf[..n]);
     }
-    let digest = hasher.finalize();
-    Ok(format!("sha256-{}", STANDARD.encode(digest)))
+    Ok(NarHash::from_bytes(hasher.finalize().into()))
 }

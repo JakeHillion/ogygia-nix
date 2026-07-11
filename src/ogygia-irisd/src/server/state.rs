@@ -149,7 +149,7 @@ impl AppState {
                     }
 
                     // Skip peers whose NarHash doesn't match the one in the URL
-                    if NarHash::from_sri(&narinfo.nar_hash).ok() != Some(expected) {
+                    if narinfo.nar_hash != expected {
                         continue;
                     }
 
