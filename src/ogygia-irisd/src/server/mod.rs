@@ -7,7 +7,7 @@ mod state;
 use std::sync::Arc;
 
 use anyhow::Result;
-use ogygia_nixutils::NixDb;
+use ogygia_nixutils::Nix;
 pub use routes::create_router;
 pub use state::AppState;
 use tokio_util::sync::CancellationToken;
@@ -28,7 +28,7 @@ pub async fn start(
     peer_blooms: Arc<PeerBlooms>,
     http_client: reqwest::Client,
     nar_cache: Arc<NarCache>,
-    nix_db: NixDb,
+    nix: Nix,
     token: CancellationToken,
 ) -> Result<()> {
     let state = Arc::new(AppState {
@@ -37,7 +37,7 @@ pub async fn start(
         peer_blooms,
         http_client,
         nar_cache,
-        nix_db,
+        nix,
     });
 
     let app = create_router(state).layer(

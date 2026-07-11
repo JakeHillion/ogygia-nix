@@ -132,7 +132,7 @@ pub async fn get_local_narinfo(
 /// FileHash and FileSize (needed for integrity validation and range requests).
 async fn try_local_store_narinfo(state: &AppState, hash: &str) -> Option<NarInfo> {
     let store_hash = hash.parse::<StoreHash>().ok()?;
-    let path_info = match state.nix_db.find_path_info(&store_hash).await {
+    let path_info = match state.nix.find_path_info(&store_hash).await {
         Ok(Some(info)) => info,
         Ok(None) => return None,
         Err(e) => {
@@ -250,7 +250,7 @@ async fn try_local_store_nar(
         Ok(h) => h,
         Err(_) => return (StatusCode::NOT_FOUND, "Not found").into_response(),
     };
-    let path_info = match state.nix_db.find_path_info(&store_hash).await {
+    let path_info = match state.nix.find_path_info(&store_hash).await {
         Ok(Some(info)) => info,
         Ok(None) => return (StatusCode::NOT_FOUND, "Not found").into_response(),
         Err(e) => {
@@ -377,7 +377,7 @@ pub async fn get_providers(
     // Check local store
     let local = match hash.parse::<StoreHash>() {
         Ok(store_hash) => state
-            .nix_db
+            .nix
             .find_store_path(&store_hash)
             .await
             .ok()
@@ -465,7 +465,7 @@ pub async fn rescan(
         };
 
         // Query the Nix database and verify serveability
-        let serveable = match state.nix_db.is_path_serveable(&path_str).await {
+        let serveable = match state.nix.is_path_serveable(&path_str).await {
             Ok(s) => s,
             Err(e) => {
                 tracing::warn!(
@@ -606,7 +606,7 @@ mod tests {
                 )),
                 http_client: reqwest::Client::new(),
                 nar_cache,
-                nix_db: ogygia_nixutils::NixDb::open_in_memory().await.unwrap(),
+                nix: ogygia_nixutils::Nix::in_memory().await.unwrap(),
             })
         }
 

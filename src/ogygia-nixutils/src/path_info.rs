@@ -11,12 +11,12 @@ use crate::types::NarHash;
 /// Information about a store path.
 ///
 /// These are exactly the fields reported by `nix path-info --json` that
-/// `ogygia-irisd` needs to build a narinfo. [`NixDb::find_path_info`] produces
+/// `ogygia-irisd` needs to build a narinfo. [`Nix::find_path_info`] produces
 /// the same value directly from the Nix database;
 /// [`parse_path_info_json`] produces it from the command's output. The two are
 /// asserted equal by the equivalence tests.
 ///
-/// [`NixDb::find_path_info`]: crate::db::NixDb::find_path_info
+/// [`Nix::find_path_info`]: crate::Nix::find_path_info
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PathInfo {
     /// Full store path.

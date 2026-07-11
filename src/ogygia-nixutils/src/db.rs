@@ -42,10 +42,11 @@ const IN_MEMORY_SCHEMA: &str = "\
 
 /// Read-only handle to the Nix store database.
 ///
-/// Cloning is cheap and shares the underlying connection pool, so components
-/// (HTTP server, scanner, watcher) can each hold a `NixDb` while drawing from
-/// one pool of read-only connections. The pool can later grow, shrink, or gain
-/// smarter recycling without any caller changing how it queries.
+/// The backend behind [`Nix`](crate::Nix)'s store-metadata queries. Cloning is
+/// cheap and shares the underlying connection pool, so the components holding a
+/// `Nix` all draw from one pool of read-only connections. The pool can later
+/// grow, shrink, or gain smarter recycling without any caller changing how it
+/// queries.
 #[derive(Clone)]
 pub struct NixDb {
     pool: Pool,

@@ -13,7 +13,7 @@ use notify::EventKind;
 use notify::RecommendedWatcher;
 use notify::RecursiveMode;
 use notify::Watcher;
-use ogygia_nixutils::NixDb;
+use ogygia_nixutils::Nix;
 use ogygia_nixutils::StoreHash;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
@@ -23,16 +23,16 @@ use crate::bloom::local::LocalBloom;
 /// Store watcher that monitors /nix/store for path changes
 pub struct StoreWatcher {
     bloom: Arc<LocalBloom>,
-    nix_db: NixDb,
+    nix: Nix,
     rebuild_tx: mpsc::Sender<()>,
 }
 
 impl StoreWatcher {
     /// Create a new store watcher with a channel for requesting rebuilds.
-    pub fn new(bloom: Arc<LocalBloom>, nix_db: NixDb, rebuild_tx: mpsc::Sender<()>) -> Self {
+    pub fn new(bloom: Arc<LocalBloom>, nix: Nix, rebuild_tx: mpsc::Sender<()>) -> Self {
         Self {
             bloom,
-            nix_db,
+            nix,
             rebuild_tx,
         }
     }
@@ -106,7 +106,7 @@ impl StoreWatcher {
             return;
         };
 
-        let serveable = match self.nix_db.is_path_serveable(store_path).await {
+        let serveable = match self.nix.is_path_serveable(store_path).await {
             Ok(s) => s,
             Err(e) => {
                 tracing::debug!("Failed to query path info for {}: {}", store_path, e);
