@@ -102,11 +102,7 @@ impl StoreWatcher {
     ///
     /// Only indexes the path if it is serveable (signed or content-addressed).
     async fn process_create(&self, store_path: &str) {
-        let Some(hash) = store_path
-            .strip_prefix("/nix/store/")
-            .and_then(|s| s.get(..32))
-            .and_then(|h| h.parse::<StoreHash>().ok())
-        else {
+        let Ok(hash) = StoreHash::from_store_path(store_path) else {
             return;
         };
 

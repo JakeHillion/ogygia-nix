@@ -114,6 +114,22 @@ impl StoreHash {
     pub fn as_str(&self) -> &str {
         &self.0
     }
+
+    /// Extract the store-path hash from a full `/nix/store/<hash>-<name>` path.
+    ///
+    /// The hash is the 32 nixbase32 characters immediately after the
+    /// `/nix/store/` prefix. This is the one validated way to turn a store path
+    /// into a [`StoreHash`], replacing the ad-hoc `strip_prefix`/slice/parse
+    /// dance repeated across call sites.
+    pub fn from_store_path(path: &str) -> Result<Self> {
+        let rest = path
+            .strip_prefix("/nix/store/")
+            .with_context(|| format!("not a /nix/store path: {path}"))?;
+        let hash = rest
+            .get(..Self::LEN)
+            .with_context(|| format!("store path too short to contain a hash: {path}"))?;
+        hash.parse()
+    }
 }
 
 impl std::str::FromStr for StoreHash {
@@ -218,6 +234,26 @@ mod tests {
                 .parse::<StoreHash>()
                 .is_err()
         ); // 33
+    }
+
+    #[test]
+    fn store_hash_from_store_path_extracts_hash() {
+        let hash =
+            StoreHash::from_store_path("/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-hello-2.10")
+                .unwrap();
+        assert_eq!(hash.as_str(), "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+    }
+
+    #[test]
+    fn store_hash_from_store_path_rejects_bad_input() {
+        // Missing prefix.
+        assert!(StoreHash::from_store_path("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-x").is_err());
+        // Too short to hold a 32-character hash.
+        assert!(StoreHash::from_store_path("/nix/store/aaa").is_err());
+        // Right length, but the hash contains a non-nixbase32 character.
+        assert!(
+            StoreHash::from_store_path("/nix/store/eaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-x").is_err()
+        );
     }
 
     #[test]
