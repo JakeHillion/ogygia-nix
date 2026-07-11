@@ -4,6 +4,7 @@ use std::collections::HashMap;
 
 use anyhow::Result;
 use anyhow::anyhow;
+use ogygia_nixutils::NarHash;
 use ogygia_nixutils::PathInfo;
 
 /// Parsed narinfo file
@@ -16,11 +17,11 @@ pub struct NarInfo {
     /// Compression type
     pub compression: Compression,
     /// Hash of compressed file
-    pub file_hash: String,
+    pub file_hash: NarHash,
     /// Size of compressed file
     pub file_size: u64,
     /// Hash of uncompressed NAR
-    pub nar_hash: String,
+    pub nar_hash: NarHash,
     /// Size of uncompressed NAR
     pub nar_size: u64,
     /// Store path references
@@ -137,20 +138,22 @@ impl NarInfo {
             .transpose()?
             .unwrap_or(Compression::None);
 
-        let file_hash = fields
-            .get("FileHash")
-            .ok_or_else(|| anyhow!("Missing FileHash"))?
-            .to_string();
+        let file_hash = NarHash::from_sri(
+            fields
+                .get("FileHash")
+                .ok_or_else(|| anyhow!("Missing FileHash"))?,
+        )?;
 
         let file_size = fields
             .get("FileSize")
             .ok_or_else(|| anyhow!("Missing FileSize"))?
             .parse()?;
 
-        let nar_hash = fields
-            .get("NarHash")
-            .ok_or_else(|| anyhow!("Missing NarHash"))?
-            .to_string();
+        let nar_hash = NarHash::from_sri(
+            fields
+                .get("NarHash")
+                .ok_or_else(|| anyhow!("Missing NarHash"))?,
+        )?;
 
         let nar_size = fields
             .get("NarSize")
@@ -241,10 +244,11 @@ pub fn narinfo_from_path_info(info: &PathInfo) -> NarInfo {
         store_path: info.path.clone(),
         url,
         compression: Compression::Zstd,
-        // Placeholders until the NAR is generated and compressed.
-        file_hash: info.nar_hash.to_sri(),
+        // FileHash is a placeholder (the NAR hash) until the NAR is generated
+        // and compressed, at which point the caller fills in the real value.
+        file_hash: info.nar_hash,
         file_size: info.nar_size,
-        nar_hash: info.nar_hash.to_sri(),
+        nar_hash: info.nar_hash,
         nar_size: info.nar_size,
         references,
         deriver,
@@ -255,16 +259,14 @@ pub fn narinfo_from_path_info(info: &PathInfo) -> NarInfo {
 
 #[cfg(test)]
 mod tests {
-    use ogygia_nixutils::NarHash;
-
     use super::*;
 
     const SAMPLE_NARINFO: &str = r#"StorePath: /nix/store/abc123def456ghi789jkl012mno345pq-hello-2.10
 URL: nar/1234567890abcdef.nar.xz
 Compression: xz
-FileHash: sha256:abcdef1234567890
+FileHash: sha256-S0ymvFDCaeUfZSW1veq0gU12WoV80qZSXcgyllwCzZY=
 FileSize: 12345
-NarHash: sha256:fedcba0987654321
+NarHash: sha256-S0ymvFDCaeUfZSW1veq0gU12WoV80qZSXcgyllwCzZY=
 NarSize: 67890
 References: abc123def456ghi789jkl012mno345pq-glibc-2.35
 Deriver: xyz789abc123def456ghi012jkl345mno-hello-2.10.drv
@@ -300,7 +302,7 @@ Sig: my-cache-1:qrstuvwxyz123456
         );
         assert_eq!(narinfo.compression, Compression::Zstd);
         assert_eq!(
-            narinfo.nar_hash,
+            narinfo.nar_hash.to_sri(),
             "sha256-S0ymvFDCaeUfZSW1veq0gU12WoV80qZSXcgyllwCzZY="
         );
         assert_eq!(narinfo.nar_size, 12345);
@@ -362,9 +364,9 @@ Sig: my-cache-1:qrstuvwxyz123456
             store_path: "/nix/store/abc123-test".to_string(),
             url: "nar/test.nar.zst".to_string(),
             compression: Compression::Zstd,
-            file_hash: "sha256:abc".to_string(),
+            file_hash: NarHash::from_hex(&"ab".repeat(32)).unwrap(),
             file_size: 100,
-            nar_hash: "sha256:def".to_string(),
+            nar_hash: NarHash::from_hex(&"cd".repeat(32)).unwrap(),
             nar_size: 200,
             references: vec![],
             deriver: None,

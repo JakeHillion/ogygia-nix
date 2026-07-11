@@ -11,7 +11,6 @@ use axum::http::HeaderMap;
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::response::Response;
-use ogygia_nixutils::NarHash;
 use ogygia_nixutils::StoreHash;
 use serde::Deserialize;
 use serde::Serialize;
@@ -88,15 +87,8 @@ pub async fn get_narinfo(
     if let Some((mut narinfo, _)) = state.try_peer_narinfo(hash).await {
         // Rewrite the URL to use our format with the NarHash encoded as hex,
         // so the NAR request will be self-describing regardless of the peer's format.
-        let nar_hash = match NarHash::from_sri(&narinfo.nar_hash) {
-            Ok(h) => h,
-            Err(e) => {
-                tracing::warn!("Peer narinfo {} has invalid NarHash: {}", hash, e);
-                return (StatusCode::NOT_FOUND, "Not found").into_response();
-            }
-        };
         let filename = narinfo.url.rsplit('/').next().unwrap_or(&narinfo.url);
-        narinfo.url = format!("nar/{}/{}", nar_hash.to_hex(), filename);
+        narinfo.url = format!("nar/{}/{}", narinfo.nar_hash.to_hex(), filename);
         return (
             StatusCode::OK,
             [("content-type", "text/x-nix-narinfo")],
@@ -157,7 +149,7 @@ async fn try_local_store_narinfo(state: &AppState, hash: &str) -> Option<NarInfo
     // Generate/retrieve the cached NAR to get real FileHash and FileSize
     match state.nar_cache.ensure(hash, &store_path).await {
         Ok(cached) => {
-            narinfo.file_hash = cached.file_hash.clone();
+            narinfo.file_hash = cached.file_hash;
             narinfo.file_size = cached.file_size;
         }
         Err(e) => {
@@ -294,6 +286,7 @@ async fn try_local_store_nar(
     };
 
     let file_size = cached.file_size;
+    let file_hash = cached.file_hash.to_sri();
 
     match range {
         Some((start, end)) => {
@@ -333,7 +326,7 @@ async fn try_local_store_nar(
                     ("content-type", "application/zstd"),
                     ("content-length", content_length.as_str()),
                     ("content-range", content_range.as_str()),
-                    ("x-ogygia-nar-file-hash", cached.file_hash.as_str()),
+                    ("x-ogygia-nar-file-hash", file_hash.as_str()),
                 ],
                 body,
             )
@@ -348,7 +341,7 @@ async fn try_local_store_nar(
                 [
                     ("content-type", "application/zstd"),
                     ("content-length", content_length.as_str()),
-                    ("x-ogygia-nar-file-hash", cached.file_hash.as_str()),
+                    ("x-ogygia-nar-file-hash", file_hash.as_str()),
                 ],
                 body,
             )

@@ -27,6 +27,11 @@ use base64::engine::general_purpose::STANDARD as BASE64;
 pub struct NarHash([u8; 32]);
 
 impl NarHash {
+    /// Construct from a raw 32-byte SHA-256 digest.
+    pub fn from_bytes(bytes: [u8; 32]) -> Self {
+        Self(bytes)
+    }
+
     /// Parse the Nix database column form `sha256:<hex>`.
     pub fn from_db_str(s: &str) -> Result<Self> {
         Self::from_hex(expect_sha256(s, ':')?)
@@ -185,6 +190,12 @@ mod tests {
     #[test]
     fn nar_hash_from_hex_rejects_wrong_length() {
         assert!(NarHash::from_hex("abcd").is_err());
+    }
+
+    #[test]
+    fn nar_hash_from_bytes_roundtrips() {
+        let hash = NarHash::from_db_str(DB).unwrap();
+        assert_eq!(NarHash::from_bytes(*hash.as_bytes()), hash);
     }
 
     #[test]
