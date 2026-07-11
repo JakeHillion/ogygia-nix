@@ -10,6 +10,7 @@ irisd = [
     "dep:reqwest",
     "dep:serde_json",
     "dep:which",
+    "dep:ogygia-nixutils",
 ]
 
 [dependencies]
@@ -27,3 +28,4 @@ tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
 reqwest = { workspace = true, features = ["json"], optional = true }
 serde_json = { workspace = true, optional = true }
 which = { workspace = true, optional = true }
+ogygia-nixutils = { path = "../ogygia-nixutils", optional = true }

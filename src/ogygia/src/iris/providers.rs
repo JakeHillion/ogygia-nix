@@ -5,9 +5,9 @@
 
 use anyhow::Context;
 use anyhow::Result;
-use anyhow::anyhow;
 use clap::Args;
 use clap::ValueEnum;
+use ogygia_nixutils::StoreHash;
 use serde::Deserialize;
 use serde::Serialize;
 
@@ -67,8 +67,8 @@ pub fn run(args: &ProvidersArgs) -> Result<()> {
 
 async fn run_async(args: &ProvidersArgs) -> Result<()> {
     let store_path_hash = parse_hash_or_store_path(&args.input)
-        .ok_or_else(|| {
-            anyhow!(
+        .with_context(|| {
+            format!(
                 "Invalid input '{}': expected 32-character hash or /nix/store/... path",
                 args.input
             )
@@ -154,15 +154,11 @@ fn print_json(result: &ProvidersResponse) -> Result<()> {
     Ok(())
 }
 
-/// Parse input that is either a 32-character hash or a full store path.
-fn parse_hash_or_store_path(input: &str) -> Option<&str> {
+/// Parse input that is either a 32-character store-path hash or a full store path.
+fn parse_hash_or_store_path(input: &str) -> Result<StoreHash> {
     if input.starts_with("/nix/store/") {
-        input
-            .strip_prefix("/nix/store/")
-            .map(|s| &s[..32.min(s.len())])
-    } else if input.len() == 32 && input.chars().all(|c| c.is_ascii_alphanumeric()) {
-        Some(input)
+        StoreHash::from_store_path(input)
     } else {
-        None
+        input.parse()
     }
 }

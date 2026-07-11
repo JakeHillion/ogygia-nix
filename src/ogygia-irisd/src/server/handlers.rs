@@ -454,12 +454,15 @@ pub async fn rescan(
     for path in &request.paths {
         let path_str = path.to_string_lossy();
 
-        // Validate path format
-        if !path_str.starts_with("/nix/store/") {
-            tracing::warn!("rescan: invalid path format: {}", path_str);
-            errors += 1;
-            continue;
-        }
+        // Extract and validate the store-path hash (also validates the format).
+        let hash = match StoreHash::from_store_path(&path_str) {
+            Ok(h) => h,
+            Err(e) => {
+                tracing::warn!("rescan: invalid path {}: {}", path_str, e);
+                errors += 1;
+                continue;
+            }
+        };
 
         // Query the Nix database and verify serveability
         let serveable = match state.nix_db.is_path_serveable(&path_str).await {
@@ -483,20 +486,6 @@ pub async fn rescan(
             errors += 1;
             continue;
         }
-
-        // Extract and validate the store-path hash.
-        let hash = match path_str
-            .strip_prefix("/nix/store/")
-            .and_then(|s| s.get(..32))
-            .and_then(|h| h.parse::<StoreHash>().ok())
-        {
-            Some(h) => h,
-            None => {
-                tracing::warn!("rescan: invalid hash in path: {}", path_str);
-                errors += 1;
-                continue;
-            }
-        };
 
         state.local_bloom.insert(hash.as_str());
         rescanned += 1;

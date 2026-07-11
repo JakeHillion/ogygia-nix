@@ -97,6 +97,18 @@
             ];
           };
 
+          # ogygia's default `irisd` feature depends on the ogygia-nixutils
+          # path crate, so both crates' sources must be present when building it.
+          ogygiaSrc = lib.fileset.toSource {
+            root = ./.;
+            fileset = lib.fileset.unions [
+              ./Cargo.toml
+              ./Cargo.lock
+              (craneLib.fileset.commonCargoSources ./src/ogygia)
+              (craneLib.fileset.commonCargoSources ./src/ogygia-nixutils)
+            ];
+          };
+
           commonArgs = {
             inherit src;
             strictDeps = true;
@@ -118,7 +130,7 @@
           ogygia = craneLib.buildPackage (individualCrateArgs // {
             pname = "ogygia";
             cargoExtraArgs = "-p ogygia";
-            src = fileSetForCrate ./src/ogygia;
+            src = ogygiaSrc;
           });
 
           # ogygia-nixutils is a library crate with no deployable artifact; it
