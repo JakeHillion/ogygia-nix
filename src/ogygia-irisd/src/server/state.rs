@@ -11,13 +11,13 @@ use bytes::Bytes;
 use futures::StreamExt;
 use futures::stream::FuturesUnordered;
 use ogygia_nixutils::NarHash;
+use ogygia_nixutils::NarInfo;
 use ogygia_nixutils::NixDb;
 
 use crate::bloom::local::LocalBloom;
 use crate::bloom::peers::PeerBlooms;
 use crate::config::Config;
 use crate::nix::cache::NarCache;
-use crate::nix::narinfo::NarInfo;
 
 /// Shared application state
 pub struct AppState {
@@ -213,7 +213,7 @@ async fn fetch_narinfo_from_peer(
             return None;
         }
     };
-    match NarInfo::parse(&body) {
+    match body.parse::<NarInfo>() {
         Ok(narinfo) => Some((peer_url, narinfo)),
         Err(e) => {
             tracing::warn!("Failed to parse narinfo from {}: {}", peer_url, e);

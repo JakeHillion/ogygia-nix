@@ -11,6 +11,7 @@ use axum::http::HeaderMap;
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::response::Response;
+use ogygia_nixutils::NarInfo;
 use ogygia_nixutils::StoreHash;
 use serde::Deserialize;
 use serde::Serialize;
@@ -18,7 +19,6 @@ use tokio::io::AsyncReadExt;
 use tokio_util::io::ReaderStream;
 
 use super::AppState;
-use crate::nix::narinfo::NarInfo;
 use crate::nix::narinfo::narinfo_from_path_info;
 
 /// GET /nix-cache-info
@@ -78,7 +78,7 @@ pub async fn get_narinfo(
         return (
             StatusCode::OK,
             [("content-type", "text/x-nix-narinfo")],
-            narinfo.serialize(),
+            narinfo.to_string(),
         )
             .into_response();
     }
@@ -92,7 +92,7 @@ pub async fn get_narinfo(
         return (
             StatusCode::OK,
             [("content-type", "text/x-nix-narinfo")],
-            narinfo.serialize(),
+            narinfo.to_string(),
         )
             .into_response();
     }
@@ -119,7 +119,7 @@ pub async fn get_local_narinfo(
         Some(narinfo) => (
             StatusCode::OK,
             [("content-type", "text/x-nix-narinfo")],
-            narinfo.serialize(),
+            narinfo.to_string(),
         )
             .into_response(),
         None => (StatusCode::NOT_FOUND, "Not found").into_response(),
