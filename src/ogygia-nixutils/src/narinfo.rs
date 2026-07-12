@@ -7,6 +7,7 @@ use std::str::FromStr;
 use anyhow::Result;
 use anyhow::anyhow;
 
+use crate::signature::Signature;
 use crate::types::NarHash;
 
 /// Parsed narinfo file
@@ -31,7 +32,7 @@ pub struct NarInfo {
     /// Deriver store path (optional)
     pub deriver: Option<String>,
     /// Signatures
-    pub signatures: Vec<String>,
+    pub signatures: Vec<Signature>,
     /// Content-addressed info (optional)
     pub ca: Option<String>,
 }
@@ -50,19 +51,17 @@ pub enum Compression {
 impl NarInfo {
     /// Check if this narinfo has at least one signature from a trusted key.
     ///
-    /// Trusted keys are in format "name:base64-public-key".
-    /// Signatures are in format "name:base64-signature".
-    /// Returns true if any signature's name prefix matches a trusted key's name prefix.
+    /// Trusted keys are in format "name:base64-public-key"; a signature is
+    /// trusted if its key name matches that of any trusted key.
     pub fn has_trusted_signature(&self, trusted_keys: &[String]) -> bool {
         let trusted_names: Vec<&str> = trusted_keys
             .iter()
             .filter_map(|key| key.split_once(':').map(|(name, _)| name))
             .collect();
 
-        self.signatures.iter().any(|sig| {
-            sig.split_once(':')
-                .is_some_and(|(name, _)| trusted_names.contains(&name))
-        })
+        self.signatures
+            .iter()
+            .any(|sig| trusted_names.contains(&sig.name()))
     }
 
     /// Check if this narinfo has a meaningful content-addressed (CA) field.
@@ -117,7 +116,7 @@ impl FromStr for NarInfo {
                 let value = value.trim();
 
                 if key == "Sig" {
-                    signatures.push(value.to_string());
+                    signatures.push(value.parse()?);
                 } else {
                     fields.insert(key, value);
                 }
@@ -234,8 +233,8 @@ NarHash: sha256-S0ymvFDCaeUfZSW1veq0gU12WoV80qZSXcgyllwCzZY=
 NarSize: 67890
 References: abc123def456ghi789jkl012mno345pq-glibc-2.35
 Deriver: xyz789abc123def456ghi012jkl345mno-hello-2.10.drv
-Sig: cache.nixos.org-1:abcdefghijklmnop
-Sig: my-cache-1:qrstuvwxyz123456
+Sig: cache.nixos.org-1:AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8gISIjJCUmJygpKissLS4vMDEyMzQ1Njc4OTo7PD0+Pw==
+Sig: my-cache-1:AAcOFRwjKjE4P0ZNVFtiaXB3foWMk5qhqK+2vcTL0tng5+71/AMKERgfJi00O0JJUFdeZWxzeoGIj5adpKuyuQ==
 "#;
 
     #[test]
@@ -277,6 +276,13 @@ Sig: my-cache-1:qrstuvwxyz123456
         assert!(!info.has_trusted_signature(&untrusted));
 
         assert!(!info.has_trusted_signature(&[]));
+    }
+
+    /// A valid signature under `name` (the body is arbitrary 64-byte content).
+    fn sig(name: &str) -> Signature {
+        format!("{name}:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==")
+            .parse()
+            .unwrap()
     }
 
     /// Helper to create a base NarInfo for testing
@@ -322,7 +328,7 @@ Sig: my-cache-1:qrstuvwxyz123456
         // CA path with trusted signature → is_trusted returns true
         let info = NarInfo {
             ca: Some("fixed:sha256:abc".to_string()),
-            signatures: vec!["cache.nixos.org-1:sig".to_string()],
+            signatures: vec![sig("cache.nixos.org-1")],
             ..base_narinfo()
         };
         let trusted_keys = vec!["cache.nixos.org-1:publickey".to_string()];
@@ -333,7 +339,7 @@ Sig: my-cache-1:qrstuvwxyz123456
     fn test_is_trusted_non_ca_with_trusted_sig() {
         // Non-CA path with trusted signature → is_trusted returns true
         let info = NarInfo {
-            signatures: vec!["cache.nixos.org-1:sig".to_string()],
+            signatures: vec![sig("cache.nixos.org-1")],
             ..base_narinfo()
         };
         let trusted_keys = vec!["cache.nixos.org-1:publickey".to_string()];

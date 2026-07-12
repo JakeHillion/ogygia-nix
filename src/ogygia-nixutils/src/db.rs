@@ -208,12 +208,13 @@ impl NixDb {
 
         let nar_hash = NarHash::from_db_str(&row.hash)
             .with_context(|| format!("invalid NAR hash for {}", row.path))?;
-        let signatures: Vec<String> = row
+        let signatures = row
             .sigs
             .as_deref()
             .filter(|s| !s.is_empty())
-            .map(|s| s.split(' ').map(String::from).collect())
-            .unwrap_or_default();
+            .map(|s| s.split(' ').map(str::parse).collect())
+            .unwrap_or_else(|| Ok(Vec::new()))
+            .with_context(|| format!("invalid signature for {}", row.path))?;
 
         Ok(Some(PathInfo {
             path: row.path,

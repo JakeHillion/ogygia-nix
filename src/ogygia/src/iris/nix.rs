@@ -10,6 +10,7 @@ use std::sync::OnceLock;
 use anyhow::Context;
 use anyhow::Result;
 use anyhow::anyhow;
+use ogygia_nixutils::Signature;
 use serde::Deserialize;
 use tokio::io::AsyncBufReadExt;
 use tokio::io::BufReader;
@@ -49,8 +50,8 @@ fn nix_bin() -> &'static str {
 pub struct PathInfo {
     /// Full store path
     pub path: String,
-    /// Signatures on this path (format: "key-name:base64-signature")
-    pub signatures: Vec<String>,
+    /// Signatures on this path.
+    pub signatures: Vec<Signature>,
 }
 
 /// Raw JSON structure from `nix path-info --json` (path is the map key)
@@ -197,11 +198,16 @@ pub async fn query_ultimate_paths(paths: &[String]) -> Result<Vec<PathInfo>> {
     let ultimate_paths: Vec<PathInfo> = infos
         .into_iter()
         .filter(|(_, raw)| raw.ultimate)
-        .map(|(path, raw)| PathInfo {
-            path,
-            signatures: raw.signatures,
+        .map(|(path, raw)| {
+            let signatures = raw
+                .signatures
+                .iter()
+                .map(|s| s.parse())
+                .collect::<Result<Vec<Signature>>>()
+                .with_context(|| format!("invalid signature for {path}"))?;
+            Ok(PathInfo { path, signatures })
         })
-        .collect();
+        .collect::<Result<Vec<PathInfo>>>()?;
 
     Ok(ultimate_paths)
 }
