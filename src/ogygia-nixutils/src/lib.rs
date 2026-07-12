@@ -14,6 +14,7 @@
 //! The equivalence between [`Nix`]'s queries and the real `nix path-info`
 //! command is verified by the testcontainers-based tests in `db.rs`.
 
+mod cli;
 mod db;
 pub mod narinfo;
 mod nix;

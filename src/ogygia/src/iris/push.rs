@@ -9,9 +9,10 @@ use std::path::PathBuf;
 use anyhow::Context;
 use anyhow::Result;
 use clap::Args;
+use futures::TryStreamExt;
+use ogygia_nixutils::Nix;
 
 use super::client::IrisdClient;
-use super::nix::compute_closure;
 use super::nix::parse_key_name;
 use super::nix::query_ultimate_paths;
 use super::nix::read_store_paths_from_stdin;
@@ -69,7 +70,10 @@ async fn async_run(args: &PushArgs) -> Result<()> {
         input_paths
     } else {
         tracing::info!("Computing closure for {} paths...", input_paths.len());
-        let closure = compute_closure(&input_paths).await?;
+        let closure: Vec<String> = Nix::default()
+            .compute_closure(input_paths)
+            .try_collect()
+            .await?;
         tracing::info!("Closure contains {} store paths", closure.len());
         closure
     };

@@ -13,25 +13,28 @@
 
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::OnceLock;
 
 use anyhow::Result;
+use futures::Stream;
 use tokio::sync::OnceCell;
 
+use crate::cli::NixCli;
 use crate::db::NixDb;
 use crate::path_info::PathInfo;
 use crate::types::StoreHash;
 
-/// A handle to the local Nix installation.
+/// A handle to the local Nix installation: the entry point for querying the
+/// store and running store operations.
 ///
-/// Cloning is cheap and all clones share one lazily-opened database: the first
-/// database-backed call anywhere opens the connection pool, and every clone sees
-/// it thereafter. The pool then stays open for the life of the handle rather
-/// than being torn down between calls, so repeated lookups reuse connections.
+/// Cheap to clone, and clones share one lazily-initialized backend, so pass it
+/// around freely rather than threading a reference.
 #[derive(Clone)]
 pub struct Nix {
     /// Shared so that cloning before the first query can't open several pools;
     /// the `Arc` makes "open once" hold across every clone, not once per clone.
     db: Arc<OnceCell<NixDb>>,
+    cli: Arc<OnceLock<NixCli>>,
 }
 
 impl Nix {
@@ -41,12 +44,19 @@ impl Nix {
         let db = NixDb::open_in_memory().await?;
         Ok(Self {
             db: Arc::new(OnceCell::new_with(Some(db))),
+            cli: Arc::new(OnceLock::new()),
         })
     }
 
     /// The store database, opened on first use and cached for the process.
     async fn db(&self) -> Result<&NixDb> {
         self.db.get_or_try_init(NixDb::open).await
+    }
+
+    /// The `nix` CLI backend, built on first use and cached for the life of the
+    /// handle.
+    fn cli(&self) -> &NixCli {
+        self.cli.get_or_init(NixCli::default)
     }
 
     /// Find a store path by its store-path hash.
@@ -68,6 +78,15 @@ impl Nix {
     pub async fn is_path_serveable(&self, store_path: &str) -> Result<bool> {
         self.db().await?.is_path_serveable(store_path).await
     }
+
+    /// Stream the closure of `paths` — every store path in their transitive
+    /// reference set, including the inputs themselves.
+    pub fn compute_closure(
+        &self,
+        paths: Vec<String>,
+    ) -> impl Stream<Item = Result<String>> + Send + 'static {
+        self.cli().compute_closure(paths)
+    }
 }
 
 impl Default for Nix {
@@ -75,6 +94,7 @@ impl Default for Nix {
     fn default() -> Self {
         Self {
             db: Arc::new(OnceCell::new()),
+            cli: Arc::new(OnceLock::new()),
         }
     }
 }

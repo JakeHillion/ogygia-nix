@@ -63,37 +63,6 @@ struct RawPathInfo {
     signatures: Vec<String>,
 }
 
-/// Compute the closure of store paths using `nix path-info -r`.
-///
-/// Returns all paths in the closure, including the input paths.
-pub async fn compute_closure(paths: &[String]) -> Result<Vec<String>> {
-    if paths.is_empty() {
-        return Ok(Vec::new());
-    }
-
-    let output = Command::new(nix_bin())
-        .args(["path-info", "-r"])
-        .args(paths)
-        .output()
-        .await
-        .context("Failed to run nix path-info -r")?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(anyhow!("nix path-info -r failed: {}", stderr.trim()));
-    }
-
-    let stdout = String::from_utf8(output.stdout).context("Invalid UTF-8 in nix output")?;
-
-    let closure: Vec<String> = stdout
-        .lines()
-        .filter(|line| !line.is_empty())
-        .map(|s| s.to_string())
-        .collect();
-
-    Ok(closure)
-}
-
 /// Read store paths from stdin, one per line.
 ///
 /// Skips empty lines and lines that don't start with /nix/store/.
