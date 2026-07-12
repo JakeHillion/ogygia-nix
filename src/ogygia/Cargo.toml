@@ -9,7 +9,6 @@ default = ["irisd"]
 irisd = [
     "dep:reqwest",
     "dep:serde_json",
-    "dep:which",
     "dep:futures",
     "dep:ogygia-nixutils",
 ]
@@ -28,6 +27,5 @@ tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
 # Optional deps for irisd feature
 reqwest = { workspace = true, features = ["json"], optional = true }
 serde_json = { workspace = true, optional = true }
-which = { workspace = true, optional = true }
 futures = { workspace = true, optional = true }
 ogygia-nixutils = { path = "../ogygia-nixutils", optional = true }

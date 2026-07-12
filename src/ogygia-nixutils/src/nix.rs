@@ -80,6 +80,12 @@ impl Nix {
         self.db().await?.is_path_serveable(store_path).await
     }
 
+    /// Whether `store_path` was built locally rather than substituted from a
+    /// binary cache (Nix's `ultimate` flag).
+    pub async fn is_ultimate(&self, store_path: &str) -> Result<bool> {
+        self.cli().is_ultimate(store_path).await
+    }
+
     /// Sign the store paths in `paths` with the key in `key_file`. Paths that
     /// already carry the key's signature are re-signed harmlessly; filter them
     /// out beforehand to avoid the work.
