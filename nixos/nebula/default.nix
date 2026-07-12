@@ -275,5 +275,25 @@ in
     # The mesh handles its own host-firewall via the cert-group rules above;
     # let local services bind freely on the tun.
     networking.firewall.trustedInterfaces = [ "neb.ogygia" ];
+
+    # Convenience unit for downstream services that need the mesh up before
+    # they start — `Requires = nebula-online@ogygia.service`.
+    systemd.services."nebula-online@ogygia" = {
+      description = "Wait for Nebula interface neb.ogygia to come online";
+      after = [ "nebula@ogygia.service" ];
+      requires = [ "nebula@ogygia.service" ];
+      wantedBy = [ "multi-user.target" ];
+      serviceConfig = {
+        Type = "oneshot";
+        RemainAfterExit = true;
+        TimeoutStartSec = "60";
+      };
+      script = ''
+        until ${pkgs.iproute2}/bin/ip addr show neb.ogygia 2>/dev/null \
+          | ${pkgs.gnugrep}/bin/grep -q "inet "; do
+          sleep 1
+        done
+      '';
+    };
   };
 }

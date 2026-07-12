@@ -125,6 +125,7 @@ pkgs.runCommand "ogygia-nebula-module"
   lighthouseIsLighthouse = lib.boolToString lighthouseSystem.config.services.nebula.networks.ogygia.isLighthouse;
   lighthouseLighthouses = builtins.toJSON lighthouseSystem.config.services.nebula.networks.ogygia.lighthouses;
   lighthouseListenPort = toString lighthouseSystem.config.services.nebula.networks.ogygia.listen.port;
+  nebulaOnlineUnitExists = lib.boolToString (validSystem.config.systemd.services ? "nebula-online@ogygia");
   mergedInbound = builtins.toJSON mergeSystem.config.services.nebula.networks.ogygia.firewall.inbound;
   mergedGroups = builtins.toJSON mergeSystem.config.ogygia.nebula.groups;
   noPubFailedCount = toString (builtins.length (failedAssertions noPubKeySystem));
@@ -184,6 +185,11 @@ pkgs.runCommand "ogygia-nebula-module"
     exit 1
   fi
   echo "$lighthouseLighthouses" | jq -e '. == []' >/dev/null
+
+  if [ "$nebulaOnlineUnitExists" != "true" ]; then
+    echo "nebula-online@ogygia.service is not defined" >&2
+    exit 1
+  fi
 
   echo "$mergedInbound" | jq -e 'length == 2' >/dev/null
   echo "$mergedInbound" | jq -e 'map(select(.port == 22 and (.groups | index("ssh")))) | length == 1' >/dev/null
