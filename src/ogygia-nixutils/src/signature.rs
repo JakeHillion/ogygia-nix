@@ -1,11 +1,4 @@
-//! A signature over a store path's NAR.
-//!
-//! Nix writes signatures as `<key-name>:<base64>`, where the base64 payload is
-//! a 64-byte Ed25519 signature. Previously these were passed around as bare
-//! strings, so every consumer that needed the key name re-ran the same
-//! `split_once(':')`. [`Signature`] parses the form once, holds the name and the
-//! raw signature bytes, and exposes the name directly — mirroring how
-//! [`NarHash`](crate::NarHash) turns a hash's encodings into rendering methods.
+//! Parsing and serialization of Nix store-path signatures.
 
 use anyhow::Context;
 use anyhow::Result;
@@ -18,12 +11,9 @@ const SIG_LEN: usize = 64;
 
 /// A signature over a store path's NAR, in Nix's `<key-name>:<base64>` form.
 ///
-/// The body is the raw 64-byte Ed25519 signature; base64 is just its textual
-/// encoding, decoded on parsing ([`FromStr`](std::str::FromStr)) and re-rendered
-/// on [`Display`](std::fmt::Display). Holding the decoded bytes means an invalid or
-/// wrong-length signature is rejected at its ingestion point rather than
-/// surviving as an opaque string, and the key name — the only part callers match
-/// against trusted or signing keys — is a direct accessor.
+/// Parse with [`FromStr`](std::str::FromStr) (which validates the base64 and its
+/// length) and render back with [`Display`](std::fmt::Display); match it against
+/// a key by its [`name`](Self::name).
 #[derive(Clone, PartialEq, Eq)]
 pub struct Signature {
     name: String,

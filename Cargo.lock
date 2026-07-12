@@ -1886,6 +1886,7 @@ dependencies = [
  "anyhow",
  "clap",
  "etcd-client",
+ "futures",
  "hostname",
  "ogygia-nixutils",
  "reqwest",
@@ -1981,8 +1982,10 @@ name = "ogygia-nixutils"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-stream",
  "base64",
  "deadpool-sqlite",
+ "futures",
  "hex",
  "rstest",
  "rusqlite",
@@ -1992,6 +1995,8 @@ dependencies = [
  "tempfile",
  "testcontainers",
  "tokio",
+ "tracing",
+ "which",
 ]
 
 [[package]]
