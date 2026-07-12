@@ -34,6 +34,7 @@ const IN_MEMORY_SCHEMA: &str = "\
         path TEXT UNIQUE, \
         hash TEXT, \
         narSize INTEGER, \
+        ultimate INTEGER, \
         sigs TEXT, \
         ca TEXT, \
         deriver TEXT \
@@ -246,6 +247,26 @@ impl NixDb {
         raw.iter().map(|h| h.parse()).collect()
     }
 
+    /// Whether a store path was built locally rather than substituted from a
+    /// binary cache — Nix's `ultimate` flag, read from the `ValidPaths.ultimate`
+    /// column (`null` implies false). Errors if the path is not in the store,
+    /// matching what `nix path-info` reports for an unknown path.
+    pub async fn is_ultimate(&self, store_path: &str) -> Result<bool> {
+        let owned = store_path.to_owned();
+        let ultimate = self
+            .query(move |conn| {
+                let mut stmt =
+                    conn.prepare_cached("SELECT ultimate FROM ValidPaths WHERE path = ?1")?;
+                stmt.query_row([&owned], |row| row.get::<_, Option<i64>>(0))
+                    .optional()
+            })
+            .await?;
+        match ultimate {
+            Some(flag) => Ok(flag.unwrap_or(0) != 0),
+            None => anyhow::bail!("{store_path} is not a valid store path"),
+        }
+    }
+
     /// Check whether a store path is serveable (signed or content-addressed).
     pub async fn is_path_serveable(&self, store_path: &str) -> Result<bool> {
         let store_path = store_path.to_owned();
@@ -298,9 +319,10 @@ mod tests {
     /// Shell script run inside the container to produce a variety of store
     /// paths covering the cases the SQLite queries must get right:
     ///   - a content-addressed path (no refs, no deriver, no sigs)
-    ///   - built derivations with a deriver
+    ///   - built derivations with a deriver (Nix marks these `ultimate`)
     ///   - a path with multiple references (insertion order != lexical order)
     ///     plus a self-reference, signed with two keys
+    ///   - a substituted path (the base image's `bash`), which is not `ultimate`
     ///
     /// It writes the list of paths, the golden `nix path-info --json`, and a
     /// copy of the database into the bind-mounted `/work` directory.
@@ -311,6 +333,10 @@ experimental-features = nix-command'
 
 # A builder shell that definitely exists in this image's store.
 SH=$(command -v bash)
+# The store path containing the builder shell: substituted into the image's
+# store, so Nix leaves its `ultimate` flag unset.
+REAL=$(readlink -f "$SH")
+PB=/nix/store/$(printf '%s' "${REAL#/nix/store/}" | cut -d/ -f1)
 
 cat > /tmp/leaf.nix <<'NIXEOF'
 { sh, name }:
@@ -354,7 +380,7 @@ nix-store --generate-binary-cache-key test-key-2 /tmp/k2.sec /tmp/k2.pub
 nix store sign --key-file /tmp/k1.sec "$PC"
 nix store sign --key-file /tmp/k2.sec "$PC"
 
-printf '%s\n' "$PA" "$L1" "$L2" "$L3" "$PC" > /work/paths.txt
+printf '%s\n' "$PA" "$L1" "$L2" "$L3" "$PC" "$PB" > /work/paths.txt
 nix path-info --json $(cat /work/paths.txt) > /work/golden.json
 cp /nix/var/nix/db/db.sqlite* /work/
 chmod -R a+rw /work
@@ -364,6 +390,7 @@ chmod -R a+rw /work
     /// read-only [`NixDb`] queries agree with `nix path-info --json`:
     ///   - `find_path_info` matches the golden metadata field-for-field
     ///   - `is_path_serveable` matches `PathInfo::is_serveable` per path
+    ///   - `is_ultimate` matches the golden `ultimate` flag per path
     ///   - `find_store_path` resolves each hash back to its full store path
     ///   - `serveable_hashes` returns exactly the set of serveable paths
     ///
@@ -430,9 +457,32 @@ chmod -R a+rw /work
             .map(|info| (info.path.clone(), info))
             .collect();
 
+        // `ultimate` isn't part of `PathInfo` (nothing that consumes a
+        // `PathInfo` needs it), so read the flag straight from the golden JSON
+        // to check `is_ultimate` against.
+        #[derive(serde::Deserialize)]
+        struct GoldenUltimate {
+            #[serde(default)]
+            ultimate: bool,
+        }
+        let golden_ultimate: HashMap<String, GoldenUltimate> =
+            serde_json::from_str(&golden_json).expect("parse golden ultimate flags");
+
         let db = NixDb::open_path(&db_copy).await.expect("open NixDb");
 
         assert!(!paths.is_empty(), "no paths produced by setup");
+
+        // The `is_ultimate` check below is only meaningful if the fixture
+        // exercises both states: the built paths are ultimate, the substituted
+        // bash path is not.
+        assert!(
+            paths.iter().any(|p| golden_ultimate[p].ultimate),
+            "fixture produced no ultimate path",
+        );
+        assert!(
+            paths.iter().any(|p| !golden_ultimate[p].ultimate),
+            "fixture produced no non-ultimate path",
+        );
 
         for store_path in &paths {
             // "/nix/store/" is 11 chars; the hash is the next 32.
@@ -456,6 +506,14 @@ chmod -R a+rw /work
                     .expect("is_path_serveable query"),
                 expected.is_serveable(),
                 "is_path_serveable mismatch for {store_path}",
+            );
+
+            // The dedicated `is_ultimate` query must agree with the golden
+            // `ultimate` flag.
+            assert_eq!(
+                db.is_ultimate(store_path).await.expect("is_ultimate query"),
+                golden_ultimate[store_path].ultimate,
+                "is_ultimate mismatch for {store_path}",
             );
 
             // The hash prefix must resolve back to the full store path.
@@ -487,5 +545,47 @@ chmod -R a+rw /work
                 "serveable_hashes membership mismatch for {store_path}",
             );
         }
+    }
+
+    /// `is_ultimate` reads the `ultimate` column, treats a `null` (the common
+    /// case for substituted paths) as false, and reports an unknown path as an
+    /// error the way `nix path-info` does. Runs against an in-memory database,
+    /// so it needs no Docker daemon.
+    #[tokio::test]
+    async fn is_ultimate_reads_column_treating_null_as_false() {
+        let db = NixDb::open_in_memory().await.expect("open in-memory db");
+        db.pool
+            .get()
+            .await
+            .expect("connection")
+            .interact(|conn| {
+                conn.execute_batch(
+                    "INSERT INTO ValidPaths (path, hash, narSize, ultimate) VALUES \
+                     ('/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-built', 'sha256:00', 1, 1), \
+                     ('/nix/store/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb-subst', 'sha256:00', 1, NULL)",
+                )
+            })
+            .await
+            .expect("interact")
+            .expect("insert rows");
+
+        assert!(
+            db.is_ultimate("/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-built")
+                .await
+                .expect("ultimate query"),
+            "path with ultimate=1 should be ultimate",
+        );
+        assert!(
+            !db.is_ultimate("/nix/store/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb-subst")
+                .await
+                .expect("non-ultimate query"),
+            "path with ultimate=NULL should not be ultimate",
+        );
+        assert!(
+            db.is_ultimate("/nix/store/cccccccccccccccccccccccccccccccc-missing")
+                .await
+                .is_err(),
+            "unknown path should error",
+        );
     }
 }
