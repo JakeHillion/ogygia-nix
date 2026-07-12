@@ -1959,7 +1959,7 @@ dependencies = [
  "moka",
  "notify",
  "ogygia-nixutils",
- "rand 0.9.4",
+ "rand 0.10.2",
  "reqwest",
  "serde",
  "sha2",

@@ -39,7 +39,7 @@ fastbloom = "0.17"
 arc-swap = "1"
 
 # Randomization
-rand = "0.9"
+rand = "0.10"
 
 # Cryptography and hashing
 base64 = "0.22"
