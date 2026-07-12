@@ -10,13 +10,13 @@ use anyhow::Context;
 use anyhow::Result;
 use clap::Args;
 use futures::TryStreamExt;
+use futures::stream;
 use ogygia_nixutils::Nix;
 
 use super::client::IrisdClient;
 use super::nix::parse_key_name;
 use super::nix::query_ultimate_paths;
 use super::nix::read_store_paths_from_stdin;
-use super::nix::sign_store_paths;
 
 /// Arguments for the push command
 #[derive(Args)]
@@ -56,6 +56,8 @@ async fn async_run(args: &PushArgs) -> Result<()> {
 
     tracing::info!("Connecting to irisd at {}", args.irisd_url);
 
+    let nix = Nix::default();
+
     // Read store paths from stdin
     let input_paths = read_store_paths_from_stdin().await?;
 
@@ -70,10 +72,7 @@ async fn async_run(args: &PushArgs) -> Result<()> {
         input_paths
     } else {
         tracing::info!("Computing closure for {} paths...", input_paths.len());
-        let closure: Vec<String> = Nix::default()
-            .compute_closure(input_paths)
-            .try_collect()
-            .await?;
+        let closure: Vec<String> = nix.compute_closure(input_paths).try_collect().await?;
         tracing::info!("Closure contains {} store paths", closure.len());
         closure
     };
@@ -117,17 +116,12 @@ async fn async_run(args: &PushArgs) -> Result<()> {
         ultimate_paths.len() - unsigned.len(),
         key_name
     );
-    let sign_result = sign_store_paths(&args.signing_key, unsigned.iter().map(|p| &p.path)).await?;
-
-    if sign_result.failed > 0 {
-        tracing::warn!(
-            "Signing: {} succeeded, {} failed",
-            sign_result.signed,
-            sign_result.failed
-        );
-    } else {
-        tracing::info!("Signed {} paths", sign_result.signed);
-    }
+    nix.sign_paths(
+        &args.signing_key,
+        stream::iter(unsigned.iter().map(|p| &p.path)),
+    )
+    .await?;
+    tracing::info!("Signed {} paths", unsigned.len());
 
     let paths_to_rescan: Vec<_> = unsigned.into_iter().map(|p| &p.path).collect();
 

@@ -1,5 +1,6 @@
 //! Shelling out to the Nix CLIs.
 
+use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
 use std::process::Stdio;
 use std::sync::Arc;
@@ -9,7 +10,10 @@ use anyhow::Result;
 use anyhow::anyhow;
 use async_stream::try_stream;
 use futures::Stream;
+use futures::StreamExt;
+use futures::pin_mut;
 use tokio::io::AsyncBufReadExt;
+use tokio::io::AsyncWriteExt;
 use tokio::io::BufReader;
 use tokio::process::Command;
 
@@ -50,6 +54,43 @@ impl Default for NixCli {
 }
 
 impl NixCli {
+    /// Sign the store paths in `paths` with the key in `key_file`.
+    pub async fn sign_paths<P>(&self, key_file: &Path, paths: impl Stream<Item = P>) -> Result<()>
+    where
+        P: AsRef<Path>,
+    {
+        let mut child = Command::new(&*self.bin)
+            .args(["store", "sign", "--key-file"])
+            .arg(key_file)
+            .arg("--stdin")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .kill_on_drop(true)
+            .spawn()
+            .context("failed to spawn nix store sign")?;
+
+        let mut stdin = child.stdin.take().expect("child spawned with piped stdin");
+
+        pin_mut!(paths);
+        while let Some(path) = paths.next().await {
+            stdin
+                .write_all(path.as_ref().as_os_str().as_bytes())
+                .await
+                .context("writing paths to nix store sign")?;
+            stdin.write_all(b"\n").await?;
+        }
+        // Close stdin so the child sees EOF and stops reading.
+        drop(stdin);
+
+        let status = child.wait().await.context("waiting for nix store sign")?;
+        if !status.success() {
+            return Err(anyhow!("nix store sign exited with {status}"));
+        }
+
+        Ok(())
+    }
+
     /// Stream the closure of `paths` via `nix path-info -r`, one store path per
     /// item. Runs lazily on first poll; a spawn failure or non-zero exit surfaces
     /// as an `Err` item.

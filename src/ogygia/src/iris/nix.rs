@@ -87,55 +87,6 @@ pub async fn read_store_paths_from_stdin() -> Result<Vec<String>> {
     Ok(paths)
 }
 
-/// Result of signing store paths.
-#[derive(Debug)]
-pub struct SignResult {
-    /// Number of paths successfully signed
-    pub signed: usize,
-    /// Number of paths that failed to sign
-    pub failed: usize,
-}
-
-/// Sign store paths using `nix store sign --key-file`.
-///
-/// Accepts any iterator of path-like items and signs them in batches
-/// to avoid command line length limits.
-pub async fn sign_store_paths<I, P>(key_file: &Path, paths: I) -> Result<SignResult>
-where
-    I: IntoIterator<Item = P>,
-    P: AsRef<Path>,
-{
-    const BATCH_SIZE: usize = 100;
-
-    let mut signed = 0;
-    let mut failed = 0;
-
-    // Process paths in batches to avoid command line limits
-    let mut iter = paths.into_iter().peekable();
-    while iter.peek().is_some() {
-        let batch: Vec<_> = iter.by_ref().take(BATCH_SIZE).collect();
-
-        let mut cmd = Command::new(nix_bin());
-        cmd.args(["store", "sign", "--key-file"]);
-        cmd.arg(key_file);
-        for p in &batch {
-            cmd.arg(p.as_ref());
-        }
-
-        let output = cmd.output().await.context("Failed to run nix store sign")?;
-
-        if output.status.success() {
-            signed += batch.len();
-        } else {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            tracing::warn!("nix store sign failed for batch: {}", stderr.trim());
-            failed += batch.len();
-        }
-    }
-
-    Ok(SignResult { signed, failed })
-}
-
 /// Query path info for multiple paths and filter to only ultimate (locally-built) paths.
 ///
 /// Returns PathInfo for paths where `ultimate: true`, meaning they were built
