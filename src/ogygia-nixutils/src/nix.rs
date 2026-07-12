@@ -11,6 +11,7 @@
 //! handle. A caller that only exercises operations which don't need the database
 //! never opens it — and never has to declare up front whether it will.
 
+use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::OnceLock;
@@ -77,6 +78,16 @@ impl Nix {
     /// Check whether a store path is serveable (signed or content-addressed).
     pub async fn is_path_serveable(&self, store_path: &str) -> Result<bool> {
         self.db().await?.is_path_serveable(store_path).await
+    }
+
+    /// Sign the store paths in `paths` with the key in `key_file`. Paths that
+    /// already carry the key's signature are re-signed harmlessly; filter them
+    /// out beforehand to avoid the work.
+    pub async fn sign_paths<P>(&self, key_file: &Path, paths: impl Stream<Item = P>) -> Result<()>
+    where
+        P: AsRef<Path>,
+    {
+        self.cli().sign_paths(key_file, paths).await
     }
 
     /// Stream the closure of `paths` — every store path in their transitive
