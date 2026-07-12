@@ -9,13 +9,14 @@ use std::path::PathBuf;
 use anyhow::Context;
 use anyhow::Result;
 use clap::Args;
+use futures::StreamExt;
 use futures::TryStreamExt;
 use futures::stream;
 use ogygia_nixutils::Nix;
+use ogygia_nixutils::StoreHash;
 
 use super::client::IrisdClient;
 use super::nix::parse_key_name;
-use super::nix::query_ultimate_paths;
 use super::nix::read_store_paths_from_stdin;
 
 /// Arguments for the push command
@@ -66,72 +67,54 @@ async fn async_run(args: &PushArgs) -> Result<()> {
         return Ok(());
     }
 
-    // Compute closure unless --no-closure is specified
-    let store_paths = if args.no_closure {
-        tracing::info!("Processing {} store paths...", input_paths.len());
-        input_paths
-    } else {
-        tracing::info!("Computing closure for {} paths...", input_paths.len());
-        let closure: Vec<String> = nix.compute_closure(input_paths).try_collect().await?;
-        tracing::info!("Closure contains {} store paths", closure.len());
-        closure
-    };
-
-    // Query path info and filter to ultimate (locally-built) paths
-    tracing::info!("Querying path info for {} paths...", store_paths.len());
-    let ultimate_paths = query_ultimate_paths(&store_paths).await?;
-
-    if ultimate_paths.is_empty() {
-        tracing::warn!("No ultimate (locally-built) paths found to push");
-        return Ok(());
-    }
-
-    tracing::info!(
-        "Found {} ultimate paths out of {} total",
-        ultimate_paths.len(),
-        store_paths.len()
-    );
-
-    // Sign paths using nix store sign
     let key_name = parse_key_name(&args.signing_key)?;
 
-    // Filter out paths that already have our signature
-    let unsigned: Vec<_> = ultimate_paths
-        .iter()
-        .filter(|p| !p.signatures.iter().any(|s| s.name() == key_name))
-        .collect();
+    // The store paths to consider, as a stream: the closure of the inputs, or
+    // the inputs themselves with --no-closure.
+    let store_paths = if args.no_closure {
+        tracing::info!("Processing {} store paths...", input_paths.len());
+        stream::iter(input_paths)
+            .map(Ok::<_, anyhow::Error>)
+            .boxed()
+    } else {
+        tracing::info!("Computing closure of {} paths...", input_paths.len());
+        nix.compute_closure(input_paths).boxed()
+    };
 
-    if unsigned.is_empty() {
-        tracing::info!(
-            "All {} paths already signed with {}",
-            ultimate_paths.len(),
-            key_name
-        );
+    // Keep only ultimate (locally-built) paths that don't already carry our
+    // signature; both checks query the local Nix installation per path.
+    let to_sign: Vec<String> = {
+        let nix = &nix;
+        let key = key_name.as_str();
+        store_paths
+            .try_filter_map(move |path| async move {
+                if !nix.is_ultimate(&path).await? {
+                    return Ok(None);
+                }
+                let hash = StoreHash::from_store_path(&path)?;
+                let already_signed = nix
+                    .find_path_info(&hash)
+                    .await?
+                    .is_some_and(|info| info.signatures.iter().any(|s| s.name() == key));
+                Ok((!already_signed).then_some(path))
+            })
+            .try_collect()
+            .await?
+    };
+
+    if to_sign.is_empty() {
+        tracing::info!("No unsigned ultimate paths to push");
         return Ok(());
     }
 
-    tracing::info!(
-        "Signing {} paths ({} already signed with {})...",
-        unsigned.len(),
-        ultimate_paths.len() - unsigned.len(),
-        key_name
-    );
-    nix.sign_paths(
-        &args.signing_key,
-        stream::iter(unsigned.iter().map(|p| &p.path)),
-    )
-    .await?;
-    tracing::info!("Signed {} paths", unsigned.len());
-
-    let paths_to_rescan: Vec<_> = unsigned.into_iter().map(|p| &p.path).collect();
+    tracing::info!("Signing {} paths with {}...", to_sign.len(), key_name);
+    nix.sign_paths(&args.signing_key, stream::iter(&to_sign))
+        .await?;
 
     // Notify irisd to rescan the newly signed paths
-    tracing::info!(
-        "Notifying irisd to rescan {} paths...",
-        paths_to_rescan.len()
-    );
+    tracing::info!("Notifying irisd to rescan {} paths...", to_sign.len());
     let rescan_result = client
-        .rescan(paths_to_rescan)
+        .rescan(&to_sign)
         .await
         .context("Failed to rescan paths")?;
 
