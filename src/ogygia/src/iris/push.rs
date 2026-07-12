@@ -91,12 +91,11 @@ async fn async_run(args: &PushArgs) -> Result<()> {
 
     // Sign paths using nix store sign
     let key_name = parse_key_name(&args.signing_key)?;
-    let key_prefix = format!("{}:", key_name);
 
     // Filter out paths that already have our signature
     let unsigned: Vec<_> = ultimate_paths
         .iter()
-        .filter(|p| !p.signatures.iter().any(|s| s.starts_with(&key_prefix)))
+        .filter(|p| !p.signatures.iter().any(|s| s.name() == key_name))
         .collect();
 
     if unsigned.is_empty() {

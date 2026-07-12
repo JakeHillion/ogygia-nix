@@ -6,6 +6,7 @@ use anyhow::Context;
 use anyhow::Result;
 use serde::Deserialize;
 
+use crate::signature::Signature;
 use crate::types::NarHash;
 
 /// Information about a store path.
@@ -29,8 +30,8 @@ pub struct PathInfo {
     pub references: Vec<String>,
     /// Deriver path, if known.
     pub deriver: Option<String>,
-    /// Signatures over the NAR (`<key-name>:<base64>`).
-    pub signatures: Vec<String>,
+    /// Signatures over the NAR.
+    pub signatures: Vec<Signature>,
     /// Content-addressing descriptor (e.g. `fixed:sha256:…`), if content-addressed.
     pub ca: Option<String>,
 }
@@ -78,13 +79,19 @@ pub fn parse_path_info_json(json: &str) -> Result<Vec<PathInfo>> {
         let Some(info) = info else { continue };
         let nar_hash = NarHash::from_sri(&info.nar_hash)
             .with_context(|| format!("invalid NarHash for {path}"))?;
+        let signatures = info
+            .signatures
+            .iter()
+            .map(|s| s.parse())
+            .collect::<Result<Vec<Signature>>>()
+            .with_context(|| format!("invalid signature for {path}"))?;
         result.push(PathInfo {
             path,
             nar_hash,
             nar_size: info.nar_size,
             references: info.references,
             deriver: info.deriver,
-            signatures: info.signatures,
+            signatures,
             ca: info.ca,
         });
     }
@@ -105,7 +112,7 @@ mod tests {
                     "/nix/store/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb-glibc-2.35"
                 ],
                 "deriver": "/nix/store/cccccccccccccccccccccccccccccccc-hello-2.10.drv",
-                "signatures": ["cache.nixos.org-1:sig"],
+                "signatures": ["cache.nixos.org-1:AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8gISIjJCUmJygpKissLS4vMDEyMzQ1Njc4OTo7PD0+Pw=="],
                 "ca": null
             }
         }"#;
@@ -127,7 +134,8 @@ mod tests {
             info.deriver.as_deref(),
             Some("/nix/store/cccccccccccccccccccccccccccccccc-hello-2.10.drv")
         );
-        assert_eq!(info.signatures, vec!["cache.nixos.org-1:sig"]);
+        assert_eq!(info.signatures.len(), 1);
+        assert_eq!(info.signatures[0].name(), "cache.nixos.org-1");
         assert_eq!(info.ca, None);
     }
 

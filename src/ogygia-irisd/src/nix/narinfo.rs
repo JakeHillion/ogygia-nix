@@ -53,6 +53,7 @@ pub fn narinfo_from_path_info(info: &PathInfo) -> NarInfo {
 #[cfg(test)]
 mod tests {
     use ogygia_nixutils::NarHash;
+    use ogygia_nixutils::Signature;
 
     use super::*;
 
@@ -67,7 +68,11 @@ mod tests {
             deriver: Some(
                 "/nix/store/drv123abc456def789ghi012jkl345mno-hello-2.10.drv".to_string(),
             ),
-            signatures: vec!["cache.nixos.org-1:signature123".to_string()],
+            signatures: vec![
+                "cache.nixos.org-1:AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8gISIjJCUmJygpKissLS4vMDEyMzQ1Njc4OTo7PD0+Pw=="
+                    .parse::<Signature>()
+                    .unwrap(),
+            ],
             ca: None,
         };
 
