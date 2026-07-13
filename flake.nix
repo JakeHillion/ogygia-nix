@@ -131,6 +131,10 @@
             pname = "ogygia";
             cargoExtraArgs = "-p ogygia";
             src = ogygiaSrc;
+            # Embed nebula-cert's store path in the binary so this derivation
+            # carries a runtime dependency on nebula. Only set here, so plain
+            # cargo builds (e.g. the dev shell) keep runtime PATH discovery.
+            env.OGYGIA_NEBULA_CERT_BIN = "${pkgs.nebula}/bin/nebula-cert";
           });
 
           # ogygia-nixutils is a library crate with no deployable artifact; it

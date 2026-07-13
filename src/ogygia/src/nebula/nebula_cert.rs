@@ -22,6 +22,13 @@ static BIN: OnceLock<&'static str> = OnceLock::new();
 
 pub fn bin() -> &'static str {
     BIN.get_or_init(|| {
+        // A Nix build embeds the store path of nebula-cert here so the
+        // derivation carries a runtime dependency on nebula. Unset for plain
+        // `cargo build` (e.g. the dev shell), which falls back to discovery.
+        if let Some(path) = option_env!("OGYGIA_NEBULA_CERT_BIN") {
+            tracing::debug!("using embedded nebula-cert path: {}", path);
+            return path;
+        }
         if which::which("nebula-cert").is_ok() {
             tracing::debug!("using nebula-cert from PATH");
             return "nebula-cert";
