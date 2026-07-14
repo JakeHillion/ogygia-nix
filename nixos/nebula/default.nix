@@ -248,7 +248,7 @@ in
       })
       topology.lighthouses;
 
-    systemd.tmpfiles.rules = [ "d /etc/nebula 0700 root root - -" ];
+    systemd.tmpfiles.rules = [ "d /etc/nebula 0755 root root - -" ];
 
     services.nebula.networks.ogygia = {
       ca = caCertFile;
