@@ -32,6 +32,7 @@ toml = { workspace = true }
 
 # Git
 git2 = { workspace = true }
+base64 = { workspace = true }
 tempfile = { workspace = true }
 chrono = { workspace = true }
 
