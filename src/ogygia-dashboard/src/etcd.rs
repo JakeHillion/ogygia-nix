@@ -21,6 +21,7 @@ pub struct HostStates {
 
 pub struct Etcd {
     states: Mutex<Arc<HostStates>>,
+    changed: tokio::sync::watch::Sender<()>,
 }
 
 impl Etcd {
@@ -30,6 +31,7 @@ impl Etcd {
 
         let me = Arc::new(Self {
             states: Default::default(),
+            changed: tokio::sync::watch::Sender::new(()),
         });
 
         // Load initial state
@@ -77,6 +79,11 @@ impl Etcd {
         self.states.lock().await.clone()
     }
 
+    /// Receiver notified whenever the host states change.
+    pub fn subscribe(&self) -> tokio::sync::watch::Receiver<()> {
+        self.changed.subscribe()
+    }
+
     async fn load_all(&self, client: &mut Client, prefix: &str) -> Result<()> {
         let resp = client
             .get(prefix, Some(GetOptions::new().with_prefix()))
@@ -115,6 +122,7 @@ impl Etcd {
         }
 
         states.version += 1;
+        self.changed.send_replace(());
         tracing::info!(
             "Loaded {} hosts from etcd, version: {}",
             states.host_states.len(),
@@ -176,6 +184,7 @@ impl Etcd {
                         entry[commit_state] = commit;
 
                         states.version += 1;
+                        self.changed.send_replace(());
 
                         let old_str = old.map(|c| c.to_string()[..12].to_string());
                         let new_str = commit.as_ref().map(|c| c.to_string()[..12].to_string());
@@ -194,6 +203,7 @@ impl Etcd {
                             host_map[commit_state] = None;
                         }
                         states.version += 1;
+                        self.changed.send_replace(());
                         tracing::info!("Host '{}' state '{}' deleted", host, commit_state.as_ref());
                     }
                 }

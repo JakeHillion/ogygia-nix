@@ -210,6 +210,10 @@
               pkgs.cargo-nextest
               pkgs.zstd
             ];
+            # Test binaries from the nextest archive link the nix openssl
+            # dynamically but carry no usable runpath, and the nix dynamic
+            # loader does not search the runner's system libraries.
+            LD_LIBRARY_PATH = lib.makeLibraryPath [ pkgs.openssl ];
           };
 
           formatter = treefmtEval.config.build.wrapper;

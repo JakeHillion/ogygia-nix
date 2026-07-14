@@ -39,7 +39,7 @@ struct CachedPrCount {
 
 pub struct AppState {
     config: Config,
-    git_manager: GitManager,
+    git_manager: Arc<GitManager>,
     etcd: Arc<Etcd>,
     commits_cache: Mutex<Arc<CachedCommits>>,
     html_cache: Mutex<Arc<CachedHtml>>,
@@ -48,9 +48,13 @@ pub struct AppState {
 
 impl AppState {
     pub async fn new(config: Config) -> Result<Self> {
-        let git_manager = GitManager::new(&config).await?;
+        let git_manager = Arc::new(GitManager::new(&config).await?);
         git_manager.fetch_updates().await?;
         let etcd = Etcd::new(&config).await?;
+
+        if let Some(archive) = config.git.archive.clone() {
+            crate::archive::spawn(archive, git_manager.clone(), etcd.clone());
+        }
 
         Ok(Self {
             config,

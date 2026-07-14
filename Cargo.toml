@@ -73,7 +73,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 chrono = { version = "0.4", features = ["serde"] }
 
 # Git
-git2 = { version = "0.21", features = ["https"] }
+git2 = { version = "0.21", features = ["https", "ssh"] }
 tempfile = "3.0"
 
 # Enums

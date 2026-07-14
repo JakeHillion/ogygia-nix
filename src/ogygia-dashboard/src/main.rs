@@ -10,6 +10,7 @@ use tokio::net::TcpListener;
 use tokio::net::UnixListener;
 use tower::ServiceExt;
 
+mod archive;
 mod config;
 mod etcd;
 mod git;
