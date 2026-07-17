@@ -32,6 +32,8 @@ impl Activation {
 
 /// Side effects of an update cycle, abstracted for testing.
 pub trait System {
+    /// Substitute `flake_ref` from binary caches without building locally.
+    fn prefetch(&self, flake_ref: &str) -> Result<()>;
     /// Build `flake_ref` and return its store path.
     fn build(&self, flake_ref: &str) -> Result<PathBuf>;
     /// Point `profile` at `store_path` as a new generation.
@@ -50,6 +52,16 @@ pub struct RealSystem;
 const EXPERIMENTAL_FEATURES: [&str; 2] = ["--extra-experimental-features", "nix-command flakes"];
 
 impl System for RealSystem {
+    fn prefetch(&self, flake_ref: &str) -> Result<()> {
+        run(Command::new("nix")
+            .arg("build")
+            .args(EXPERIMENTAL_FEATURES)
+            .args(["--max-jobs", "0"])
+            .args(["--option", "always-allow-substitutes", "true"])
+            .arg("--no-link")
+            .arg(flake_ref))
+    }
+
     fn build(&self, flake_ref: &str) -> Result<PathBuf> {
         let mut command = Command::new("nix");
         command

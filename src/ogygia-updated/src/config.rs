@@ -48,6 +48,13 @@ pub struct HostConfig {
 pub struct BuildConfig {
     /// Flake attribute to build. Defaults to the host's toplevel.
     pub flake_attr: Option<String>,
+    /// A cache-resident edition of this host's closure, typically with the
+    /// expensive commit-specific parts removed, that the real build largely
+    /// shares. Substituted with `--max-jobs 0` before the build to warm the
+    /// store; if it cannot be substituted the cycle is skipped rather than
+    /// built locally, so cache-dependent hosts never fall back to a full
+    /// build.
+    pub prefetch_attr: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
