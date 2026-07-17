@@ -97,8 +97,9 @@
             ];
           };
 
-          # ogygia's default `irisd` feature depends on the ogygia-nixutils
-          # path crate, so both crates' sources must be present when building it.
+          # ogygia's default `irisd` and `updated` features depend on the
+          # ogygia-nixutils and ogygia-updated path crates, so their sources
+          # must be present when building it.
           ogygiaSrc = lib.fileset.toSource {
             root = ./.;
             fileset = lib.fileset.unions [
@@ -106,6 +107,7 @@
               ./Cargo.lock
               (craneLib.fileset.commonCargoSources ./src/ogygia)
               (craneLib.fileset.commonCargoSources ./src/ogygia-nixutils)
+              (craneLib.fileset.commonCargoSources ./src/ogygia-updated)
             ];
           };
 
@@ -135,6 +137,9 @@
             # carries a runtime dependency on nebula. Only set here, so plain
             # cargo builds (e.g. the dev shell) keep runtime PATH discovery.
             env.OGYGIA_NEBULA_CERT_BIN = "${pkgs.nebula}/bin/nebula-cert";
+            postInstall = ''
+              ${pkgs.patchelf}/bin/patchelf --set-rpath "${lib.makeLibraryPath [ pkgs.openssl ]}" $out/bin/ogygia
+            '';
           });
 
           # ogygia-nixutils is a library crate with no deployable artifact; it
@@ -152,6 +157,15 @@
             pname = "ogygia-hostinfod";
             cargoExtraArgs = "-p ogygia-hostinfod";
             src = fileSetForCrate ./src/ogygia-hostinfod;
+          });
+
+          ogygia-updated = craneLib.buildPackage (individualCrateArgs // {
+            pname = "ogygia-updated";
+            cargoExtraArgs = "-p ogygia-updated";
+            src = fileSetForCrate ./src/ogygia-updated;
+            postInstall = ''
+              ${pkgs.patchelf}/bin/patchelf --set-rpath "${lib.makeLibraryPath [ pkgs.openssl ]}" $out/bin/ogygia-updated
+            '';
           });
 
           ogygia-dashboard = craneLib.buildPackage (individualCrateArgs // {
@@ -191,7 +205,7 @@
         in
         {
           packages = {
-            inherit ogygia ogygia-irisd ogygia-hostinfod ogygia-dashboard ogygia-nextest-archive;
+            inherit ogygia ogygia-irisd ogygia-hostinfod ogygia-dashboard ogygia-updated ogygia-nextest-archive;
             default = ogygia;
           };
 
@@ -210,6 +224,12 @@
               pkgs.cargo-nextest
               pkgs.zstd
             ];
+            # Doctests are not part of the nextest archive, so they are
+            # compiled from source in this shell; give it the same build
+            # inputs as the crate derivations so openssl-sys and prost
+            # find their headers and tools.
+            nativeBuildInputs = commonArgs.nativeBuildInputs;
+            buildInputs = commonArgs.buildInputs;
             # Test binaries from the nextest archive link the nix openssl
             # dynamically but carry no usable runpath, and the nix dynamic
             # loader does not search the runner's system libraries.
@@ -219,7 +239,7 @@
           formatter = treefmtEval.config.build.wrapper;
 
           checks = {
-            inherit ogygia ogygia-irisd ogygia-hostinfod ogygia-dashboard;
+            inherit ogygia ogygia-irisd ogygia-hostinfod ogygia-dashboard ogygia-updated;
 
             ogygia-clippy = craneLib.cargoClippy (commonArgs // {
               inherit cargoArtifacts;
@@ -279,6 +299,7 @@
         _module.args.ogygia-irisd = self.packages.${pkgs.stdenv.hostPlatform.system}.ogygia-irisd;
         _module.args.ogygia-hostinfod = self.packages.${pkgs.stdenv.hostPlatform.system}.ogygia-hostinfod;
         _module.args.ogygia-dashboard = self.packages.${pkgs.stdenv.hostPlatform.system}.ogygia-dashboard;
+        _module.args.ogygia-updated = self.packages.${pkgs.stdenv.hostPlatform.system}.ogygia-updated;
       };
 
       ci = nixpkgs.lib.genAttrs [ "aarch64-linux" "x86_64-linux" ] (system:

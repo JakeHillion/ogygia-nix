@@ -1889,6 +1889,7 @@ dependencies = [
  "futures",
  "hostname",
  "ogygia-nixutils",
+ "ogygia-updated",
  "reqwest",
  "serde",
  "serde_json",
@@ -1999,6 +2000,22 @@ dependencies = [
  "tokio",
  "tracing",
  "which",
+]
+
+[[package]]
+name = "ogygia-updated"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "git2",
+ "rand 0.10.2",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "toml",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]
