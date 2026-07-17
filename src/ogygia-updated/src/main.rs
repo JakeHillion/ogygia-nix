@@ -1,3 +1,4 @@
+use std::path::Path;
 use std::path::PathBuf;
 use std::sync::mpsc;
 use std::sync::mpsc::RecvTimeoutError;
@@ -6,11 +7,14 @@ use std::time::Duration;
 
 use anyhow::Result;
 use anyhow::bail;
+use chrono::Utc;
 use clap::Parser;
+use ogygia_updated::CanaryState;
 use ogygia_updated::Config;
 use ogygia_updated::Outcome;
 use ogygia_updated::Trigger;
 use ogygia_updated::control;
+use ogygia_updated::control::Request;
 use rand::RngExt;
 use tracing::error;
 use tracing::info;
@@ -45,19 +49,45 @@ fn main() -> Result<()> {
     thread::spawn(move || control::listen(listener, sender));
 
     // Wait out the initial delay or the interval between cycles, but run
-    // immediately when an update is requested over the control socket.
-    let mut wait = Duration::from_secs(config.daemon.initial_delay_seconds);
+    // immediately when a command arrives — and never sleep past an active
+    // canary's deadline, so it is reverted on time.
+    let mut wait = wait_duration(
+        &config,
+        Duration::from_secs(config.daemon.initial_delay_seconds),
+    );
     loop {
-        let request = match receiver.recv_timeout(wait) {
-            Ok(stream) => Some(stream),
+        let received = match receiver.recv_timeout(wait) {
+            Ok(pair) => Some(pair),
             Err(RecvTimeoutError::Timeout) => None,
             Err(RecvTimeoutError::Disconnected) => bail!("control socket listener exited"),
         };
-        let trigger = if request.is_some() {
-            info!("update requested over the control socket");
-            Trigger::Manual
-        } else {
-            Trigger::Scheduled
+
+        let (trigger, reply) = match received {
+            None => (Trigger::Scheduled, None),
+            Some((request, mut stream)) => match request {
+                // A status query is answered from persisted state, without
+                // running a cycle.
+                Request::CanaryStatus => {
+                    let response = canary_status(&config).map_err(|error| format!("{error:#}"));
+                    control::respond(&mut stream, response);
+                    wait = wait_duration(&config, interval(&config));
+                    continue;
+                }
+                Request::Update => {
+                    info!("manual update requested over the control socket");
+                    (Trigger::Manual, Some(stream))
+                }
+                Request::Canary { branch, timeout } => {
+                    info!(branch, ?timeout, "canary requested over the control socket");
+                    (
+                        Trigger::StartCanary {
+                            branch,
+                            timeout: timeout.map(Duration::from_secs),
+                        },
+                        Some(stream),
+                    )
+                }
+            },
         };
 
         let result = ogygia_updated::run_once(&config, trigger);
@@ -72,7 +102,7 @@ fn main() -> Result<()> {
                 Err(message)
             }
         };
-        if let Some(mut stream) = request {
+        if let Some(mut stream) = reply {
             control::respond(&mut stream, response);
         }
 
@@ -81,18 +111,55 @@ fn main() -> Result<()> {
         // (restartIfChanged is off so it cannot kill its own parent
         // mid-cycle); exit so systemd brings the daemon back under the
         // new definition.
-        if matches!(
-            result,
-            Ok(Outcome::Switched { .. } | Outcome::TestActivated { .. })
-        ) {
+        if result.as_ref().is_ok_and(Outcome::activated) {
             info!("activated a new configuration; exiting to adopt its unit definition");
             return Ok(());
         }
 
-        let jitter = match config.daemon.jitter_seconds {
-            0 => 0,
-            bound => rand::rng().random_range(0..bound),
-        };
-        wait = Duration::from_secs(config.daemon.interval_seconds + jitter);
+        wait = wait_duration(&config, interval(&config));
     }
+}
+
+/// The base gap between scheduled cycles, with jitter applied.
+fn interval(config: &Config) -> Duration {
+    let jitter = match config.daemon.jitter_seconds {
+        0 => 0,
+        bound => rand::rng().random_range(0..bound),
+    };
+    Duration::from_secs(config.daemon.interval_seconds + jitter)
+}
+
+/// Clamp `base` to an active canary's remaining time so the daemon wakes
+/// to revert it on schedule. A lapsed deadline yields a zero wait, running
+/// the reverting cycle at once.
+fn wait_duration(config: &Config, base: Duration) -> Duration {
+    if let Ok(Some(CanaryState::Active {
+        expires_at: Some(deadline),
+        ..
+    })) = CanaryState::load(&config.canary_state_path())
+    {
+        let remaining = (deadline - Utc::now()).to_std().unwrap_or(Duration::ZERO);
+        base.min(remaining)
+    } else {
+        base
+    }
+}
+
+/// Render the current or most-recent canary for `canary status`.
+fn canary_status(config: &Config) -> Result<String> {
+    match CanaryState::load(&config.canary_state_path())? {
+        None => Ok("no canary".to_string()),
+        Some(state) => {
+            let running = read_revision(&config.host.current_revision_path);
+            let boot_floor = read_revision(&config.next_boot_revision_path());
+            Ok(state.describe(Utc::now(), &running, &boot_floor))
+        }
+    }
+}
+
+/// Best-effort read of a build-revision file for display.
+fn read_revision(path: &Path) -> String {
+    std::fs::read_to_string(path)
+        .map(|raw| raw.trim().to_string())
+        .unwrap_or_else(|_| "unknown".to_string())
 }

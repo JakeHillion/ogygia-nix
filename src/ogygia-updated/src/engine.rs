@@ -1,13 +1,20 @@
 use std::fmt;
 use std::fs;
 use std::path::Path;
+use std::path::PathBuf;
+use std::time::Duration;
 
 use anyhow::Context;
 use anyhow::Result;
+use chrono::DateTime;
+use chrono::Utc;
 use git2::Oid;
 use tracing::info;
 use tracing::warn;
 
+use crate::canary::CanaryState;
+use crate::canary::CanaryTarget;
+use crate::canary::FinishReason;
 use crate::config::Config;
 use crate::repo::Repo;
 use crate::system::Activation;
@@ -33,6 +40,16 @@ pub enum Outcome {
     /// The cache-warm closure could not be substituted, so the cycle was
     /// skipped rather than built locally. Retried on the next cycle.
     PrefetchUnavailable { commit: String },
+    /// A canary was started: the commit runs while a safe boot floor is
+    /// staged for the next reboot.
+    CanaryStarted {
+        commit: String,
+        floor: String,
+        expires_at: Option<DateTime<Utc>>,
+    },
+    /// A scheduled cycle held the running trial in place, keeping the boot
+    /// floor current without touching the running system.
+    CanaryHeld { commit: String, floor: String },
 }
 
 impl fmt::Display for Outcome {
@@ -58,39 +75,262 @@ impl fmt::Display for Outcome {
                     "cache-warm closure for {commit} is unavailable; skipping until the cache catches up"
                 )
             }
+            Outcome::CanaryStarted {
+                commit,
+                floor,
+                expires_at,
+            } => {
+                write!(f, "trialling {commit}; boot floor {floor}; ")?;
+                match expires_at {
+                    Some(at) => write!(f, "expires {}", at.format("%Y-%m-%d %H:%MZ")),
+                    None => write!(f, "no timeout"),
+                }
+            }
+            Outcome::CanaryHeld { commit, floor } => {
+                write!(f, "holding canary {commit}; boot floor {floor}")
+            }
         }
     }
 }
 
+impl Outcome {
+    /// Whether the running system was replaced, so the daemon must exit
+    /// for systemd to restart it under the new unit. A bare boot-default
+    /// change (reboot scheduled, canary floor staged) leaves the running
+    /// system untouched and does not qualify; only starting a canary
+    /// re-drives the running system among the canary outcomes.
+    pub fn activated(&self) -> bool {
+        matches!(
+            self,
+            Outcome::Switched { .. }
+                | Outcome::TestActivated { .. }
+                | Outcome::CanaryStarted { .. }
+        )
+    }
+}
+
 /// What initiated an update cycle.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Trigger {
     /// The daemon's own interval fired. A host deliberately running or
-    /// booting an off-branch build is left alone.
+    /// booting an off-branch build is left alone, and an active canary is
+    /// held, expired, or retired once its commit merges.
     Scheduled,
-    /// An operator asked for a cycle over the control socket. The host is
-    /// pulled back onto the branch tip regardless of what it is running,
-    /// so scheduled updates resume.
+    /// An operator asked for a plain update. Any canary is cleared and the
+    /// host is pulled back onto the branch tip regardless of what it runs.
     Manual,
+    /// An operator asked to trial `branch`. Its tip is pinned now and the
+    /// host is held there until the timeout elapses, the commit merges, or
+    /// a manual update supersedes it.
+    StartCanary {
+        branch: String,
+        timeout: Option<Duration>,
+    },
 }
 
 /// Run one update cycle.
 pub fn run_once(config: &Config, trigger: Trigger) -> Result<Outcome> {
-    run(config, &RealSystem, trigger)
+    run(config, &RealSystem, Utc::now(), &read_boot_id()?, trigger)
 }
 
-fn run(config: &Config, system: &impl System, trigger: Trigger) -> Result<Outcome> {
+fn run(
+    config: &Config,
+    system: &impl System,
+    now: DateTime<Utc>,
+    boot_id: &str,
+    trigger: Trigger,
+) -> Result<Outcome> {
+    let repo = Repo::open_or_clone(&config.repo_path(), &config.repo.url)?;
+    repo.fetch()?;
+    let main_tip = repo.tip(&config.repo.branch)?;
+    let canary = CanaryState::load(&config.canary_state_path())?;
+    info!(%main_tip, branch = %config.repo.branch, ?trigger, "fetched");
+
+    match trigger {
+        Trigger::StartCanary { branch, timeout } => {
+            let expires_at = timeout.map(|d| now + chrono::Duration::seconds(d.as_secs() as i64));
+            start_canary(
+                config, system, &repo, boot_id, main_tip, &branch, expires_at,
+            )
+        }
+        Trigger::Manual => {
+            if let Some(CanaryState::Active { target, .. }) = &canary {
+                finish_canary(config, now, target, FinishReason::Cleared)?;
+                info!("cleared active canary for a manual update");
+            }
+            update_to_tip(config, system, &repo, main_tip, true)
+        }
+        Trigger::Scheduled => scheduled(config, system, &repo, now, boot_id, main_tip, canary),
+    }
+}
+
+/// The kernel's boot id, which changes on every boot.
+fn read_boot_id() -> Result<String> {
+    let path = "/proc/sys/kernel/random/boot_id";
+    Ok(fs::read_to_string(path)
+        .with_context(|| format!("reading {path}"))?
+        .trim()
+        .to_string())
+}
+
+/// A scheduled cycle: follow the tracked branch, or end an active canary
+/// on the first terminal condition in precedence order — reboot, then
+/// out-of-band switch, then merge, then timeout — so a host that left the
+/// trial records why, even if the commit also merged or the deadline
+/// lapsed while it was gone. Every ending resumes normal tracking.
+fn scheduled(
+    config: &Config,
+    system: &impl System,
+    repo: &Repo,
+    now: DateTime<Utc>,
+    boot_id: &str,
+    main_tip: Oid,
+    canary: Option<CanaryState>,
+) -> Result<Outcome> {
+    let Some(CanaryState::Active {
+        target,
+        expires_at,
+        boot_id: started_boot,
+    }) = canary
+    else {
+        return update_to_tip(config, system, repo, main_tip, false);
+    };
+
+    let commit = target_commit(&target)?;
+
+    // A reboot loses the ephemeral test activation, so the trial is over.
+    // This outranks merge and expiry, which may both have come true while
+    // the host was down. The trial is never reapplied; we record the reason
+    // and resume normal tracking this cycle, rolling forward from the floor.
+    if boot_id != started_boot {
+        finish_canary(config, now, &target, FinishReason::Rebooted)?;
+        info!("canary host rebooted; ending the trial and resuming the tracked branch");
+        return update_to_tip(config, system, repo, main_tip, false);
+    }
+
+    // No reboot, but the host is no longer running the trial: it was
+    // switched out of band by hand. Resume tracking, which leaves a
+    // deliberately off-branch system alone.
+    let current = read_revision(&config.host.current_revision_path)?;
+    if current != commit {
+        finish_canary(config, now, &target, FinishReason::Overwritten)?;
+        info!("canary overwritten out of band; ending the trial and resuming the tracked branch");
+        return update_to_tip(config, system, repo, main_tip, false);
+    }
+
+    // Still trialling. Once the commit lands on the tracked branch the
+    // canary has served its purpose; resume following the tip.
+    if repo.is_ancestor(commit, main_tip)? {
+        finish_canary(config, now, &target, FinishReason::Merged)?;
+        info!("canary merged; resuming the tracked branch");
+        return update_to_tip(config, system, repo, main_tip, false);
+    }
+
+    if expires_at.is_some_and(|deadline| now >= deadline) {
+        finish_canary(config, now, &target, FinishReason::Expired)?;
+        info!("canary timed out; reverting to the tracked branch");
+        return update_to_tip(config, system, repo, main_tip, true);
+    }
+
+    // Hold the trial open: keep the boot floor recent, but never re-drive
+    // the running system.
+    let floor = stage_boot_floor(config, system, repo, commit, main_tip)?;
+    Ok(Outcome::CanaryHeld {
+        commit: commit.to_string(),
+        floor: floor.to_string(),
+    })
+}
+
+/// Pin `branch`'s tip and hold the host on it.
+fn start_canary(
+    config: &Config,
+    system: &impl System,
+    repo: &Repo,
+    boot_id: &str,
+    main_tip: Oid,
+    branch: &str,
+    expires_at: Option<DateTime<Utc>>,
+) -> Result<Outcome> {
+    let commit = repo.tip(branch)?;
+    CanaryState::Active {
+        target: CanaryTarget::Pinned {
+            branch: branch.to_string(),
+            commit: commit.to_string(),
+        },
+        expires_at,
+        boot_id: boot_id.to_string(),
+    }
+    .store(&config.canary_state_path())?;
+
+    let floor = stage_boot_floor(config, system, repo, commit, main_tip)?;
+
+    // Apply the trial once, as an ephemeral test activation. Scheduled
+    // cycles never reapply it, so a reboot ends it for good.
+    let current = read_revision(&config.host.current_revision_path)?;
+    if current != commit {
+        let store_path = checkout_and_build(config, system, repo, commit)?;
+        system.switch_to_configuration(&store_path, Activation::Test)?;
+    }
+
+    Ok(Outcome::CanaryStarted {
+        commit: commit.to_string(),
+        floor: floor.to_string(),
+        expires_at,
+    })
+}
+
+/// Stage `merge-base(commit, main_tip)` as the boot default so a reboot
+/// lands on a recent tracked commit rather than the trial. Boot only: it
+/// never touches the running system and never schedules a reboot. Returns
+/// the floor.
+fn stage_boot_floor(
+    config: &Config,
+    system: &impl System,
+    repo: &Repo,
+    commit: Oid,
+    main_tip: Oid,
+) -> Result<Oid> {
+    let floor = repo.merge_base(commit, main_tip)?;
+    let next_boot = read_revision(&config.next_boot_revision_path())?;
+
+    if next_boot != floor {
+        let floor_path = checkout_and_build(config, system, repo, floor)?;
+        system.set_profile(&config.activate.profile, &floor_path)?;
+        system.switch_to_configuration(&floor_path, Activation::Boot)?;
+    }
+
+    Ok(floor)
+}
+
+/// Record a canary as finished so `canary status` can explain how it ended.
+fn finish_canary(
+    config: &Config,
+    now: DateTime<Utc>,
+    target: &CanaryTarget,
+    reason: FinishReason,
+) -> Result<()> {
+    CanaryState::Finished {
+        target: target.clone(),
+        at: now,
+        reason,
+    }
+    .store(&config.canary_state_path())
+}
+
+/// Update the host to `tip`. `force` overrides the scheduler's guards
+/// that otherwise leave a deliberately off-branch running or next-boot
+/// system alone.
+fn update_to_tip(
+    config: &Config,
+    system: &impl System,
+    repo: &Repo,
+    tip: Oid,
+    force: bool,
+) -> Result<Outcome> {
     let current = read_revision(&config.host.current_revision_path)?;
     let next_boot = read_revision(&config.next_boot_revision_path())?;
 
-    let repo = Repo::open_or_clone(&config.repo)?;
-    repo.fetch()?;
-    let tip = repo.tip(&config.repo.branch)?;
-    info!(%current, %next_boot, %tip, branch = %config.repo.branch, ?trigger, "fetched");
-
-    // The scheduler leaves a deliberately off-branch host alone; a manual
-    // trigger overrides that to pull it back onto the branch.
-    if trigger == Trigger::Scheduled && !repo.is_ancestor(current, tip)? {
+    if !force && !repo.is_ancestor(current, tip)? {
         return Ok(Outcome::NotOnBranch {
             revision: current.to_string(),
         });
@@ -102,7 +342,7 @@ fn run(config: &Config, system: &impl System, trigger: Trigger) -> Result<Outcom
 
     repo.checkout(tip)?;
 
-    let flake = format!("git+file://{}", config.repo.path.display());
+    let flake = format!("git+file://{}", config.repo_path().display());
     // The prefetch substitutes a cache-resident edition of the closure so
     // the real build only makes the commit-specific remainder. If it
     // cannot be substituted the cache is not yet ready, and a host that
@@ -121,11 +361,31 @@ fn run(config: &Config, system: &impl System, trigger: Trigger) -> Result<Outcom
 
     // A hand-staged off-branch next-boot system is preserved by the
     // scheduler, but a manual trigger resets the boot default to the tip.
-    let next_boot_on_branch = match trigger {
-        Trigger::Manual => true,
-        Trigger::Scheduled => repo.is_ancestor(next_boot, tip)?,
-    };
+    let next_boot_on_branch = force || repo.is_ancestor(next_boot, tip)?;
     activate(config, system, &store_path, tip, next_boot_on_branch)
+}
+
+/// Check out `commit`, leaving a clean tree, and build this host's system.
+fn checkout_and_build(
+    config: &Config,
+    system: &impl System,
+    repo: &Repo,
+    commit: Oid,
+) -> Result<PathBuf> {
+    repo.checkout(commit)?;
+    let flake = format!("git+file://{}", config.repo_path().display());
+    let store_path = system.build(&format!("{flake}#{}", config.flake_attr()))?;
+    info!(store_path = %store_path.display(), %commit, "built system");
+    Ok(store_path)
+}
+
+/// Parse the run commit from a canary target.
+fn target_commit(target: &CanaryTarget) -> Result<Oid> {
+    match target {
+        CanaryTarget::Pinned { commit, .. } => {
+            Oid::from_str(commit).with_context(|| format!("parsing pinned canary commit {commit}"))
+        }
+    }
 }
 
 fn activate(
@@ -181,6 +441,7 @@ mod tests {
     use tempfile::TempDir;
 
     use super::*;
+    use crate::canary::FinishReason;
     use crate::config::ActivateConfig;
     use crate::config::BuildConfig;
     use crate::config::DaemonConfig;
@@ -188,6 +449,15 @@ mod tests {
     use crate::config::RepoConfig;
     use crate::repo::testutil::commit;
     use crate::repo::testutil::init_origin;
+
+    /// A fixed clock for deterministic expiry tests.
+    fn now() -> DateTime<Utc> {
+        "2026-07-17T00:00:00Z".parse().unwrap()
+    }
+
+    /// The boot id a canary is started in; a cycle passing a different one
+    /// looks like a reboot.
+    const BOOT: &str = "boot-session-a";
 
     #[derive(Debug, PartialEq, Eq)]
     enum Call {
@@ -272,9 +542,9 @@ mod tests {
             fs::create_dir_all(profile.join("sw/share/ogygia")).unwrap();
 
             let config = Config {
+                state_dir: dir.path().to_path_buf(),
                 repo: RepoConfig {
                     url: origin_path.to_str().unwrap().to_string(),
-                    path: dir.path().join("clone"),
                     branch: "main".to_string(),
                 },
                 host: HostConfig {
@@ -321,7 +591,7 @@ mod tests {
         fixture.set_next_boot(initial);
 
         let system = MockSystem::default();
-        let outcome = run(&fixture.config, &system, Trigger::Scheduled).unwrap();
+        let outcome = run(&fixture.config, &system, now(), BOOT, Trigger::Scheduled).unwrap();
 
         assert_eq!(outcome, Outcome::UpToDate);
         assert!(system.calls.borrow().is_empty());
@@ -335,7 +605,7 @@ mod tests {
         let second = commit(&fixture.origin, "main", &[initial], "second");
 
         let system = MockSystem::default();
-        let outcome = run(&fixture.config, &system, Trigger::Scheduled).unwrap();
+        let outcome = run(&fixture.config, &system, now(), BOOT, Trigger::Scheduled).unwrap();
 
         assert_eq!(
             outcome,
@@ -345,7 +615,7 @@ mod tests {
         );
         let flake_ref = format!(
             "git+file://{}#nixosConfigurations.\"host.example.com\".config.system.build.toplevel",
-            fixture.config.repo.path.display()
+            fixture.config.repo_path().display()
         );
         assert_eq!(
             *system.calls.borrow(),
@@ -358,7 +628,7 @@ mod tests {
 
         // The working tree was left checked out at the new commit.
         assert_eq!(
-            fs::read_to_string(fixture.config.repo.path.join("marker")).unwrap(),
+            fs::read_to_string(fixture.config.repo_path().join("marker")).unwrap(),
             "second"
         );
     }
@@ -372,7 +642,7 @@ mod tests {
         fixture.set_next_boot(initial);
 
         let system = MockSystem::default();
-        let outcome = run(&fixture.config, &system, Trigger::Scheduled).unwrap();
+        let outcome = run(&fixture.config, &system, now(), BOOT, Trigger::Scheduled).unwrap();
 
         assert_eq!(
             outcome,
@@ -392,7 +662,7 @@ mod tests {
         fixture.set_next_boot(side);
 
         let system = MockSystem::default();
-        let outcome = run(&fixture.config, &system, Trigger::Scheduled).unwrap();
+        let outcome = run(&fixture.config, &system, now(), BOOT, Trigger::Scheduled).unwrap();
 
         assert_eq!(
             outcome,
@@ -406,7 +676,7 @@ mod tests {
             vec![
                 Call::Build(format!(
                     "git+file://{}#nixosConfigurations.\"host.example.com\".config.system.build.toplevel",
-                    fixture.config.repo.path.display()
+                    fixture.config.repo_path().display()
                 )),
                 Call::SwitchToConfiguration(Activation::Test),
             ]
@@ -422,7 +692,7 @@ mod tests {
         fixture.set_next_boot(initial);
 
         let system = MockSystem::default();
-        let outcome = run(&fixture.config, &system, Trigger::Manual).unwrap();
+        let outcome = run(&fixture.config, &system, now(), BOOT, Trigger::Manual).unwrap();
 
         // The off-branch guard is overridden and the host is switched onto
         // the branch tip.
@@ -437,7 +707,7 @@ mod tests {
             vec![
                 Call::Build(format!(
                     "git+file://{}#nixosConfigurations.\"host.example.com\".config.system.build.toplevel",
-                    fixture.config.repo.path.display()
+                    fixture.config.repo_path().display()
                 )),
                 Call::SetProfile(fixture.config.activate.profile.clone()),
                 Call::SwitchToConfiguration(Activation::Switch),
@@ -454,7 +724,7 @@ mod tests {
         fixture.set_next_boot(side);
 
         let system = MockSystem::default();
-        let outcome = run(&fixture.config, &system, Trigger::Manual).unwrap();
+        let outcome = run(&fixture.config, &system, now(), BOOT, Trigger::Manual).unwrap();
 
         // Rather than test-activating around the hand-staged boot entry,
         // the manual trigger resets the boot default to the tip.
@@ -469,7 +739,7 @@ mod tests {
             vec![
                 Call::Build(format!(
                     "git+file://{}#nixosConfigurations.\"host.example.com\".config.system.build.toplevel",
-                    fixture.config.repo.path.display()
+                    fixture.config.repo_path().display()
                 )),
                 Call::SetProfile(fixture.config.activate.profile.clone()),
                 Call::SwitchToConfiguration(Activation::Switch),
@@ -487,7 +757,7 @@ mod tests {
         config.build.prefetch_attr = Some("checks.x86_64-linux.prefetch".to_string());
 
         let system = MockSystem::default();
-        let outcome = run(&config, &system, Trigger::Scheduled).unwrap();
+        let outcome = run(&config, &system, now(), BOOT, Trigger::Scheduled).unwrap();
 
         assert_eq!(
             outcome,
@@ -495,7 +765,7 @@ mod tests {
                 commit: second.to_string()
             }
         );
-        let flake = format!("git+file://{}", config.repo.path.display());
+        let flake = format!("git+file://{}", config.repo_path().display());
         assert_eq!(
             system.calls.borrow()[..2],
             [
@@ -520,7 +790,7 @@ mod tests {
             fail_prefetch: true,
             ..MockSystem::default()
         };
-        let outcome = run(&config, &system, Trigger::Scheduled).unwrap();
+        let outcome = run(&config, &system, now(), BOOT, Trigger::Scheduled).unwrap();
 
         assert_eq!(
             outcome,
@@ -533,7 +803,7 @@ mod tests {
             *system.calls.borrow(),
             [Call::Prefetch(format!(
                 "git+file://{}#checks.x86_64-linux.prefetch",
-                config.repo.path.display()
+                config.repo_path().display()
             ))]
         );
     }
@@ -553,7 +823,7 @@ mod tests {
             built_kernel: Some("kernel-1"),
             ..MockSystem::default()
         };
-        let outcome = run(&config, &system, Trigger::Scheduled).unwrap();
+        let outcome = run(&config, &system, now(), BOOT, Trigger::Scheduled).unwrap();
 
         assert_eq!(
             outcome,
@@ -586,7 +856,7 @@ mod tests {
             built_kernel: Some("kernel-2"),
             ..MockSystem::default()
         };
-        let outcome = run(&config, &system, Trigger::Scheduled).unwrap();
+        let outcome = run(&config, &system, now(), BOOT, Trigger::Scheduled).unwrap();
 
         assert_eq!(
             outcome,
@@ -602,5 +872,268 @@ mod tests {
                 Call::ScheduleReboot(15),
             ]
         );
+    }
+
+    fn flake_ref(config: &Config) -> String {
+        format!(
+            "git+file://{}#nixosConfigurations.\"host.example.com\".config.system.build.toplevel",
+            config.repo_path().display()
+        )
+    }
+
+    fn store_active(config: &Config, commit: Oid, expires_at: Option<DateTime<Utc>>) {
+        CanaryState::Active {
+            target: CanaryTarget::Pinned {
+                branch: "canary".to_string(),
+                commit: commit.to_string(),
+            },
+            expires_at,
+            boot_id: BOOT.to_string(),
+        }
+        .store(&config.canary_state_path())
+        .unwrap();
+    }
+
+    fn finish_reason(config: &Config) -> FinishReason {
+        match CanaryState::load(&config.canary_state_path())
+            .unwrap()
+            .unwrap()
+        {
+            CanaryState::Finished { reason, .. } => reason,
+            other => panic!("expected a finished canary, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn start_canary_runs_commit_and_stages_boot_floor() {
+        let (fixture, initial) = Fixture::new();
+        let second = commit(&fixture.origin, "main", &[initial], "second");
+        let side = commit(&fixture.origin, "canary", &[second], "side");
+        fixture.set_current(initial);
+        fixture.set_next_boot(initial);
+
+        let system = MockSystem::default();
+        let outcome = run(
+            &fixture.config,
+            &system,
+            now(),
+            BOOT,
+            Trigger::StartCanary {
+                branch: "canary".to_string(),
+                timeout: Some(Duration::from_secs(86400)),
+            },
+        )
+        .unwrap();
+
+        // The trial runs the branch tip; the boot floor is the branch point
+        // with the tracked tip (here `second`).
+        assert_eq!(
+            outcome,
+            Outcome::CanaryStarted {
+                commit: side.to_string(),
+                floor: second.to_string(),
+                expires_at: Some(now() + chrono::Duration::seconds(86400)),
+            }
+        );
+        assert!(outcome.activated());
+
+        let flake = flake_ref(&fixture.config);
+        assert_eq!(
+            *system.calls.borrow(),
+            vec![
+                Call::Build(flake.clone()),
+                Call::SetProfile(fixture.config.activate.profile.clone()),
+                Call::SwitchToConfiguration(Activation::Boot),
+                Call::Build(flake),
+                Call::SwitchToConfiguration(Activation::Test),
+            ]
+        );
+
+        // The canary was pinned to the resolved commit, not the branch name.
+        let state = CanaryState::load(&fixture.config.canary_state_path())
+            .unwrap()
+            .unwrap();
+        assert!(matches!(
+            state,
+            CanaryState::Active {
+                target: CanaryTarget::Pinned { commit, .. },
+                expires_at: Some(_),
+                boot_id,
+            } if commit == side.to_string() && boot_id == BOOT
+        ));
+    }
+
+    #[test]
+    fn scheduled_holds_an_active_canary_in_place() {
+        let (fixture, initial) = Fixture::new();
+        let second = commit(&fixture.origin, "main", &[initial], "second");
+        let side = commit(&fixture.origin, "canary", &[second], "side");
+        fixture.set_current(side);
+        fixture.set_next_boot(second);
+        store_active(&fixture.config, side, None);
+
+        let system = MockSystem::default();
+        let outcome = run(&fixture.config, &system, now(), BOOT, Trigger::Scheduled).unwrap();
+
+        assert_eq!(
+            outcome,
+            Outcome::CanaryHeld {
+                commit: side.to_string(),
+                floor: second.to_string(),
+            }
+        );
+        assert!(!outcome.activated());
+        assert!(system.calls.borrow().is_empty());
+    }
+
+    #[test]
+    fn rebooted_canary_ends_and_resumes_tracking() {
+        let (fixture, initial) = Fixture::new();
+        let second = commit(&fixture.origin, "main", &[initial], "second");
+        let third = commit(&fixture.origin, "main", &[second], "third");
+        let side = commit(&fixture.origin, "canary", &[second], "side");
+        // Rebooted onto the boot floor (merge-base(side, third) = second);
+        // the timeout also lapsed while the host was down.
+        fixture.set_current(second);
+        fixture.set_next_boot(second);
+        store_active(
+            &fixture.config,
+            side,
+            Some(now() - chrono::Duration::hours(1)),
+        );
+
+        // A changed boot id ends the trial as Rebooted (outranking the
+        // lapsed timeout) and resumes tracking in the same cycle.
+        let system = MockSystem::default();
+        let outcome = run(
+            &fixture.config,
+            &system,
+            now(),
+            "boot-session-b",
+            Trigger::Scheduled,
+        )
+        .unwrap();
+
+        // Rolled forward to the tracked tip, not reapplied onto the trial.
+        assert_eq!(
+            outcome,
+            Outcome::Switched {
+                commit: third.to_string()
+            }
+        );
+        assert_eq!(finish_reason(&fixture.config), FinishReason::Rebooted);
+        assert_eq!(
+            *system.calls.borrow(),
+            vec![
+                Call::Build(flake_ref(&fixture.config)),
+                Call::SetProfile(fixture.config.activate.profile.clone()),
+                Call::SwitchToConfiguration(Activation::Switch),
+            ]
+        );
+    }
+
+    #[test]
+    fn overwritten_canary_ends_and_respects_off_branch_switch() {
+        let (fixture, initial) = Fixture::new();
+        let second = commit(&fixture.origin, "main", &[initial], "second");
+        let side = commit(&fixture.origin, "canary", &[second], "side");
+        let hand = commit(&fixture.origin, "hand", &[second], "hand");
+        // Same boot session, but the host was hand-switched to an off-branch
+        // commit.
+        fixture.set_current(hand);
+        fixture.set_next_boot(second);
+        store_active(&fixture.config, side, None);
+
+        let system = MockSystem::default();
+        let outcome = run(&fixture.config, &system, now(), BOOT, Trigger::Scheduled).unwrap();
+
+        // Ended as Overwritten; normal tracking leaves the deliberate
+        // off-branch switch alone.
+        assert_eq!(
+            outcome,
+            Outcome::NotOnBranch {
+                revision: hand.to_string()
+            }
+        );
+        assert_eq!(finish_reason(&fixture.config), FinishReason::Overwritten);
+        assert!(system.calls.borrow().is_empty());
+    }
+
+    #[test]
+    fn expired_canary_reverts_to_the_tracked_tip() {
+        let (fixture, initial) = Fixture::new();
+        let second = commit(&fixture.origin, "main", &[initial], "second");
+        let side = commit(&fixture.origin, "canary", &[second], "side");
+        fixture.set_current(side);
+        fixture.set_next_boot(second);
+        store_active(
+            &fixture.config,
+            side,
+            Some(now() - chrono::Duration::hours(1)),
+        );
+
+        let system = MockSystem::default();
+        let outcome = run(&fixture.config, &system, now(), BOOT, Trigger::Scheduled).unwrap();
+
+        // The off-branch running system is forced back onto the tip.
+        assert_eq!(
+            outcome,
+            Outcome::Switched {
+                commit: second.to_string()
+            }
+        );
+        assert_eq!(finish_reason(&fixture.config), FinishReason::Expired);
+        assert_eq!(
+            *system.calls.borrow(),
+            vec![
+                Call::Build(flake_ref(&fixture.config)),
+                Call::SetProfile(fixture.config.activate.profile.clone()),
+                Call::SwitchToConfiguration(Activation::Switch),
+            ]
+        );
+    }
+
+    #[test]
+    fn merged_canary_resumes_the_tracked_tip() {
+        let (fixture, initial) = Fixture::new();
+        let second = commit(&fixture.origin, "main", &[initial], "second");
+        let side = commit(&fixture.origin, "canary", &[second], "side");
+        // The branch merges back into main via a merge commit.
+        let merge = commit(&fixture.origin, "main", &[second, side], "merge");
+        fixture.set_current(side);
+        fixture.set_next_boot(second);
+        store_active(&fixture.config, side, None);
+
+        let system = MockSystem::default();
+        let outcome = run(&fixture.config, &system, now(), BOOT, Trigger::Scheduled).unwrap();
+
+        assert_eq!(
+            outcome,
+            Outcome::Switched {
+                commit: merge.to_string()
+            }
+        );
+        assert_eq!(finish_reason(&fixture.config), FinishReason::Merged);
+    }
+
+    #[test]
+    fn manual_update_clears_an_active_canary() {
+        let (fixture, initial) = Fixture::new();
+        let second = commit(&fixture.origin, "main", &[initial], "second");
+        let side = commit(&fixture.origin, "canary", &[second], "side");
+        fixture.set_current(side);
+        fixture.set_next_boot(second);
+        store_active(&fixture.config, side, None);
+
+        let system = MockSystem::default();
+        let outcome = run(&fixture.config, &system, now(), BOOT, Trigger::Manual).unwrap();
+
+        assert_eq!(
+            outcome,
+            Outcome::Switched {
+                commit: second.to_string()
+            }
+        );
+        assert_eq!(finish_reason(&fixture.config), FinishReason::Cleared);
     }
 }
