@@ -330,7 +330,7 @@ fn update_to_tip(
     let current = read_revision(&config.host.current_revision_path)?;
     let next_boot = read_revision(&config.next_boot_revision_path())?;
 
-    if !force && !repo.is_ancestor(current, tip)? {
+    if !force && !on_branch(repo, current, tip)? {
         return Ok(Outcome::NotOnBranch {
             revision: current.to_string(),
         });
@@ -361,7 +361,7 @@ fn update_to_tip(
 
     // A hand-staged off-branch next-boot system is preserved by the
     // scheduler, but a manual trigger resets the boot default to the tip.
-    let next_boot_on_branch = force || repo.is_ancestor(next_boot, tip)?;
+    let next_boot_on_branch = force || on_branch(repo, next_boot, tip)?;
     activate(config, system, &store_path, tip, next_boot_on_branch)
 }
 
@@ -386,6 +386,22 @@ fn target_commit(target: &CanaryTarget) -> Result<Oid> {
             Oid::from_str(commit).with_context(|| format!("parsing pinned canary commit {commit}"))
         }
     }
+}
+
+/// Whether `revision` is on the branch leading to `tip`, either as a plain
+/// ancestor or as a deployed jj revision whose every change has since
+/// landed there (rewritten, keeping its change-id). Such a fully-landed
+/// revision updates like a merged one; a stack with any change still
+/// outstanding does not.
+fn on_branch(repo: &Repo, revision: Oid, tip: Oid) -> Result<bool> {
+    if repo.is_ancestor(revision, tip)? {
+        return Ok(true);
+    }
+    if repo.changes_landed(revision, tip)? {
+        info!(%revision, "deployed changes have all landed on the tracked branch");
+        return Ok(true);
+    }
+    Ok(false)
 }
 
 fn activate(
@@ -448,6 +464,7 @@ mod tests {
     use crate::config::HostConfig;
     use crate::config::RepoConfig;
     use crate::repo::testutil::commit;
+    use crate::repo::testutil::commit_with_change_id;
     use crate::repo::testutil::init_origin;
 
     /// A fixed clock for deterministic expiry tests.
@@ -679,6 +696,48 @@ mod tests {
                     fixture.config.repo_path().display()
                 )),
                 Call::SwitchToConfiguration(Activation::Test),
+            ]
+        );
+    }
+
+    #[test]
+    fn landed_revision_updates_like_a_merge() {
+        let (fixture, initial) = Fixture::new();
+        // The host runs a jj commit deployed from a branch; it has since
+        // landed on main rewritten, keeping its change-id.
+        let deployed = commit_with_change_id(
+            &fixture.origin,
+            "deploy",
+            &[initial],
+            "deployed",
+            "kxyzkxyzkxyz",
+        );
+        let landed = commit_with_change_id(
+            &fixture.origin,
+            "main",
+            &[initial],
+            "landed",
+            "kxyzkxyzkxyz",
+        );
+        fixture.set_current(deployed);
+        fixture.set_next_boot(deployed);
+
+        let system = MockSystem::default();
+        let outcome = run(&fixture.config, &system, now(), BOOT, Trigger::Scheduled).unwrap();
+
+        assert_eq!(
+            outcome,
+            Outcome::Switched {
+                commit: landed.to_string()
+            }
+        );
+        // The landed next-boot revision counts as on-branch, so the boot
+        // profile moves too rather than getting a test-only activation.
+        assert_eq!(
+            system.calls.borrow()[1..],
+            [
+                Call::SetProfile(fixture.config.activate.profile.clone()),
+                Call::SwitchToConfiguration(Activation::Switch),
             ]
         );
     }
