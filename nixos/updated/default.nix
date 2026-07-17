@@ -38,6 +38,13 @@ in
         - `host.name` (string) — attribute name of this host's
           nixosConfiguration in the flake. Defaults to the FQDN.
 
+        - `build.prefetch_attr` (string) — a cache-resident edition of
+          this host's closure (typically with the expensive
+          commit-specific parts removed) substituted with `--max-jobs 0`
+          before the real build. If it cannot be substituted the cycle is
+          skipped rather than built locally, so cache-dependent hosts
+          never fall back to a full build.
+
         - `activate.allow_reboot` (bool) — reboot automatically when an
           update changes the kernel. Default: false.
 

@@ -6,6 +6,7 @@ use anyhow::Context;
 use anyhow::Result;
 use git2::Oid;
 use tracing::info;
+use tracing::warn;
 
 use crate::config::Config;
 use crate::repo::Repo;
@@ -29,6 +30,9 @@ pub enum Outcome {
     /// The new system needs a new kernel; it is the boot default and a
     /// reboot has been scheduled.
     RebootScheduled { commit: String },
+    /// The cache-warm closure could not be substituted, so the cycle was
+    /// skipped rather than built locally. Retried on the next cycle.
+    PrefetchUnavailable { commit: String },
 }
 
 impl fmt::Display for Outcome {
@@ -47,6 +51,12 @@ impl fmt::Display for Outcome {
             }
             Outcome::RebootScheduled { commit } => {
                 write!(f, "staged {commit} for boot and scheduled a reboot")
+            }
+            Outcome::PrefetchUnavailable { commit } => {
+                write!(
+                    f,
+                    "cache-warm closure for {commit} is unavailable; skipping until the cache catches up"
+                )
             }
         }
     }
@@ -93,6 +103,19 @@ fn run(config: &Config, system: &impl System, trigger: Trigger) -> Result<Outcom
     repo.checkout(tip)?;
 
     let flake = format!("git+file://{}", config.repo.path.display());
+    // The prefetch substitutes a cache-resident edition of the closure so
+    // the real build only makes the commit-specific remainder. If it
+    // cannot be substituted the cache is not yet ready, and a host that
+    // relies on it must not fall back to a full local build; skip the
+    // cycle and retry once the cache catches up.
+    if let Some(prefetch_attr) = &config.build.prefetch_attr
+        && let Err(error) = system.prefetch(&format!("{flake}#{prefetch_attr}"))
+    {
+        warn!(%error, "cache-warm closure unavailable; skipping the update");
+        return Ok(Outcome::PrefetchUnavailable {
+            commit: tip.to_string(),
+        });
+    }
     let store_path = system.build(&format!("{flake}#{}", config.flake_attr()))?;
     info!(store_path = %store_path.display(), "built new system");
 
@@ -168,6 +191,7 @@ mod tests {
 
     #[derive(Debug, PartialEq, Eq)]
     enum Call {
+        Prefetch(String),
         Build(String),
         SetProfile(PathBuf),
         SwitchToConfiguration(Activation),
@@ -179,9 +203,20 @@ mod tests {
         calls: RefCell<Vec<Call>>,
         booted_kernel: Option<&'static str>,
         built_kernel: Option<&'static str>,
+        fail_prefetch: bool,
     }
 
     impl System for MockSystem {
+        fn prefetch(&self, flake_ref: &str) -> Result<()> {
+            self.calls
+                .borrow_mut()
+                .push(Call::Prefetch(flake_ref.to_string()));
+            if self.fail_prefetch {
+                anyhow::bail!("prefetch unavailable");
+            }
+            Ok(())
+        }
+
         fn build(&self, flake_ref: &str) -> Result<PathBuf> {
             self.calls
                 .borrow_mut()
@@ -439,6 +474,67 @@ mod tests {
                 Call::SetProfile(fixture.config.activate.profile.clone()),
                 Call::SwitchToConfiguration(Activation::Switch),
             ]
+        );
+    }
+
+    #[test]
+    fn prefetch_precedes_the_build() {
+        let (fixture, initial) = Fixture::new();
+        fixture.set_current(initial);
+        fixture.set_next_boot(initial);
+        let second = commit(&fixture.origin, "main", &[initial], "second");
+        let mut config = fixture.config;
+        config.build.prefetch_attr = Some("checks.x86_64-linux.prefetch".to_string());
+
+        let system = MockSystem::default();
+        let outcome = run(&config, &system, Trigger::Scheduled).unwrap();
+
+        assert_eq!(
+            outcome,
+            Outcome::Switched {
+                commit: second.to_string()
+            }
+        );
+        let flake = format!("git+file://{}", config.repo.path.display());
+        assert_eq!(
+            system.calls.borrow()[..2],
+            [
+                Call::Prefetch(format!("{flake}#checks.x86_64-linux.prefetch")),
+                Call::Build(format!(
+                    "{flake}#nixosConfigurations.\"host.example.com\".config.system.build.toplevel"
+                )),
+            ]
+        );
+    }
+
+    #[test]
+    fn failed_prefetch_skips_the_build() {
+        let (fixture, initial) = Fixture::new();
+        fixture.set_current(initial);
+        fixture.set_next_boot(initial);
+        let second = commit(&fixture.origin, "main", &[initial], "second");
+        let mut config = fixture.config;
+        config.build.prefetch_attr = Some("checks.x86_64-linux.prefetch".to_string());
+
+        let system = MockSystem {
+            fail_prefetch: true,
+            ..MockSystem::default()
+        };
+        let outcome = run(&config, &system, Trigger::Scheduled).unwrap();
+
+        assert_eq!(
+            outcome,
+            Outcome::PrefetchUnavailable {
+                commit: second.to_string()
+            }
+        );
+        // A cache-dependent host never falls back to a local build.
+        assert_eq!(
+            *system.calls.borrow(),
+            [Call::Prefetch(format!(
+                "git+file://{}#checks.x86_64-linux.prefetch",
+                config.repo.path.display()
+            ))]
         );
     }
 
