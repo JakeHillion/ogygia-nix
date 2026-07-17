@@ -13,11 +13,15 @@
 
 pub mod control;
 
+mod canary;
 mod config;
 mod engine;
 mod repo;
 mod system;
 
+pub use canary::CanaryState;
+pub use canary::CanaryTarget;
+pub use canary::FinishReason;
 pub use config::Config;
 pub use engine::Outcome;
 pub use engine::Trigger;

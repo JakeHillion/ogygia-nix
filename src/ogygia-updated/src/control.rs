@@ -29,11 +29,21 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// A command for the daemon, sent over the control socket. Each variant
 /// carries only the data its operation needs.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "command", rename_all = "snake_case")]
 pub enum Request {
-    /// Reset the target to the configured branch tip and run a cycle now.
+    /// Reset the target to the configured branch tip and run a cycle now,
+    /// clearing any active canary.
     Update,
+    /// Trial `branch`: pin its tip and hold the host there until `timeout`
+    /// seconds pass (no timeout if `None`), the commit merges, or an
+    /// update supersedes it.
+    Canary {
+        branch: String,
+        timeout: Option<u64>,
+    },
+    /// Report the current or most-recent canary without running a cycle.
+    CanaryStatus,
 }
 
 /// The daemon's answer to a trigger: the result message of the cycle it
@@ -41,10 +51,26 @@ pub enum Request {
 /// `Result`, e.g. `{"Ok":"switched to abc"}` or `{"Err":"..."}`.
 pub type Response = Result<String, String>;
 
-/// Trigger an update cycle in the daemon listening on `socket_path` and
-/// wait for it to finish, returning its result message. Errors if the
-/// daemon cannot be reached or reports a failed cycle.
+/// Reset the host to the tracked branch tip now, clearing any canary.
 pub fn request_update(socket_path: &Path) -> Result<String> {
+    send(socket_path, &Request::Update)
+}
+
+/// Start a canary trialling `branch`, held for `timeout` seconds (no
+/// timeout if `None`).
+pub fn request_canary(socket_path: &Path, branch: String, timeout: Option<u64>) -> Result<String> {
+    send(socket_path, &Request::Canary { branch, timeout })
+}
+
+/// Ask the daemon to describe the current or most-recent canary.
+pub fn request_canary_status(socket_path: &Path) -> Result<String> {
+    send(socket_path, &Request::CanaryStatus)
+}
+
+/// Send `request` to the daemon listening on `socket_path` and return its
+/// result message. Errors if the daemon cannot be reached or reports a
+/// failure.
+fn send(socket_path: &Path, request: &Request) -> Result<String> {
     let mut stream = UnixStream::connect(socket_path).with_context(|| {
         format!(
             "connecting to {}; is ogygia-updated running, and are you root?",
@@ -52,13 +78,11 @@ pub fn request_update(socket_path: &Path) -> Result<String> {
         )
     })?;
 
-    let mut request = serde_json::to_vec(&Request::Update)?;
-    request.push(b'\n');
-    stream
-        .write_all(&request)
-        .context("sending update request")?;
+    let mut payload = serde_json::to_vec(request)?;
+    payload.push(b'\n');
+    stream.write_all(&payload).context("sending request")?;
 
-    // No read timeout: the cycle legitimately takes as long as a build.
+    // No read timeout: a cycle legitimately takes as long as a build.
     let mut line = String::new();
     BufReader::new(&stream)
         .read_line(&mut line)
@@ -83,10 +107,10 @@ pub fn bind(socket_path: &Path) -> Result<UnixListener> {
     Ok(listener)
 }
 
-/// Accept trigger connections and hand them to the update loop, which
-/// answers each with the result of the cycle it ran. Invalid requests
-/// are answered immediately without triggering a cycle.
-pub fn listen(listener: UnixListener, triggers: mpsc::Sender<UnixStream>) {
+/// Accept connections, parse each request, and hand it with its stream to
+/// the daemon loop, which answers once it has served the command. Invalid
+/// requests are answered immediately without reaching the loop.
+pub fn listen(listener: UnixListener, requests: mpsc::Sender<(Request, UnixStream)>) {
     for stream in listener.incoming() {
         let Ok(mut stream) = stream else { continue };
         let _ = stream.set_read_timeout(Some(REQUEST_TIMEOUT));
@@ -95,12 +119,12 @@ pub fn listen(listener: UnixListener, triggers: mpsc::Sender<UnixStream>) {
         if BufReader::new(&stream).read_line(&mut line).is_err() {
             continue;
         }
-        if serde_json::from_str::<Request>(&line).is_err() {
+        let Ok(request) = serde_json::from_str::<Request>(&line) else {
             respond(&mut stream, Err("invalid request".to_string()));
             continue;
-        }
+        };
 
-        if triggers.send(stream).is_err() {
+        if requests.send((request, stream)).is_err() {
             return;
         }
     }
@@ -129,7 +153,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn request_update_round_trips() {
+    fn requests_round_trip_with_their_parsed_command() {
         let dir = tempfile::TempDir::new().unwrap();
         let socket_path = dir.path().join("control.sock");
         let listener = bind(&socket_path).unwrap();
@@ -137,15 +161,29 @@ mod tests {
         let (sender, receiver) = mpsc::channel();
         thread::spawn(move || listen(listener, sender));
         let server = thread::spawn(move || {
-            let mut stream = receiver.recv().unwrap();
+            let (request, mut stream) = receiver.recv().unwrap();
+            assert_eq!(request, Request::Update);
             respond(&mut stream, Ok("switched to abc".to_string()));
-            let mut stream = receiver.recv().unwrap();
-            respond(&mut stream, Err("update failed".to_string()));
+
+            let (request, mut stream) = receiver.recv().unwrap();
+            assert_eq!(
+                request,
+                Request::Canary {
+                    branch: "feature".to_string(),
+                    timeout: Some(3600),
+                }
+            );
+            respond(&mut stream, Err("no such branch".to_string()));
+
+            let (request, mut stream) = receiver.recv().unwrap();
+            assert_eq!(request, Request::CanaryStatus);
+            respond(&mut stream, Ok("no canary".to_string()));
         });
 
         assert_eq!(request_update(&socket_path).unwrap(), "switched to abc");
-        let error = request_update(&socket_path).unwrap_err();
-        assert_eq!(error.to_string(), "update failed");
+        let error = request_canary(&socket_path, "feature".to_string(), Some(3600)).unwrap_err();
+        assert_eq!(error.to_string(), "no such branch");
+        assert_eq!(request_canary_status(&socket_path).unwrap(), "no canary");
         server.join().unwrap();
     }
 

@@ -10,6 +10,9 @@ use serde::Deserialize;
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Config {
+    /// Directory the daemon owns; holds its clone and canary state.
+    #[serde(default = "default_state_dir")]
+    pub state_dir: PathBuf,
     pub repo: RepoConfig,
     pub host: HostConfig,
     #[serde(default)]
@@ -25,9 +28,6 @@ pub struct Config {
 pub struct RepoConfig {
     /// Git remote to track.
     pub url: String,
-    /// Where the daemon keeps its private clone.
-    #[serde(default = "default_repo_path")]
-    pub path: PathBuf,
     /// Branch whose tip the host follows.
     #[serde(default = "default_branch")]
     pub branch: String,
@@ -113,6 +113,16 @@ impl Config {
     pub fn next_boot_revision_path(&self) -> PathBuf {
         self.activate.profile.join("sw/share/ogygia/build-revision")
     }
+
+    /// The daemon's private clone of the configuration repository.
+    pub fn repo_path(&self) -> PathBuf {
+        self.state_dir.join("repo")
+    }
+
+    /// File recording the current or most-recent canary.
+    pub fn canary_state_path(&self) -> PathBuf {
+        self.state_dir.join("canary.json")
+    }
 }
 
 impl Default for ActivateConfig {
@@ -137,8 +147,8 @@ impl Default for DaemonConfig {
     }
 }
 
-fn default_repo_path() -> PathBuf {
-    PathBuf::from("/var/lib/ogygia-updated/repo")
+fn default_state_dir() -> PathBuf {
+    PathBuf::from("/var/lib/ogygia-updated")
 }
 
 fn default_branch() -> String {
@@ -196,8 +206,12 @@ mod tests {
 
         assert_eq!(config.repo.branch, "main");
         assert_eq!(
-            config.repo.path,
+            config.repo_path(),
             PathBuf::from("/var/lib/ogygia-updated/repo")
+        );
+        assert_eq!(
+            config.canary_state_path(),
+            PathBuf::from("/var/lib/ogygia-updated/canary.json")
         );
         assert_eq!(
             config.flake_attr(),

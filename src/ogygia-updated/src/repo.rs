@@ -1,4 +1,5 @@
 use std::fs;
+use std::path::Path;
 
 use anyhow::Context;
 use anyhow::Result;
@@ -8,8 +9,6 @@ use git2::Repository;
 use git2::build::CheckoutBuilder;
 use git2::build::RepoBuilder;
 use tracing::info;
-
-use crate::config::RepoConfig;
 
 /// Refspec mirroring every remote head, so commits only reachable from
 /// non-tracked branches (e.g. archived deployed commits) stay available
@@ -22,20 +21,19 @@ pub struct Repo {
 }
 
 impl Repo {
-    pub fn open_or_clone(config: &RepoConfig) -> Result<Self> {
-        let inner = match Repository::open(&config.path) {
+    pub fn open_or_clone(path: &Path, url: &str) -> Result<Self> {
+        let inner = match Repository::open(path) {
             Ok(repository) => repository,
             Err(error) if error.code() == ErrorCode::NotFound => {
-                info!(url = %config.url, path = %config.path.display(), "cloning repository");
-                fs::create_dir_all(&config.path)
-                    .with_context(|| format!("creating {}", config.path.display()))?;
+                info!(url, path = %path.display(), "cloning repository");
+                fs::create_dir_all(path).with_context(|| format!("creating {}", path.display()))?;
                 RepoBuilder::new()
-                    .clone(&config.url, &config.path)
-                    .with_context(|| format!("cloning {}", config.url))?
+                    .clone(url, path)
+                    .with_context(|| format!("cloning {url}"))?
             }
             Err(error) => {
                 return Err(error)
-                    .with_context(|| format!("opening repository {}", config.path.display()));
+                    .with_context(|| format!("opening repository {}", path.display()));
             }
         };
         Ok(Self { inner })
@@ -73,6 +71,14 @@ impl Repo {
         self.inner
             .graph_descendant_of(descendant, ancestor)
             .context("walking commit graph")
+    }
+
+    /// Newest commit that is an ancestor of both `a` and `b` — the point
+    /// their histories diverge. Errors if they share no history.
+    pub fn merge_base(&self, a: Oid, b: Oid) -> Result<Oid> {
+        self.inner
+            .merge_base(a, b)
+            .with_context(|| format!("finding merge base of {a} and {b}"))
     }
 
     /// Force the working tree onto `commit` with a detached HEAD, leaving
@@ -146,14 +152,9 @@ mod tests {
     use super::testutil::commit;
     use super::testutil::init_origin;
     use super::*;
-    use crate::config::RepoConfig;
 
-    fn repo_config(origin: &Path, clone: &Path) -> RepoConfig {
-        RepoConfig {
-            url: origin.to_str().unwrap().to_string(),
-            path: clone.to_path_buf(),
-            branch: "main".to_string(),
-        }
+    fn open(origin: &Path, clone: &Path) -> Repo {
+        Repo::open_or_clone(clone, origin.to_str().unwrap()).unwrap()
     }
 
     #[test]
@@ -163,8 +164,7 @@ mod tests {
         let clone_path = dir.path().join("clone");
         let (origin, initial) = init_origin(&origin_path);
 
-        let config = repo_config(&origin_path, &clone_path);
-        let repo = Repo::open_or_clone(&config).unwrap();
+        let repo = open(&origin_path, &clone_path);
         repo.fetch().unwrap();
         assert_eq!(repo.tip("main").unwrap(), initial);
 
@@ -173,7 +173,7 @@ mod tests {
         assert_eq!(repo.tip("main").unwrap(), second);
 
         // Reopening finds the existing clone rather than recloning.
-        let repo = Repo::open_or_clone(&config).unwrap();
+        let repo = open(&origin_path, &clone_path);
         assert_eq!(repo.tip("main").unwrap(), second);
     }
 
@@ -186,7 +186,7 @@ mod tests {
         let second = commit(&origin, "main", &[initial], "second");
         let side = commit(&origin, "side", &[initial], "side");
 
-        let repo = Repo::open_or_clone(&repo_config(&origin_path, &clone_path)).unwrap();
+        let repo = open(&origin_path, &clone_path);
         repo.fetch().unwrap();
 
         assert!(repo.is_ancestor(initial, second).unwrap());
@@ -199,6 +199,24 @@ mod tests {
     }
 
     #[test]
+    fn merge_base_finds_the_branch_point() {
+        let dir = TempDir::new().unwrap();
+        let origin_path = dir.path().join("origin");
+        let clone_path = dir.path().join("clone");
+        let (origin, initial) = init_origin(&origin_path);
+        let main_tip = commit(&origin, "main", &[initial], "second");
+        let side = commit(&origin, "side", &[initial], "side");
+
+        let repo = open(&origin_path, &clone_path);
+        repo.fetch().unwrap();
+
+        // The side branch diverged from main at the initial commit.
+        assert_eq!(repo.merge_base(side, main_tip).unwrap(), initial);
+        // A commit already on the branch is its own merge base with the tip.
+        assert_eq!(repo.merge_base(initial, main_tip).unwrap(), initial);
+    }
+
+    #[test]
     fn checkout_leaves_clean_tree_at_commit() {
         let dir = TempDir::new().unwrap();
         let origin_path = dir.path().join("origin");
@@ -206,7 +224,7 @@ mod tests {
         let (origin, initial) = init_origin(&origin_path);
         let second = commit(&origin, "main", &[initial], "second");
 
-        let repo = Repo::open_or_clone(&repo_config(&origin_path, &clone_path)).unwrap();
+        let repo = open(&origin_path, &clone_path);
         repo.fetch().unwrap();
         repo.checkout(second).unwrap();
 
