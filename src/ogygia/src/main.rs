@@ -30,6 +30,8 @@ mod iris;
 #[cfg(feature = "nebula")]
 mod nebula;
 mod status;
+#[cfg(feature = "updated")]
+mod update;
 
 use std::process;
 
@@ -57,6 +59,9 @@ enum Command {
     /// Manage Nebula CA, host keys, and certificates
     #[cfg(feature = "nebula")]
     Nebula(nebula::NebulaArgs),
+    /// Update the system to the tracked branch tip (root only)
+    #[cfg(feature = "updated")]
+    Update(update::UpdateArgs),
 }
 
 impl Command {
@@ -67,6 +72,8 @@ impl Command {
             Command::Iris(args) => args.run(),
             #[cfg(feature = "nebula")]
             Command::Nebula(args) => args.run(),
+            #[cfg(feature = "updated")]
+            Command::Update(args) => args.run(),
         }
     }
 }

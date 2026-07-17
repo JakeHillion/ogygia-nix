@@ -30,6 +30,7 @@ in
     ./nebula
     ./hostinfod
     ./dashboard
+    ./updated
   ];
 
   config = lib.mkIf cfg.enable {
