@@ -15,6 +15,8 @@ irisd = [
 nebula = [
     "dep:tempfile",
     "dep:which",
+    "dep:serde_json",
+    "dep:chrono",
     "dep:ogygia-nixutils",
 ]
 updated = [
@@ -42,6 +44,7 @@ ogygia-nixutils = { path = "../ogygia-nixutils", optional = true }
 # Optional deps for nebula feature
 tempfile = { workspace = true, optional = true }
 which = { workspace = true, optional = true }
+chrono = { workspace = true, optional = true }
 
 # Optional deps for updated feature
 ogygia-updated = { path = "../ogygia-updated", optional = true }

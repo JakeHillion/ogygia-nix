@@ -11,6 +11,9 @@ use std::sync::OnceLock;
 use anyhow::Context;
 use anyhow::Result;
 use anyhow::anyhow;
+use chrono::DateTime;
+use chrono::Utc;
+use serde::Deserialize;
 use tokio::process::Command;
 
 const FALLBACKS: &[&str] = &[
@@ -90,6 +93,73 @@ pub async fn sign(args: SignArgs<'_>) -> Result<()> {
     Ok(())
 }
 
+/// The expiry of a signed certificate.
+pub struct Validity {
+    pub not_after: DateTime<Utc>,
+}
+
+impl Validity {
+    /// Whether the certificate is due for LetsEncrypt-style renewal: less than
+    /// `1 - renew_after` of the configured `validity_secs` remains before the
+    /// cert's actual expiry.
+    ///
+    /// Comparing remaining life against the configured `validity_secs` (how
+    /// long a fresh cert is signed for) — rather than the cert's own signed
+    /// window — means *extending* a host's validity renews an existing cert
+    /// early (its remaining life is now a smaller fraction of the intended
+    /// lifetime), while *shortening* it defers renewal. Because the trigger is
+    /// remaining time to `not_after`, renewal always lands before real expiry;
+    /// an expired cert is always due and a freshly signed one never is.
+    pub fn past_renewal(&self, now: DateTime<Utc>, validity_secs: u64, renew_after: f64) -> bool {
+        let remaining = (self.not_after - now).num_seconds();
+        let renew_below = validity_secs as f64 * (1.0 - renew_after);
+        remaining as f64 <= renew_below
+    }
+}
+
+/// Read a signed certificate's validity window via `nebula-cert print -json`.
+pub async fn read_validity(cert: &Path) -> Result<Validity> {
+    let output = Command::new(bin())
+        .arg("print")
+        .arg("-json")
+        .arg("-path")
+        .arg(cert)
+        .output()
+        .await
+        .context("failed to spawn nebula-cert print")?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(anyhow!("nebula-cert print failed: {}", stderr.trim()));
+    }
+    parse_validity(&output.stdout)
+}
+
+/// Extract the validity window from `nebula-cert print -json` output.
+///
+/// The command emits a JSON *array* of certificates (a file may hold a chain);
+/// the host certificate is the first entry.
+fn parse_validity(json: &[u8]) -> Result<Validity> {
+    #[derive(Deserialize)]
+    struct Printed {
+        details: Details,
+    }
+    #[derive(Deserialize)]
+    struct Details {
+        #[serde(rename = "notAfter")]
+        not_after: DateTime<Utc>,
+    }
+
+    let printed: Vec<Printed> =
+        serde_json::from_slice(json).context("failed to parse nebula-cert print JSON")?;
+    let first = printed
+        .into_iter()
+        .next()
+        .ok_or_else(|| anyhow!("nebula-cert print returned no certificates"))?;
+    Ok(Validity {
+        not_after: first.details.not_after,
+    })
+}
+
 /// Compute the host-IP-plus-mask string passed to `nebula-cert sign -networks`,
 /// e.g. ipv4 "10.42.0.1" + subnet "10.42.0.0/16" → "10.42.0.1/16".
 pub fn network_spec(ipv4: &str, subnet: &str) -> Result<String> {
@@ -157,4 +227,145 @@ pub fn default_ca_key_path() -> PathBuf {
         })
         .unwrap_or_else(|| PathBuf::from(".config"));
     base.join("ogygia").join("nebula").join("ca.key")
+}
+
+#[cfg(test)]
+mod tests {
+    use chrono::TimeZone;
+
+    use super::*;
+
+    /// A 90-day configured validity, matching the cert `window()` signs for.
+    const VALIDITY_90D: u64 = 90 * 86400;
+
+    fn at(secs: i64) -> DateTime<Utc> {
+        Utc.timestamp_opt(secs, 0).unwrap()
+    }
+
+    /// A cert issued at t=0 and expiring at day 90.
+    fn window() -> Validity {
+        Validity {
+            not_after: at(90 * 86400),
+        }
+    }
+
+    /// End-to-end: mint a CA, generate a host keypair, sign a cert, then read
+    /// its validity back — proving `read_validity`/`parse_validity` track the
+    /// actual `nebula-cert print -json` output rather than an assumed shape.
+    ///
+    /// Hard-requires the real `nebula-cert`, provided on PATH by the dev shell
+    /// and embedded into the CI nextest archive. A missing binary means a
+    /// broken test environment and must fail loudly, not silently skip — a
+    /// skipped round-trip is what let a parser bug reach the fleet before.
+    #[tokio::test]
+    async fn read_validity_round_trips_a_signed_cert() {
+        let dir = tempfile::tempdir().unwrap();
+        let ca_crt = dir.path().join("ca.crt");
+        let ca_key = dir.path().join("ca.key");
+        create_ca("round-trip-test", &ca_crt, &ca_key, 365 * 86400)
+            .await
+            .unwrap();
+
+        let host_key = dir.path().join("host.key");
+        let host_pub = dir.path().join("host.pub");
+        let status = Command::new(bin())
+            .arg("keygen")
+            .arg("-out-key")
+            .arg(&host_key)
+            .arg("-out-pub")
+            .arg(&host_pub)
+            .status()
+            .await
+            .unwrap();
+        assert!(status.success(), "nebula-cert keygen failed");
+
+        let out_cert = dir.path().join("host.crt");
+        let duration_secs: u64 = 90 * 86400;
+        let signed_at = Utc::now();
+        sign(SignArgs {
+            ca_cert: &ca_crt,
+            ca_key: &ca_key,
+            in_pub: &host_pub,
+            name: "host.round-trip.test",
+            networks: "10.0.0.1/24",
+            groups: &[],
+            duration_seconds: duration_secs,
+            out_cert: &out_cert,
+        })
+        .await
+        .unwrap();
+
+        let v = read_validity(&out_cert).await.unwrap();
+
+        // nebula signs from ~now, so expiry lands one duration out (whole-second
+        // rounding plus a few seconds of test slop).
+        let expected_expiry = signed_at + chrono::Duration::seconds(duration_secs as i64);
+        assert!(
+            (v.not_after - expected_expiry).num_seconds().abs() <= 5,
+            "unexpected expiry {}",
+            v.not_after
+        );
+
+        // A freshly signed 90-day cert has ~full validity remaining, so it is
+        // not due; it becomes due once under 2/3 (here 30 days) remain.
+        assert!(!v.past_renewal(signed_at, duration_secs, 1.0 / 3.0));
+        let near_expiry = v.not_after - chrono::Duration::seconds(30 * 86400);
+        assert!(v.past_renewal(near_expiry, duration_secs, 1.0 / 3.0));
+    }
+
+    #[test]
+    fn empty_cert_array_is_an_error() {
+        assert!(parse_validity(b"[]").is_err());
+    }
+
+    #[test]
+    fn fresh_cert_is_not_due() {
+        // Day 10 of a 90-day policy is short of the 1/3 (day 30) threshold.
+        assert!(!window().past_renewal(at(10 * 86400), VALIDITY_90D, 1.0 / 3.0));
+    }
+
+    #[test]
+    fn past_threshold_is_due() {
+        assert!(window().past_renewal(at(45 * 86400), VALIDITY_90D, 1.0 / 3.0));
+    }
+
+    #[test]
+    fn expired_cert_is_due() {
+        assert!(window().past_renewal(at(100 * 86400), VALIDITY_90D, 1.0 / 3.0));
+    }
+
+    #[test]
+    fn not_yet_valid_cert_is_not_due() {
+        // A clock behind the cert's issue time sees more than the full validity
+        // remaining, so it must not trigger an immediate re-sign.
+        assert!(!window().past_renewal(at(-3600), VALIDITY_90D, 1.0 / 3.0));
+    }
+
+    #[test]
+    fn lengthening_validity_brings_renewal_forward() {
+        // A 20-day-old 90-day cert (70 days left) is not due under its own
+        // policy — 70 days is above the 60-day (2/3 of 90) window...
+        assert!(!window().past_renewal(at(20 * 86400), VALIDITY_90D, 1.0 / 3.0));
+        // ...but extending the policy to 365 days lifts the window to 243 days
+        // (2/3 of 365), so 70 days remaining is now "nearing expiry" and it
+        // renews immediately into a long-lived cert.
+        assert!(window().past_renewal(at(20 * 86400), 365 * 86400, 1.0 / 3.0));
+    }
+
+    #[test]
+    fn shortening_validity_defers_renewal() {
+        // Shortening the policy to 30 days does not renew a cert with 70 days
+        // left: it is well clear of the 20-day (2/3 of 30) window...
+        assert!(!window().past_renewal(at(20 * 86400), 30 * 86400, 1.0 / 3.0));
+        // ...and only renews once under 20 days remain, i.e. at day 71 of its
+        // real 90-day window, never past the cert's actual expiry.
+        assert!(window().past_renewal(at(71 * 86400), 30 * 86400, 1.0 / 3.0));
+    }
+
+    #[test]
+    fn at_expiry_is_due() {
+        // Zero remaining is at or below any positive renew window.
+        let v = Validity { not_after: at(0) };
+        assert!(v.past_renewal(at(0), VALIDITY_90D, 1.0 / 3.0));
+    }
 }

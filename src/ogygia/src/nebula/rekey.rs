@@ -7,6 +7,7 @@ use std::path::PathBuf;
 use anyhow::Context;
 use anyhow::Result;
 use anyhow::anyhow;
+use chrono::Utc;
 use clap::Args;
 use ogygia_nixutils::Nix;
 
@@ -14,6 +15,15 @@ use super::config::Config;
 use super::flake_eval;
 use super::nebula_cert;
 use super::nebula_cert::SignArgs;
+
+/// Re-sign a tracked cert once it is this fraction into its lifetime
+/// (LetsEncrypt-style time-based rotation).
+///
+/// Deliberately aggressive: we renew at 1/3 elapsed (day 30 of a 90-day cert)
+/// to stay well clear of expiry. Real Let's Encrypt only renews at ~2/3
+/// elapsed; once expiry monitoring proves this reliable we may relax toward
+/// 2.0/3.0.
+const RENEW_AFTER_FRACTION: f64 = 1.0 / 3.0;
 
 #[derive(Args)]
 pub struct RekeyArgs {
@@ -88,14 +98,37 @@ async fn async_run(args: &RekeyArgs) -> Result<()> {
         let cert_path = config.cert_path(spec_hash);
         current_cert_paths.insert(cert_path.clone());
 
-        if cert_path.exists() && !args.force {
-            tracing::info!(%host, hash = %spec_hash, "cert up to date");
-            skipped += 1;
-            continue;
-        }
+        // A missing cert must be signed; a content-correct one is re-signed only
+        // when forced or once it crosses the renewal threshold. Because the
+        // filename is the spec hash, an existing file already matches the config
+        // — only its remaining lifetime is in question.
+        let reason = if !cert_path.exists() {
+            "missing"
+        } else if args.force {
+            "forced"
+        } else {
+            match nebula_cert::read_validity(&cert_path).await {
+                Ok(v) if v.past_renewal(Utc::now(), info.validity_secs, RENEW_AFTER_FRACTION) => {
+                    "nearing expiry"
+                }
+                Ok(_) => {
+                    tracing::info!(%host, hash = %spec_hash, "cert up to date");
+                    skipped += 1;
+                    continue;
+                }
+                Err(e) => {
+                    // Fail safe: an unreadable cert is left untouched. Blindly
+                    // re-signing would let a read bug rotate the whole fleet,
+                    // and a genuinely corrupt cert is a job for the operator.
+                    tracing::warn!(%host, error = %e, "could not read cert validity; skipping");
+                    skipped += 1;
+                    continue;
+                }
+            }
+        };
 
         if args.dry_run {
-            println!("would sign {}", cert_path.display());
+            println!("would sign {} ({reason})", cert_path.display());
             continue;
         }
 
