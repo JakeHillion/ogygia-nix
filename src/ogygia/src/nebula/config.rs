@@ -15,7 +15,6 @@ use anyhow::anyhow;
 pub const ENV_CA_KEY: &str = "OGYGIA_NEBULA_CA_KEY";
 
 pub const DEFAULT_NETWORK_NAME: &str = "ogygia";
-pub const DEFAULT_VALIDITY_SECS: u64 = 90 * 86400;
 pub const DEFAULT_CA_DURATION_SECS: u64 = 10 * 365 * 86400;
 
 /// Resolved fleet configuration.

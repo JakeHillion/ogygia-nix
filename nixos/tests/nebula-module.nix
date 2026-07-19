@@ -66,6 +66,11 @@ let
     modules = [ ogygiaModule baseModule firewallA firewallB ];
   };
 
+  # A per-host override of validitySecs, which rekey reads off config.
+  customValiditySystem = lib.nixosSystem {
+    modules = [ ogygiaModule baseModule { ogygia.nebula.validitySecs = 3600; } ];
+  };
+
   failedAssertions = sys: builtins.filter (a: !a.assertion) sys.config.assertions;
 
   noPubKeySystem = lib.nixosSystem {
@@ -112,6 +117,9 @@ pkgs.runCommand "ogygia-nebula-module"
   nativeBuildInputs = [ pkgs.jq ];
   inherit expectedSpecHash;
   actualSpecHash = validSystem.config.ogygia.nebula.specHash;
+  defaultValidity = toString validSystem.config.ogygia.nebula.validitySecs;
+  customValidity = toString customValiditySystem.config.ogygia.nebula.validitySecs;
+  customValiditySpecHash = customValiditySystem.config.ogygia.nebula.specHash;
   validCertPath = toString validSystem.config.ogygia.nebula.certPath;
   serviceCert = toString validSystem.config.services.nebula.networks.ogygia.cert;
   serviceCa = toString validSystem.config.services.nebula.networks.ogygia.ca;
@@ -137,6 +145,20 @@ pkgs.runCommand "ogygia-nebula-module"
 
   if [ "$actualSpecHash" != "$expectedSpecHash" ]; then
     echo "specHash mismatch: got '$actualSpecHash', expected '$expectedSpecHash'" >&2
+    exit 1
+  fi
+
+  # validitySecs defaults to 90 days and honours a per-host override.
+  if [ "$defaultValidity" != "7776000" ]; then
+    echo "validitySecs default should be 7776000 (90d), got '$defaultValidity'" >&2
+    exit 1
+  fi
+  if [ "$customValidity" != "3600" ]; then
+    echo "validitySecs override should surface as 3600, got '$customValidity'" >&2
+    exit 1
+  fi
+  if [ "$customValiditySpecHash" != "$expectedSpecHash" ]; then
+    echo "validitySecs must not affect specHash: got '$customValiditySpecHash'" >&2
     exit 1
   fi
 

@@ -109,6 +109,15 @@ in
       example = [ "ssh" "etcd-server" ];
     };
 
+    validitySecs = lib.mkOption {
+      type = lib.types.ints.positive;
+      default = 90 * 86400;
+      description = ''
+        Validity period, in seconds, for this host's certificate: how long the
+        certificate is valid for after it is rekeyed.
+      '';
+    };
+
     firewall.inbound = lib.mkOption {
       type = lib.types.listOf firewallRuleType;
       default = [ ];

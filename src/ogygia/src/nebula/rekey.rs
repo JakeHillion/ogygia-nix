@@ -11,7 +11,6 @@ use clap::Args;
 use ogygia_nixutils::Nix;
 
 use super::config::Config;
-use super::config::DEFAULT_VALIDITY_SECS;
 use super::flake_eval;
 use super::nebula_cert;
 use super::nebula_cert::SignArgs;
@@ -118,7 +117,7 @@ async fn async_run(args: &RekeyArgs) -> Result<()> {
                 name: &info.host,
                 networks: &networks,
                 groups: &spec.groups,
-                duration_seconds: DEFAULT_VALIDITY_SECS,
+                duration_seconds: info.validity_secs,
                 out_cert: &cert_path,
             },
         )

@@ -33,6 +33,8 @@ pub struct HostInfo {
     pub enabled: bool,
     pub spec_hash: Option<String>,
     pub spec: Option<HostSpec>,
+    /// Validity period, in seconds, to sign this host's cert for.
+    pub validity_secs: u64,
 }
 
 /// List the names of every host in `flake_ref#nixosConfigurations`.
@@ -57,12 +59,16 @@ pub async fn host_info(nix: &Nix, flake_ref: &str, host: &str) -> Result<HostInf
         #[serde(rename = "specHash")]
         spec_hash: Option<String>,
         spec: Option<HostSpec>,
+        // `or null` for flakes whose module predates validitySecs; drop the
+        // fallback once every host has updated.
+        #[serde(rename = "validitySecs")]
+        validity_secs: Option<u64>,
     }
 
     let raw: Raw = nix
         .eval_json(
             &format!("{flake_ref}#nixosConfigurations.\"{host}\".config.ogygia.nebula"),
-            Some("cfg: { inherit (cfg) enable specHash spec; }"),
+            Some("cfg: { inherit (cfg) enable specHash spec; validitySecs = cfg.validitySecs or null; }"),
         )
         .await?;
 
@@ -71,5 +77,6 @@ pub async fn host_info(nix: &Nix, flake_ref: &str, host: &str) -> Result<HostInf
         enabled: raw.enable,
         spec_hash: raw.spec_hash,
         spec: raw.spec,
+        validity_secs: raw.validity_secs.unwrap_or(90 * 86400),
     })
 }
