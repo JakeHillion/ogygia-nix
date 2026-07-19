@@ -11,6 +11,7 @@ use chrono::DateTime;
 use chrono::Utc;
 use tokio::sync::Mutex;
 
+use crate::alerts::AlertsSnapshot;
 use crate::config::Config;
 use crate::etcd::Etcd;
 use crate::etcd::HostStates;
@@ -44,6 +45,9 @@ pub struct AppState {
     commits_cache: Mutex<Arc<CachedCommits>>,
     html_cache: Mutex<Arc<CachedHtml>>,
     pr_count_cache: Mutex<Arc<CachedPrCount>>,
+    /// Latest alerts, maintained by background producers. Empty when none are
+    /// running (e.g. built without the `nebula` feature).
+    alerts: Arc<Mutex<Arc<AlertsSnapshot>>>,
 }
 
 impl AppState {
@@ -56,10 +60,23 @@ impl AppState {
             crate::archive::spawn(archive, git_manager.clone(), etcd.clone());
         }
 
+        let alerts = Arc::new(Mutex::new(Arc::new(AlertsSnapshot::default())));
+
+        #[cfg(feature = "nebula")]
+        if config.nebula.enable {
+            crate::nebula::spawn(
+                config.clone(),
+                git_manager.clone(),
+                etcd.clone(),
+                alerts.clone(),
+            );
+        }
+
         Ok(Self {
             config,
             git_manager,
             etcd,
+            alerts,
             commits_cache: Mutex::new(Arc::new(CachedCommits {
                 version: 0,
                 commits: Vec::new(),
@@ -194,6 +211,13 @@ impl AppState {
         Ok(html)
     }
 
+    /// Render the current alerts. Cheap string formatting over the background
+    /// snapshot, so it's safe on the request path.
+    async fn alerts_html(&self) -> String {
+        let snapshot = self.alerts.lock().await.clone();
+        crate::alerts::render_alerts_section(&snapshot.alerts, &self.config)
+    }
+
     async fn fetch_pr_count(&self) -> Option<u32> {
         let client = reqwest::Client::new();
         match client.get(self.config.pulls_api_url()).send().await {
@@ -226,6 +250,8 @@ pub async fn index(State(state): State<Arc<AppState>>) -> impl IntoResponse {
         Err(_) => "<p>Error generating git graph</p>".to_string(),
     };
 
+    let alerts_content = state.alerts_html().await;
+
     let title = &state.config.title;
 
     let html = format!(
@@ -239,6 +265,8 @@ pub async fn index(State(state): State<Arc<AppState>>) -> impl IntoResponse {
 <body>
     <div class="container">
         <h1>{title}</h1>
+
+        {alerts_content}
 
         <div class="status-section">
             <div class="git-graph-container">
@@ -651,54 +679,42 @@ fn analyze_commit_structure(commits: &[CommitInfo]) -> CommitGraph {
     CommitGraph { nodes }
 }
 
-fn format_relative_date(timestamp: DateTime<Utc>) -> (String, String) {
+/// Describe `timestamp` relative to now, either in the past ("3 days ago") or
+/// the future ("in 3 days"), alongside its absolute UTC form.
+pub(crate) fn format_relative_date(timestamp: DateTime<Utc>) -> (String, String) {
     let now = Utc::now();
     let duration = now.signed_duration_since(timestamp);
+    let future = duration < chrono::Duration::zero();
+    let duration = duration.abs();
 
-    let relative = if duration.num_days() >= 365 {
-        let years = duration.num_days() / 365;
-        if years == 1 {
-            "1 year ago".to_string()
+    let plural = |n: i64, unit: &str| {
+        if n == 1 {
+            format!("1 {unit}")
         } else {
-            format!("{years} years ago")
+            format!("{n} {unit}s")
         }
+    };
+
+    let span = if duration.num_days() >= 365 {
+        Some(plural(duration.num_days() / 365, "year"))
     } else if duration.num_days() >= 30 {
-        let months = duration.num_days() / 30;
-        if months == 1 {
-            "1 month ago".to_string()
-        } else {
-            format!("{months} months ago")
-        }
+        Some(plural(duration.num_days() / 30, "month"))
     } else if duration.num_days() >= 7 {
-        let weeks = duration.num_days() / 7;
-        if weeks == 1 {
-            "1 week ago".to_string()
-        } else {
-            format!("{weeks} weeks ago")
-        }
+        Some(plural(duration.num_days() / 7, "week"))
     } else if duration.num_days() >= 1 {
-        let days = duration.num_days();
-        if days == 1 {
-            "1 day ago".to_string()
-        } else {
-            format!("{days} days ago")
-        }
+        Some(plural(duration.num_days(), "day"))
     } else if duration.num_hours() >= 1 {
-        let hours = duration.num_hours();
-        if hours == 1 {
-            "1 hour ago".to_string()
-        } else {
-            format!("{hours} hours ago")
-        }
+        Some(plural(duration.num_hours(), "hour"))
     } else if duration.num_minutes() >= 1 {
-        let minutes = duration.num_minutes();
-        if minutes == 1 {
-            "1 minute ago".to_string()
-        } else {
-            format!("{minutes} minutes ago")
-        }
+        Some(plural(duration.num_minutes(), "minute"))
     } else {
-        "just now".to_string()
+        None
+    };
+
+    let relative = match span {
+        Some(span) if future => format!("in {span}"),
+        Some(span) => format!("{span} ago"),
+        None => "just now".to_string(),
     };
 
     let absolute = timestamp.format("%Y-%m-%d %H:%M:%S UTC").to_string();
@@ -708,10 +724,26 @@ fn format_relative_date(timestamp: DateTime<Utc>) -> (String, String) {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
 
-    // Note: Tests are simplified for the new architecture
-    // Full integration tests would require actual etcd setup
+    #[test]
+    fn relative_date_past() {
+        let (relative, _) = format_relative_date(Utc::now() - chrono::Duration::days(3));
+        assert_eq!(relative, "3 days ago");
+    }
 
-    // Tests for basic functionality would go here
-    // Full integration tests require real etcd and git setup
+    #[test]
+    fn relative_date_future() {
+        // Pad by a minute so the span doesn't truncate down while the test runs.
+        let (relative, _) = format_relative_date(
+            Utc::now() + chrono::Duration::days(16) + chrono::Duration::minutes(1),
+        );
+        assert_eq!(relative, "in 2 weeks");
+    }
+
+    #[test]
+    fn relative_date_now() {
+        let (relative, _) = format_relative_date(Utc::now());
+        assert_eq!(relative, "just now");
+    }
 }
