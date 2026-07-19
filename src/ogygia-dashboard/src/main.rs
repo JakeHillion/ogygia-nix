@@ -10,10 +10,16 @@ use tokio::net::TcpListener;
 use tokio::net::UnixListener;
 use tower::ServiceExt;
 
+// The alert model and renderer are always present; without a producer compiled
+// in (the `nebula` feature) nothing constructs an alert, which is expected.
+#[cfg_attr(not(feature = "nebula"), allow(dead_code))]
+mod alerts;
 mod archive;
 mod config;
 mod etcd;
 mod git;
+#[cfg(feature = "nebula")]
+mod nebula;
 mod nixos;
 mod web;
 
