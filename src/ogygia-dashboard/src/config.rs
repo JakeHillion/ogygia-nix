@@ -15,6 +15,18 @@ pub struct Config {
     pub title: String,
     #[serde(default)]
     pub hostname_strip_suffix: Option<String>,
+    /// Nebula certificate-expiry alerts. Requires the binary to be built with
+    /// the `nebula` feature (on by default).
+    #[serde(default)]
+    pub nebula: NebulaConfig,
+}
+
+/// Nebula certificate-expiry alerts. Off unless `enable = true`; thresholds are
+/// fixed fractions of each cert's validity.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct NebulaConfig {
+    #[serde(default)]
+    pub enable: bool,
 }
 
 fn default_title() -> String {
@@ -228,6 +240,7 @@ mod tests {
             },
             title: default_title(),
             hostname_strip_suffix: None,
+            nebula: NebulaConfig::default(),
         }
     }
 

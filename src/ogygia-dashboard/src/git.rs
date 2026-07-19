@@ -70,6 +70,24 @@ impl GitManager {
         fetch(&repo, self.ssh.as_ref())
     }
 
+    /// Filesystem path of the working clone, for tools (e.g. `nix eval`) that
+    /// address it directly rather than through the git2 handle.
+    #[cfg(feature = "nebula")]
+    pub fn repo_path(&self) -> Option<PathBuf> {
+        self.temp_dir
+            .as_ref()
+            .map(|d| d.path().to_path_buf())
+            .or_else(|| self.repo_path.clone())
+    }
+
+    /// Whether `oid` is present in the local object database.
+    #[cfg(feature = "nebula")]
+    pub fn has_commit(&self, oid: Oid) -> bool {
+        self.open_repo()
+            .map(|repo| repo.find_commit(oid).is_ok())
+            .unwrap_or(false)
+    }
+
     /// Make every candidate commit reachable from the archive branch by
     /// pushing a chain of merge commits on top of it, so the commits survive
     /// their original branch being force-pushed. Returns the commits that are
