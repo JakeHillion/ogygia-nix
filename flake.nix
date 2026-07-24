@@ -137,8 +137,17 @@
             # carries a runtime dependency on nebula. Only set here, so plain
             # cargo builds (e.g. the dev shell) keep runtime PATH discovery.
             env.OGYGIA_NEBULA_CERT_BIN = "${pkgs.nebula}/bin/nebula-cert";
+            nativeBuildInputs = individualCrateArgs.nativeBuildInputs ++ [ pkgs.installShellFiles ];
+            # The completion shims are emitted by the binary itself, so this
+            # runs after patchelf has made it loadable. Each shim embeds the
+            # store path it was generated from, leaving no way for the
+            # completions and the binary they call to drift apart.
             postInstall = ''
               ${pkgs.patchelf}/bin/patchelf --set-rpath "${lib.makeLibraryPath [ pkgs.openssl ]}" $out/bin/ogygia
+              installShellCompletion --cmd ogygia \
+                --bash <(COMPLETE=bash $out/bin/ogygia) \
+                --zsh <(COMPLETE=zsh $out/bin/ogygia) \
+                --fish <(COMPLETE=fish $out/bin/ogygia)
             '';
           });
 

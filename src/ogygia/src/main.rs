@@ -36,8 +36,10 @@ mod update;
 use std::process;
 
 use anyhow::Result;
+use clap::CommandFactory as _;
 use clap::Parser;
 use clap::Subcommand;
+use clap_complete::CompleteEnv;
 use tracing::error;
 use tracing_subscriber::EnvFilter;
 
@@ -79,6 +81,11 @@ impl Command {
 }
 
 fn main() {
+    // Serves the shell shim's COMPLETE=<shell> invocations and exits. Runs
+    // before logging is set up so no diagnostic can reach the candidate
+    // stream; a no-op when COMPLETE is unset.
+    CompleteEnv::with_factory(Cli::command).complete();
+
     tracing_subscriber::fmt()
         .with_env_filter(
             EnvFilter::try_from_default_env()
