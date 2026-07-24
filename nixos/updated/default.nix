@@ -69,6 +69,11 @@ in
       host.name = lib.mkDefault config.networking.fqdn;
     };
 
+    # Rendered to a stable path rather than only interpolated into the unit,
+    # so `ogygia update canary` can read repo.url to complete branch names
+    # without needing the daemon to be running.
+    environment.etc."ogygia/updated.toml".source = configFile;
+
     systemd.services.ogygia-updated = {
       description = "Ogygia Automatic Update Daemon";
       wantedBy = [ "multi-user.target" ];
@@ -85,7 +90,7 @@ in
       path = [ config.nix.package config.systemd.package ];
 
       serviceConfig = {
-        ExecStart = "${cfg.package}/bin/ogygia-updated --config ${configFile}";
+        ExecStart = "${cfg.package}/bin/ogygia-updated --config /etc/ogygia/updated.toml";
         Restart = "always";
         RestartSec = "5s";
         StateDirectory = "ogygia-updated";

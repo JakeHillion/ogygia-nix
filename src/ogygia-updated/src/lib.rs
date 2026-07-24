@@ -11,6 +11,7 @@
 //! an interval; `ogygia update` asks it to run a cycle now over its
 //! control socket.
 
+pub mod branches;
 pub mod control;
 
 mod canary;
@@ -23,6 +24,7 @@ pub use canary::CanaryState;
 pub use canary::CanaryTarget;
 pub use canary::FinishReason;
 pub use config::Config;
+pub use config::DEFAULT_CONFIG_PATH;
 pub use engine::Outcome;
 pub use engine::Trigger;
 pub use engine::run_once;

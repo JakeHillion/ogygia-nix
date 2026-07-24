@@ -282,6 +282,12 @@
               ogygiaModule = self.nixosModules.default;
             };
 
+            ogygia-updated-config = import ./nixos/tests/updated-config.nix {
+              inherit pkgs;
+              inherit (nixpkgs) lib;
+              ogygiaModule = self.nixosModules.default;
+            };
+
             ogygia-nebula-module = import ./nixos/tests/nebula-module.nix {
               inherit pkgs;
               inherit (nixpkgs) lib;
