@@ -1,5 +1,7 @@
 //! Client for the ogygia-updated daemon: manual updates and canaries.
 
+use std::env;
+use std::ffi::OsStr;
 use std::path::Path;
 use std::path::PathBuf;
 use std::time::Duration;
@@ -8,6 +10,12 @@ use anyhow::Context;
 use anyhow::Result;
 use clap::Args;
 use clap::Subcommand;
+use clap_complete::engine::ArgValueCompleter;
+use clap_complete::engine::CompletionCandidate;
+
+/// Environment override for the daemon configuration the branch completer
+/// reads, mirroring `OGYGIA_CONFIG` for the CLI's own config.
+const CONFIG_OVERRIDE_ENV: &str = "OGYGIA_UPDATED_CONFIG";
 
 /// Drive the ogygia-updated daemon (root only). With no subcommand, reset
 /// the host to the tracked branch tip now.
@@ -32,6 +40,7 @@ enum UpdateCommand {
 #[command(args_conflicts_with_subcommands = true)]
 struct CanaryArgs {
     /// Branch to trial; its tip is pinned onto this host now
+    #[arg(add = ArgValueCompleter::new(complete_branch))]
     branch: Option<String>,
 
     /// How long to hold the trial before reverting (e.g. 24h, 90m, 2d)
@@ -55,6 +64,31 @@ struct CanaryArgs {
 enum CanaryCommand {
     /// Show the current or most-recent canary
     Status,
+}
+
+/// Branches the daemon could pin onto this host, for shell completion.
+///
+/// Reads the daemon's configuration for its remote rather than asking the
+/// daemon itself, so completion works whatever state the service is in. Any
+/// failure yields no candidates: this writes to the shell's completion
+/// stream, where an error message would be offered as a branch name.
+fn complete_branch(current: &OsStr) -> Vec<CompletionCandidate> {
+    let Some(prefix) = current.to_str() else {
+        return Vec::new();
+    };
+
+    let path = env::var_os(CONFIG_OVERRIDE_ENV)
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(ogygia_updated::DEFAULT_CONFIG_PATH));
+    let Ok(config) = ogygia_updated::Config::load(&path) else {
+        return Vec::new();
+    };
+
+    ogygia_updated::branches::list(&config)
+        .into_iter()
+        .filter(|branch| branch.starts_with(prefix))
+        .map(CompletionCandidate::new)
+        .collect()
 }
 
 impl UpdateArgs {

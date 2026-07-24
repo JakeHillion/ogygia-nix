@@ -6,6 +6,10 @@ use anyhow::Context;
 use anyhow::Result;
 use serde::Deserialize;
 
+/// Where the NixOS module renders the daemon's configuration. Stable so
+/// that `ogygia update` can read `repo.url` without asking the daemon.
+pub const DEFAULT_CONFIG_PATH: &str = "/etc/ogygia/updated.toml";
+
 /// Daemon configuration, deserialized from TOML.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
