@@ -56,6 +56,12 @@ struct CanaryArgs {
     #[arg(long)]
     forever: bool,
 
+    /// Make the trial the boot default, so a reboot keeps it instead of
+    /// falling back to the tracked branch. Needed to trial a new kernel or
+    /// new boot flags; recovery is by hand from the bootloader menu.
+    #[arg(long)]
+    persist: bool,
+
     #[command(subcommand)]
     command: Option<CanaryCommand>,
 }
@@ -112,7 +118,7 @@ impl CanaryArgs {
                     .clone()
                     .context("a branch to trial is required (or use `canary status`)")?;
                 let timeout = (!self.forever).then(|| Duration::from(self.duration).as_secs());
-                ogygia_updated::control::request_canary(socket, branch, timeout)
+                ogygia_updated::control::request_canary(socket, branch, timeout, self.persist)
             }
         }
     }

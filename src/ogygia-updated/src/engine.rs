@@ -12,6 +12,7 @@ use git2::Oid;
 use tracing::info;
 use tracing::warn;
 
+use crate::canary::CanaryHold;
 use crate::canary::CanaryState;
 use crate::canary::CanaryTarget;
 use crate::canary::FinishReason;
@@ -40,16 +41,17 @@ pub enum Outcome {
     /// The cache-warm closure could not be substituted, so the cycle was
     /// skipped rather than built locally. Retried on the next cycle.
     PrefetchUnavailable { commit: String },
-    /// A canary was started: the commit runs while a safe boot floor is
-    /// staged for the next reboot.
+    /// A canary was started: the commit runs, and `next_boot` is what a
+    /// reboot lands on — a safe floor, or the trial itself when it persists.
     CanaryStarted {
         commit: String,
-        floor: String,
+        next_boot: String,
+        persist: bool,
         expires_at: Option<DateTime<Utc>>,
     },
     /// A scheduled cycle held the running trial in place, keeping the boot
     /// floor current without touching the running system.
-    CanaryHeld { commit: String, floor: String },
+    CanaryHeld { commit: String, next_boot: String },
 }
 
 impl fmt::Display for Outcome {
@@ -77,17 +79,22 @@ impl fmt::Display for Outcome {
             }
             Outcome::CanaryStarted {
                 commit,
-                floor,
+                next_boot,
+                persist,
                 expires_at,
             } => {
-                write!(f, "trialling {commit}; boot floor {floor}; ")?;
+                if *persist {
+                    write!(f, "trialling {commit}, staged for boot; ")?;
+                } else {
+                    write!(f, "trialling {commit}; boot floor {next_boot}; ")?;
+                }
                 match expires_at {
                     Some(at) => write!(f, "expires {}", at.format("%Y-%m-%d %H:%MZ")),
                     None => write!(f, "no timeout"),
                 }
             }
-            Outcome::CanaryHeld { commit, floor } => {
-                write!(f, "holding canary {commit}; boot floor {floor}")
+            Outcome::CanaryHeld { commit, next_boot } => {
+                write!(f, "holding canary {commit}; boot floor {next_boot}")
             }
         }
     }
@@ -121,10 +128,12 @@ pub enum Trigger {
     Manual,
     /// An operator asked to trial `branch`. Its tip is pinned now and the
     /// host is held there until the timeout elapses, the commit merges, or
-    /// a manual update supersedes it.
+    /// a manual update supersedes it. `persist` makes the trial the boot
+    /// default so it also survives a reboot.
     StartCanary {
         branch: String,
         timeout: Option<Duration>,
+        persist: bool,
     },
 }
 
@@ -143,15 +152,30 @@ fn run(
     let repo = Repo::open_or_clone(&config.repo_path(), &config.repo.url)?;
     repo.fetch()?;
     let main_tip = repo.tip(&config.repo.branch)?;
-    let canary = CanaryState::load(&config.canary_state_path())?;
+    // Unreadable state must not wedge the host: failing the cycle would
+    // stall every future one too, so an unparseable record is reported and
+    // treated as no trial, letting the guarded tracking path resume.
+    let canary = CanaryState::load(&config.canary_state_path()).unwrap_or_else(|error| {
+        warn!(%error, "unreadable canary state; treating it as no active trial");
+        None
+    });
     info!(%main_tip, branch = %config.repo.branch, ?trigger, "fetched");
 
     match trigger {
-        Trigger::StartCanary { branch, timeout } => {
+        Trigger::StartCanary {
+            branch,
+            timeout,
+            persist,
+        } => {
             let expires_at = timeout.map(|d| now + chrono::Duration::seconds(d.as_secs() as i64));
-            start_canary(
-                config, system, &repo, boot_id, main_tip, &branch, expires_at,
-            )
+            let hold = if persist {
+                CanaryHold::Persistent
+            } else {
+                CanaryHold::Ephemeral {
+                    boot_id: boot_id.to_string(),
+                }
+            };
+            start_canary(config, system, &repo, main_tip, &branch, expires_at, hold)
         }
         Trigger::Manual => {
             if let Some(CanaryState::Active { target, .. }) = &canary {
@@ -190,7 +214,7 @@ fn scheduled(
     let Some(CanaryState::Active {
         target,
         expires_at,
-        boot_id: started_boot,
+        hold,
     }) = canary
     else {
         return update_to_tip(config, system, repo, main_tip, false);
@@ -198,11 +222,15 @@ fn scheduled(
 
     let commit = target_commit(&target)?;
 
-    // A reboot loses the ephemeral test activation, so the trial is over.
+    // A reboot loses an ephemeral test activation, so that trial is over.
     // This outranks merge and expiry, which may both have come true while
     // the host was down. The trial is never reapplied; we record the reason
     // and resume normal tracking this cycle, rolling forward from the floor.
-    if boot_id != started_boot {
+    // A persistent trial is the boot default and comes back up on it, so a
+    // reboot is the point rather than the end.
+    if let CanaryHold::Ephemeral { boot_id: started } = &hold
+        && boot_id != started
+    {
         finish_canary(config, now, &target, FinishReason::Rebooted)?;
         info!("canary host rebooted; ending the trial and resuming the tracked branch");
         return update_to_tip(config, system, repo, main_tip, false);
@@ -232,41 +260,68 @@ fn scheduled(
         return update_to_tip(config, system, repo, main_tip, true);
     }
 
-    // Hold the trial open: keep the boot floor recent, but never re-drive
-    // the running system.
-    let floor = stage_boot_floor(config, system, repo, commit, main_tip)?;
+    // Hold the trial open without re-driving the running system: keep an
+    // ephemeral trial's floor recent, while a persistent trial already owns
+    // the boot default and needs nothing staged under it.
+    let next_boot = match hold {
+        CanaryHold::Ephemeral { .. } => stage_boot_floor(config, system, repo, commit, main_tip)?,
+        CanaryHold::Persistent => commit,
+    };
     Ok(Outcome::CanaryHeld {
         commit: commit.to_string(),
-        floor: floor.to_string(),
+        next_boot: next_boot.to_string(),
     })
 }
 
-/// Pin `branch`'s tip and hold the host on it.
+/// Pin `branch`'s tip and hold the host on it. A `Persistent` hold trades
+/// the boot floor for the trial itself as the boot default, so it survives
+/// a reboot.
 fn start_canary(
     config: &Config,
     system: &impl System,
     repo: &Repo,
-    boot_id: &str,
     main_tip: Oid,
     branch: &str,
     expires_at: Option<DateTime<Utc>>,
+    hold: CanaryHold,
 ) -> Result<Outcome> {
     let commit = repo.tip(branch)?;
+    let persist = matches!(hold, CanaryHold::Persistent);
     CanaryState::Active {
         target: CanaryTarget::Pinned {
             branch: branch.to_string(),
             commit: commit.to_string(),
         },
         expires_at,
-        boot_id: boot_id.to_string(),
+        hold,
     }
     .store(&config.canary_state_path())?;
+
+    let current = read_revision(&config.host.current_revision_path)?;
+
+    // A persistent trial owns the boot default, so it is applied like a
+    // normal update: profile moved and switched. That deliberately leaves
+    // no floor to fall back to — the operator reboots when ready to
+    // exercise the trial's kernel and recovers from the bootloader menu.
+    if persist {
+        let next_boot = read_revision(&config.next_boot_revision_path())?;
+        if current != commit || next_boot != commit {
+            let store_path = checkout_and_build(config, system, repo, commit)?;
+            system.set_profile(&config.activate.profile, &store_path)?;
+            system.switch_to_configuration(&store_path, Activation::Switch)?;
+        }
+        return Ok(Outcome::CanaryStarted {
+            commit: commit.to_string(),
+            next_boot: commit.to_string(),
+            persist,
+            expires_at,
+        });
+    }
 
     let floor = stage_boot_floor(config, system, repo, commit, main_tip)?;
 
     // Apply the trial once, as an ephemeral test activation. Scheduled
     // cycles never reapply it, so a reboot ends it for good.
-    let current = read_revision(&config.host.current_revision_path)?;
     if current != commit {
         let store_path = checkout_and_build(config, system, repo, commit)?;
         system.switch_to_configuration(&store_path, Activation::Test)?;
@@ -274,7 +329,8 @@ fn start_canary(
 
     Ok(Outcome::CanaryStarted {
         commit: commit.to_string(),
-        floor: floor.to_string(),
+        next_boot: floor.to_string(),
+        persist,
         expires_at,
     })
 }
@@ -941,13 +997,29 @@ mod tests {
     }
 
     fn store_active(config: &Config, commit: Oid, expires_at: Option<DateTime<Utc>>) {
+        store_hold(
+            config,
+            commit,
+            expires_at,
+            CanaryHold::Ephemeral {
+                boot_id: BOOT.to_string(),
+            },
+        );
+    }
+
+    fn store_hold(
+        config: &Config,
+        commit: Oid,
+        expires_at: Option<DateTime<Utc>>,
+        hold: CanaryHold,
+    ) {
         CanaryState::Active {
             target: CanaryTarget::Pinned {
                 branch: "canary".to_string(),
                 commit: commit.to_string(),
             },
             expires_at,
-            boot_id: BOOT.to_string(),
+            hold,
         }
         .store(&config.canary_state_path())
         .unwrap();
@@ -980,6 +1052,7 @@ mod tests {
             Trigger::StartCanary {
                 branch: "canary".to_string(),
                 timeout: Some(Duration::from_secs(86400)),
+                persist: false,
             },
         )
         .unwrap();
@@ -990,7 +1063,8 @@ mod tests {
             outcome,
             Outcome::CanaryStarted {
                 commit: side.to_string(),
-                floor: second.to_string(),
+                next_boot: second.to_string(),
+                persist: false,
                 expires_at: Some(now() + chrono::Duration::seconds(86400)),
             }
         );
@@ -1017,9 +1091,162 @@ mod tests {
             CanaryState::Active {
                 target: CanaryTarget::Pinned { commit, .. },
                 expires_at: Some(_),
-                boot_id,
+                hold: CanaryHold::Ephemeral { boot_id },
             } if commit == side.to_string() && boot_id == BOOT
         ));
+    }
+
+    #[test]
+    fn persistent_canary_takes_the_boot_default_with_no_floor() {
+        let (fixture, initial) = Fixture::new();
+        let second = commit(&fixture.origin, "main", &[initial], "second");
+        let side = commit(&fixture.origin, "canary", &[second], "side");
+        fixture.set_current(initial);
+        fixture.set_next_boot(initial);
+
+        let system = MockSystem::default();
+        let outcome = run(
+            &fixture.config,
+            &system,
+            now(),
+            BOOT,
+            Trigger::StartCanary {
+                branch: "canary".to_string(),
+                timeout: None,
+                persist: true,
+            },
+        )
+        .unwrap();
+
+        // The trial itself is the next-boot system; no floor is staged.
+        assert_eq!(
+            outcome,
+            Outcome::CanaryStarted {
+                commit: side.to_string(),
+                next_boot: side.to_string(),
+                persist: true,
+                expires_at: None,
+            }
+        );
+        assert!(outcome.activated());
+
+        // One build, and the profile moves — unlike the ephemeral path,
+        // which builds the floor as well and only test-activates.
+        assert_eq!(
+            *system.calls.borrow(),
+            vec![
+                Call::Build(flake_ref(&fixture.config)),
+                Call::SetProfile(fixture.config.activate.profile.clone()),
+                Call::SwitchToConfiguration(Activation::Switch),
+            ]
+        );
+
+        let state = CanaryState::load(&fixture.config.canary_state_path())
+            .unwrap()
+            .unwrap();
+        assert!(matches!(
+            state,
+            CanaryState::Active {
+                hold: CanaryHold::Persistent,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn persistent_canary_survives_a_reboot() {
+        let (fixture, initial) = Fixture::new();
+        let second = commit(&fixture.origin, "main", &[initial], "second");
+        let side = commit(&fixture.origin, "canary", &[second], "side");
+        // Rebooted straight back onto the trial, which owns the boot default.
+        fixture.set_current(side);
+        fixture.set_next_boot(side);
+        store_hold(&fixture.config, side, None, CanaryHold::Persistent);
+
+        let system = MockSystem::default();
+        let outcome = run(
+            &fixture.config,
+            &system,
+            now(),
+            "boot-session-b",
+            Trigger::Scheduled,
+        )
+        .unwrap();
+
+        // A changed boot id does not end the trial, and nothing is staged
+        // under it.
+        assert_eq!(
+            outcome,
+            Outcome::CanaryHeld {
+                commit: side.to_string(),
+                next_boot: side.to_string(),
+            }
+        );
+        assert!(system.calls.borrow().is_empty());
+        assert!(matches!(
+            CanaryState::load(&fixture.config.canary_state_path())
+                .unwrap()
+                .unwrap(),
+            CanaryState::Active { .. }
+        ));
+    }
+
+    #[test]
+    fn expired_persistent_canary_reverts_to_the_tracked_tip() {
+        let (fixture, initial) = Fixture::new();
+        let second = commit(&fixture.origin, "main", &[initial], "second");
+        let side = commit(&fixture.origin, "canary", &[second], "side");
+        fixture.set_current(side);
+        fixture.set_next_boot(side);
+        store_hold(
+            &fixture.config,
+            side,
+            Some(now() - chrono::Duration::hours(1)),
+            CanaryHold::Persistent,
+        );
+
+        let system = MockSystem::default();
+        let outcome = run(&fixture.config, &system, now(), BOOT, Trigger::Scheduled).unwrap();
+
+        // Expiry forces the host back onto the tip, reclaiming the boot
+        // default the trial held.
+        assert_eq!(
+            outcome,
+            Outcome::Switched {
+                commit: second.to_string()
+            }
+        );
+        assert_eq!(finish_reason(&fixture.config), FinishReason::Expired);
+        assert_eq!(
+            *system.calls.borrow(),
+            vec![
+                Call::Build(flake_ref(&fixture.config)),
+                Call::SetProfile(fixture.config.activate.profile.clone()),
+                Call::SwitchToConfiguration(Activation::Switch),
+            ]
+        );
+    }
+
+    #[test]
+    fn unreadable_canary_state_does_not_wedge_the_cycle() {
+        let (fixture, initial) = Fixture::new();
+        fixture.set_current(initial);
+        fixture.set_next_boot(initial);
+        let second = commit(&fixture.origin, "main", &[initial], "second");
+        // A record from a build that predates `hold`, or plain corruption.
+        fs::write(fixture.config.canary_state_path(), "{\"state\":\"active\"}").unwrap();
+
+        let system = MockSystem::default();
+        let outcome = run(&fixture.config, &system, now(), BOOT, Trigger::Scheduled).unwrap();
+
+        // Treated as no trial, so guarded tracking resumes rather than the
+        // cycle failing and stalling every one after it.
+        assert_eq!(
+            outcome,
+            Outcome::Switched {
+                commit: second.to_string()
+            }
+        );
     }
 
     #[test]
@@ -1038,7 +1265,7 @@ mod tests {
             outcome,
             Outcome::CanaryHeld {
                 commit: side.to_string(),
-                floor: second.to_string(),
+                next_boot: second.to_string(),
             }
         );
         assert!(!outcome.activated());
