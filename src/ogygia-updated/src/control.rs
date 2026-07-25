@@ -37,10 +37,12 @@ pub enum Request {
     Update,
     /// Trial `branch`: pin its tip and hold the host there until `timeout`
     /// seconds pass (no timeout if `None`), the commit merges, or an
-    /// update supersedes it.
+    /// update supersedes it. `persist` also makes it the boot default, so
+    /// a reboot does not end it.
     Canary {
         branch: String,
         timeout: Option<u64>,
+        persist: bool,
     },
     /// Report the current or most-recent canary without running a cycle.
     CanaryStatus,
@@ -57,9 +59,21 @@ pub fn request_update(socket_path: &Path) -> Result<String> {
 }
 
 /// Start a canary trialling `branch`, held for `timeout` seconds (no
-/// timeout if `None`).
-pub fn request_canary(socket_path: &Path, branch: String, timeout: Option<u64>) -> Result<String> {
-    send(socket_path, &Request::Canary { branch, timeout })
+/// timeout if `None`). `persist` keeps the trial across a reboot.
+pub fn request_canary(
+    socket_path: &Path,
+    branch: String,
+    timeout: Option<u64>,
+    persist: bool,
+) -> Result<String> {
+    send(
+        socket_path,
+        &Request::Canary {
+            branch,
+            timeout,
+            persist,
+        },
+    )
 }
 
 /// Ask the daemon to describe the current or most-recent canary.
@@ -171,6 +185,7 @@ mod tests {
                 Request::Canary {
                     branch: "feature".to_string(),
                     timeout: Some(3600),
+                    persist: true,
                 }
             );
             respond(&mut stream, Err("no such branch".to_string()));
@@ -181,7 +196,8 @@ mod tests {
         });
 
         assert_eq!(request_update(&socket_path).unwrap(), "switched to abc");
-        let error = request_canary(&socket_path, "feature".to_string(), Some(3600)).unwrap_err();
+        let error =
+            request_canary(&socket_path, "feature".to_string(), Some(3600), true).unwrap_err();
         assert_eq!(error.to_string(), "no such branch");
         assert_eq!(request_canary_status(&socket_path).unwrap(), "no canary");
         server.join().unwrap();

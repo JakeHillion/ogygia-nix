@@ -77,12 +77,22 @@ fn main() -> Result<()> {
                     info!("manual update requested over the control socket");
                     (Trigger::Manual, Some(stream))
                 }
-                Request::Canary { branch, timeout } => {
-                    info!(branch, ?timeout, "canary requested over the control socket");
+                Request::Canary {
+                    branch,
+                    timeout,
+                    persist,
+                } => {
+                    info!(
+                        branch,
+                        ?timeout,
+                        persist,
+                        "canary requested over the control socket"
+                    );
                     (
                         Trigger::StartCanary {
                             branch,
                             timeout: timeout.map(Duration::from_secs),
+                            persist,
                         },
                         Some(stream),
                     )
@@ -151,8 +161,8 @@ fn canary_status(config: &Config) -> Result<String> {
         None => Ok("no canary".to_string()),
         Some(state) => {
             let running = read_revision(&config.host.current_revision_path);
-            let boot_floor = read_revision(&config.next_boot_revision_path());
-            Ok(state.describe(Utc::now(), &running, &boot_floor))
+            let next_boot = read_revision(&config.next_boot_revision_path());
+            Ok(state.describe(Utc::now(), &running, &next_boot))
         }
     }
 }

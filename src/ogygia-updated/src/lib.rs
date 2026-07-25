@@ -20,6 +20,7 @@ mod engine;
 mod repo;
 mod system;
 
+pub use canary::CanaryHold;
 pub use canary::CanaryState;
 pub use canary::CanaryTarget;
 pub use canary::FinishReason;
