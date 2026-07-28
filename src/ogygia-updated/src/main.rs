@@ -77,6 +77,10 @@ fn main() -> Result<()> {
                     info!("manual update requested over the control socket");
                     (Trigger::Manual, Some(stream))
                 }
+                Request::Tick => {
+                    info!("tick requested over the control socket");
+                    (Trigger::Scheduled, Some(stream))
+                }
                 Request::Canary {
                     branch,
                     timeout,

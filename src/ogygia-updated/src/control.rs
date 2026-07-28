@@ -35,6 +35,11 @@ pub enum Request {
     /// Reset the target to the configured branch tip and run a cycle now,
     /// clearing any active canary.
     Update,
+    /// Run one cycle now on the daemon's own terms — an active canary is
+    /// held, and a deliberately off-branch system is left alone — and
+    /// answer once it has been served. Callers that must not fall behind
+    /// use this to force a cycle and confirm it happened.
+    Tick,
     /// Trial `branch`: pin its tip and hold the host there until `timeout`
     /// seconds pass (no timeout if `None`), the commit merges, or an
     /// update supersedes it. `persist` also makes it the boot default, so
@@ -56,6 +61,13 @@ pub type Response = Result<String, String>;
 /// Reset the host to the tracked branch tip now, clearing any canary.
 pub fn request_update(socket_path: &Path) -> Result<String> {
     send(socket_path, &Request::Update)
+}
+
+/// Run one cycle now as the daemon's interval would, returning once it has
+/// finished. Errors if the cycle failed, so a caller gating on being
+/// current can tell a served tick from a missed one.
+pub fn request_tick(socket_path: &Path) -> Result<String> {
+    send(socket_path, &Request::Tick)
 }
 
 /// Start a canary trialling `branch`, held for `timeout` seconds (no
@@ -193,6 +205,10 @@ mod tests {
             let (request, mut stream) = receiver.recv().unwrap();
             assert_eq!(request, Request::CanaryStatus);
             respond(&mut stream, Ok("no canary".to_string()));
+
+            let (request, mut stream) = receiver.recv().unwrap();
+            assert_eq!(request, Request::Tick);
+            respond(&mut stream, Ok("holding canary def".to_string()));
         });
 
         assert_eq!(request_update(&socket_path).unwrap(), "switched to abc");
@@ -200,6 +216,7 @@ mod tests {
             request_canary(&socket_path, "feature".to_string(), Some(3600), true).unwrap_err();
         assert_eq!(error.to_string(), "no such branch");
         assert_eq!(request_canary_status(&socket_path).unwrap(), "no canary");
+        assert_eq!(request_tick(&socket_path).unwrap(), "holding canary def");
         server.join().unwrap();
     }
 
