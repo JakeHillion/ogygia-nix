@@ -104,7 +104,15 @@ fn main() -> Result<()> {
         let response = match &result {
             Ok(outcome) => {
                 info!(%outcome, "update cycle finished");
-                Ok(outcome.to_string())
+                // A cycle that could not advance is reported as a failure to
+                // whoever asked for one, so a caller gating on being current
+                // can tell it did not happen. The daemon's own interval gets
+                // no response and simply retries on the next cycle.
+                if outcome.served() {
+                    Ok(outcome.to_string())
+                } else {
+                    Err(outcome.to_string())
+                }
             }
             Err(error) => {
                 let message = format!("{error:#}");
