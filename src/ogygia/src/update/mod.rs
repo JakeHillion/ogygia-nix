@@ -31,6 +31,9 @@ pub struct UpdateArgs {
 
 #[derive(Subcommand)]
 enum UpdateCommand {
+    /// Run one update cycle now and wait for it to finish, holding any
+    /// active canary. Exits non-zero if the cycle failed.
+    Tick,
     /// Trial a branch on this host, or report the active trial
     Canary(CanaryArgs),
 }
@@ -101,6 +104,7 @@ impl UpdateArgs {
     pub fn run(&self) -> Result<()> {
         let message = match &self.command {
             None => ogygia_updated::control::request_update(&self.socket)?,
+            Some(UpdateCommand::Tick) => ogygia_updated::control::request_tick(&self.socket)?,
             Some(UpdateCommand::Canary(canary)) => canary.run(&self.socket)?,
         };
         println!("{message}");
