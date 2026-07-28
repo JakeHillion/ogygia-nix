@@ -114,6 +114,15 @@ impl Outcome {
                 | Outcome::CanaryStarted { .. }
         )
     }
+
+    /// Whether the cycle did what the caller asked of it. An up-to-date
+    /// host, a held trial, and a deliberately off-branch system are all
+    /// settled states and count as served; a cycle that wanted to advance
+    /// and could not does not, leaving the host behind the branch it
+    /// tracks.
+    pub fn served(&self) -> bool {
+        !matches!(self, Outcome::PrefetchUnavailable { .. })
+    }
 }
 
 /// What initiated an update cycle.
@@ -913,6 +922,9 @@ mod tests {
                 commit: second.to_string()
             }
         );
+        // The host is left behind the branch, so an explicit request for a
+        // cycle is answered as a failure rather than a skip.
+        assert!(!outcome.served());
         // A cache-dependent host never falls back to a local build.
         assert_eq!(
             *system.calls.borrow(),
@@ -1269,6 +1281,8 @@ mod tests {
             }
         );
         assert!(!outcome.activated());
+        // Holding a trial is a settled state, not a missed update.
+        assert!(outcome.served());
         assert!(system.calls.borrow().is_empty());
     }
 
