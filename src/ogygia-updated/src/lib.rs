@@ -20,6 +20,9 @@ mod engine;
 mod repo;
 mod system;
 
+#[cfg(test)]
+mod jjtest;
+
 pub use canary::CanaryHold;
 pub use canary::CanaryState;
 pub use canary::CanaryTarget;
