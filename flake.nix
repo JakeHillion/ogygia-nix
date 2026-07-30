@@ -191,11 +191,13 @@
             inherit version cargoArtifacts;
             doCheck = false;
             doNotPostBuildInstallCargoBinaries = true;
-            # Bake nebula-cert's store path into the archived test binaries the
-            # same way the ogygia package does, so the nebula round-trip test
-            # finds it via the embedded constant when the archive runs — the
-            # testquorum runner has no nebula-cert on PATH.
+            # Bake nebula-cert's and jj's store paths into the archived test
+            # binaries the same way the ogygia package does, so the nebula
+            # round-trip test and the ogygia-updated change-id tests find them
+            # via the embedded constants when the archive runs — the testquorum
+            # runner has neither on PATH.
             env.OGYGIA_NEBULA_CERT_BIN = "${pkgs.nebula}/bin/nebula-cert";
+            env.OGYGIA_JJ_BIN = "${pkgs.jujutsu}/bin/jj";
             nativeBuildInputs = commonArgs.nativeBuildInputs ++ [
               pkgs.cargo-nextest
               pkgs.zstd
@@ -227,6 +229,7 @@
             checks = self.checks.${system};
             packages = with pkgs; [
               etcd # for etcdctl
+              jujutsu # jj, for the ogygia-updated change-id tests
               nebula # nebula-cert, for the nebula round-trip test
               rust-analyzer
               treefmtEval.config.build.wrapper

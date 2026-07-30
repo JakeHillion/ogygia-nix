@@ -256,8 +256,11 @@ fn scheduled(
     }
 
     // Still trialling. Once the commit lands on the tracked branch the
-    // canary has served its purpose; resume following the tip.
-    if repo.is_ancestor(commit, main_tip)? {
+    // canary has served its purpose; resume following the tip. The trial's
+    // own commit is often rewritten before it lands — reworded, or amended
+    // after review — so under jj its changes reaching the branch under new
+    // hashes ends the trial just as an untouched merge does.
+    if on_branch(repo, commit, main_tip)? {
         finish_canary(config, now, &target, FinishReason::Merged)?;
         info!("canary merged; resuming the tracked branch");
         return update_to_tip(config, system, repo, main_tip, false);
@@ -453,11 +456,11 @@ fn target_commit(target: &CanaryTarget) -> Result<Oid> {
     }
 }
 
-/// Whether `revision` is on the branch leading to `tip`, either as a plain
-/// ancestor or as a deployed jj revision whose every change has since
+/// Whether `revision` has reached the branch leading to `tip`, either as a
+/// plain ancestor or as a deployed jj revision whose every change has since
 /// landed there (rewritten, keeping its change-id). Such a fully-landed
-/// revision updates like a merged one; a stack with any change still
-/// outstanding does not.
+/// revision counts as merged; a stack with any change still outstanding
+/// does not.
 fn on_branch(repo: &Repo, revision: Oid, tip: Oid) -> Result<bool> {
     if repo.is_ancestor(revision, tip)? {
         return Ok(true);
@@ -528,6 +531,7 @@ mod tests {
     use crate::config::DaemonConfig;
     use crate::config::HostConfig;
     use crate::config::RepoConfig;
+    use crate::jjtest::Jj;
     use crate::repo::testutil::commit;
     use crate::repo::testutil::commit_with_change_id;
     use crate::repo::testutil::init_origin;
@@ -607,19 +611,35 @@ mod tests {
         }
     }
 
+    /// The host-side state a cycle reads and writes: the daemon's config
+    /// plus the revision files standing in for the running and next-boot
+    /// systems. The origin it tracks is built separately, by git2 or by jj.
     struct Fixture {
         // Held so the temporary directory outlives the test.
         _dir: TempDir,
-        origin: git2::Repository,
         config: Config,
     }
 
     impl Fixture {
-        fn new() -> (Self, Oid) {
+        fn new() -> (Self, git2::Repository, Oid) {
             let dir = TempDir::new().unwrap();
             let origin_path = dir.path().join("origin");
             let (origin, initial) = init_origin(&origin_path);
+            let fixture = Self::tracking(dir, &origin_path);
+            (fixture, origin, initial)
+        }
 
+        /// A fixture tracking an origin built by the real `jj` binary, so
+        /// the commits the daemon sees carry the change-ids jj writes rather
+        /// than a hand-rolled imitation of them.
+        fn jj() -> (Self, Jj) {
+            let dir = TempDir::new().unwrap();
+            let jj = Jj::init(dir.path());
+            let fixture = Self::tracking(dir, jj.origin());
+            (fixture, jj)
+        }
+
+        fn tracking(dir: TempDir, origin_path: &Path) -> Self {
             let profile = dir.path().join("profile");
             fs::create_dir_all(profile.join("sw/share/ogygia")).unwrap();
 
@@ -641,12 +661,7 @@ mod tests {
                 daemon: DaemonConfig::default(),
             };
 
-            let fixture = Self {
-                _dir: dir,
-                origin,
-                config,
-            };
-            (fixture, initial)
+            Self { _dir: dir, config }
         }
 
         fn set_current(&self, revision: Oid) {
@@ -668,7 +683,7 @@ mod tests {
 
     #[test]
     fn up_to_date_makes_no_changes() {
-        let (fixture, initial) = Fixture::new();
+        let (fixture, _origin, initial) = Fixture::new();
         fixture.set_current(initial);
         fixture.set_next_boot(initial);
 
@@ -681,10 +696,10 @@ mod tests {
 
     #[test]
     fn update_switches_to_the_new_commit() {
-        let (fixture, initial) = Fixture::new();
+        let (fixture, origin, initial) = Fixture::new();
         fixture.set_current(initial);
         fixture.set_next_boot(initial);
-        let second = commit(&fixture.origin, "main", &[initial], "second");
+        let second = commit(&origin, "main", &[initial], "second");
 
         let system = MockSystem::default();
         let outcome = run(&fixture.config, &system, now(), BOOT, Trigger::Scheduled).unwrap();
@@ -717,9 +732,9 @@ mod tests {
 
     #[test]
     fn off_branch_current_revision_blocks_the_update() {
-        let (fixture, initial) = Fixture::new();
-        let side = commit(&fixture.origin, "side", &[initial], "side");
-        commit(&fixture.origin, "main", &[initial], "second");
+        let (fixture, origin, initial) = Fixture::new();
+        let side = commit(&origin, "side", &[initial], "side");
+        commit(&origin, "main", &[initial], "second");
         fixture.set_current(side);
         fixture.set_next_boot(initial);
 
@@ -737,9 +752,9 @@ mod tests {
 
     #[test]
     fn off_branch_next_boot_gets_test_activation_only() {
-        let (fixture, initial) = Fixture::new();
-        let side = commit(&fixture.origin, "side", &[initial], "side");
-        let second = commit(&fixture.origin, "main", &[initial], "second");
+        let (fixture, origin, initial) = Fixture::new();
+        let side = commit(&origin, "side", &[initial], "side");
+        let second = commit(&origin, "main", &[initial], "second");
         fixture.set_current(initial);
         fixture.set_next_boot(side);
 
@@ -767,23 +782,12 @@ mod tests {
 
     #[test]
     fn landed_revision_updates_like_a_merge() {
-        let (fixture, initial) = Fixture::new();
+        let (fixture, origin, initial) = Fixture::new();
         // The host runs a jj commit deployed from a branch; it has since
         // landed on main rewritten, keeping its change-id.
-        let deployed = commit_with_change_id(
-            &fixture.origin,
-            "deploy",
-            &[initial],
-            "deployed",
-            "kxyzkxyzkxyz",
-        );
-        let landed = commit_with_change_id(
-            &fixture.origin,
-            "main",
-            &[initial],
-            "landed",
-            "kxyzkxyzkxyz",
-        );
+        let deployed =
+            commit_with_change_id(&origin, "deploy", &[initial], "deployed", "kxyzkxyzkxyz");
+        let landed = commit_with_change_id(&origin, "main", &[initial], "landed", "kxyzkxyzkxyz");
         fixture.set_current(deployed);
         fixture.set_next_boot(deployed);
 
@@ -809,9 +813,9 @@ mod tests {
 
     #[test]
     fn manual_recovers_an_off_branch_running_system() {
-        let (fixture, initial) = Fixture::new();
-        let side = commit(&fixture.origin, "side", &[initial], "side");
-        let second = commit(&fixture.origin, "main", &[initial], "second");
+        let (fixture, origin, initial) = Fixture::new();
+        let side = commit(&origin, "side", &[initial], "side");
+        let second = commit(&origin, "main", &[initial], "second");
         fixture.set_current(side);
         fixture.set_next_boot(initial);
 
@@ -841,9 +845,9 @@ mod tests {
 
     #[test]
     fn manual_resets_an_off_branch_next_boot() {
-        let (fixture, initial) = Fixture::new();
-        let side = commit(&fixture.origin, "side", &[initial], "side");
-        let second = commit(&fixture.origin, "main", &[initial], "second");
+        let (fixture, origin, initial) = Fixture::new();
+        let side = commit(&origin, "side", &[initial], "side");
+        let second = commit(&origin, "main", &[initial], "second");
         fixture.set_current(initial);
         fixture.set_next_boot(side);
 
@@ -873,10 +877,10 @@ mod tests {
 
     #[test]
     fn prefetch_precedes_the_build() {
-        let (fixture, initial) = Fixture::new();
+        let (fixture, origin, initial) = Fixture::new();
         fixture.set_current(initial);
         fixture.set_next_boot(initial);
-        let second = commit(&fixture.origin, "main", &[initial], "second");
+        let second = commit(&origin, "main", &[initial], "second");
         let mut config = fixture.config;
         config.build.prefetch_attr = Some("checks.x86_64-linux.prefetch".to_string());
 
@@ -903,10 +907,10 @@ mod tests {
 
     #[test]
     fn failed_prefetch_skips_the_build() {
-        let (fixture, initial) = Fixture::new();
+        let (fixture, origin, initial) = Fixture::new();
         fixture.set_current(initial);
         fixture.set_next_boot(initial);
-        let second = commit(&fixture.origin, "main", &[initial], "second");
+        let second = commit(&origin, "main", &[initial], "second");
         let mut config = fixture.config;
         config.build.prefetch_attr = Some("checks.x86_64-linux.prefetch".to_string());
 
@@ -937,10 +941,10 @@ mod tests {
 
     #[test]
     fn unchanged_kernel_switches_without_reboot() {
-        let (fixture, initial) = Fixture::new();
+        let (fixture, origin, initial) = Fixture::new();
         fixture.set_current(initial);
         fixture.set_next_boot(initial);
-        let second = commit(&fixture.origin, "main", &[initial], "second");
+        let second = commit(&origin, "main", &[initial], "second");
         let mut config = fixture.config;
         config.activate.allow_reboot = true;
         config.activate.booted_system = PathBuf::from("/run/booted-system");
@@ -970,10 +974,10 @@ mod tests {
 
     #[test]
     fn changed_kernel_schedules_a_reboot() {
-        let (fixture, initial) = Fixture::new();
+        let (fixture, origin, initial) = Fixture::new();
         fixture.set_current(initial);
         fixture.set_next_boot(initial);
-        let second = commit(&fixture.origin, "main", &[initial], "second");
+        let second = commit(&origin, "main", &[initial], "second");
         let mut config = fixture.config;
         config.activate.allow_reboot = true;
         config.activate.booted_system = PathBuf::from("/run/booted-system");
@@ -1049,9 +1053,9 @@ mod tests {
 
     #[test]
     fn start_canary_runs_commit_and_stages_boot_floor() {
-        let (fixture, initial) = Fixture::new();
-        let second = commit(&fixture.origin, "main", &[initial], "second");
-        let side = commit(&fixture.origin, "canary", &[second], "side");
+        let (fixture, origin, initial) = Fixture::new();
+        let second = commit(&origin, "main", &[initial], "second");
+        let side = commit(&origin, "canary", &[second], "side");
         fixture.set_current(initial);
         fixture.set_next_boot(initial);
 
@@ -1110,9 +1114,9 @@ mod tests {
 
     #[test]
     fn persistent_canary_takes_the_boot_default_with_no_floor() {
-        let (fixture, initial) = Fixture::new();
-        let second = commit(&fixture.origin, "main", &[initial], "second");
-        let side = commit(&fixture.origin, "canary", &[second], "side");
+        let (fixture, origin, initial) = Fixture::new();
+        let second = commit(&origin, "main", &[initial], "second");
+        let side = commit(&origin, "canary", &[second], "side");
         fixture.set_current(initial);
         fixture.set_next_boot(initial);
 
@@ -1167,9 +1171,9 @@ mod tests {
 
     #[test]
     fn persistent_canary_survives_a_reboot() {
-        let (fixture, initial) = Fixture::new();
-        let second = commit(&fixture.origin, "main", &[initial], "second");
-        let side = commit(&fixture.origin, "canary", &[second], "side");
+        let (fixture, origin, initial) = Fixture::new();
+        let second = commit(&origin, "main", &[initial], "second");
+        let side = commit(&origin, "canary", &[second], "side");
         // Rebooted straight back onto the trial, which owns the boot default.
         fixture.set_current(side);
         fixture.set_next_boot(side);
@@ -1205,9 +1209,9 @@ mod tests {
 
     #[test]
     fn expired_persistent_canary_reverts_to_the_tracked_tip() {
-        let (fixture, initial) = Fixture::new();
-        let second = commit(&fixture.origin, "main", &[initial], "second");
-        let side = commit(&fixture.origin, "canary", &[second], "side");
+        let (fixture, origin, initial) = Fixture::new();
+        let second = commit(&origin, "main", &[initial], "second");
+        let side = commit(&origin, "canary", &[second], "side");
         fixture.set_current(side);
         fixture.set_next_boot(side);
         store_hold(
@@ -1241,10 +1245,10 @@ mod tests {
 
     #[test]
     fn unreadable_canary_state_does_not_wedge_the_cycle() {
-        let (fixture, initial) = Fixture::new();
+        let (fixture, origin, initial) = Fixture::new();
         fixture.set_current(initial);
         fixture.set_next_boot(initial);
-        let second = commit(&fixture.origin, "main", &[initial], "second");
+        let second = commit(&origin, "main", &[initial], "second");
         // A record from a build that predates `hold`, or plain corruption.
         fs::write(fixture.config.canary_state_path(), "{\"state\":\"active\"}").unwrap();
 
@@ -1263,9 +1267,9 @@ mod tests {
 
     #[test]
     fn scheduled_holds_an_active_canary_in_place() {
-        let (fixture, initial) = Fixture::new();
-        let second = commit(&fixture.origin, "main", &[initial], "second");
-        let side = commit(&fixture.origin, "canary", &[second], "side");
+        let (fixture, origin, initial) = Fixture::new();
+        let second = commit(&origin, "main", &[initial], "second");
+        let side = commit(&origin, "canary", &[second], "side");
         fixture.set_current(side);
         fixture.set_next_boot(second);
         store_active(&fixture.config, side, None);
@@ -1288,10 +1292,10 @@ mod tests {
 
     #[test]
     fn rebooted_canary_ends_and_resumes_tracking() {
-        let (fixture, initial) = Fixture::new();
-        let second = commit(&fixture.origin, "main", &[initial], "second");
-        let third = commit(&fixture.origin, "main", &[second], "third");
-        let side = commit(&fixture.origin, "canary", &[second], "side");
+        let (fixture, origin, initial) = Fixture::new();
+        let second = commit(&origin, "main", &[initial], "second");
+        let third = commit(&origin, "main", &[second], "third");
+        let side = commit(&origin, "canary", &[second], "side");
         // Rebooted onto the boot floor (merge-base(side, third) = second);
         // the timeout also lapsed while the host was down.
         fixture.set_current(second);
@@ -1334,10 +1338,10 @@ mod tests {
 
     #[test]
     fn overwritten_canary_ends_and_respects_off_branch_switch() {
-        let (fixture, initial) = Fixture::new();
-        let second = commit(&fixture.origin, "main", &[initial], "second");
-        let side = commit(&fixture.origin, "canary", &[second], "side");
-        let hand = commit(&fixture.origin, "hand", &[second], "hand");
+        let (fixture, origin, initial) = Fixture::new();
+        let second = commit(&origin, "main", &[initial], "second");
+        let side = commit(&origin, "canary", &[second], "side");
+        let hand = commit(&origin, "hand", &[second], "hand");
         // Same boot session, but the host was hand-switched to an off-branch
         // commit.
         fixture.set_current(hand);
@@ -1361,9 +1365,9 @@ mod tests {
 
     #[test]
     fn expired_canary_reverts_to_the_tracked_tip() {
-        let (fixture, initial) = Fixture::new();
-        let second = commit(&fixture.origin, "main", &[initial], "second");
-        let side = commit(&fixture.origin, "canary", &[second], "side");
+        let (fixture, origin, initial) = Fixture::new();
+        let second = commit(&origin, "main", &[initial], "second");
+        let side = commit(&origin, "canary", &[second], "side");
         fixture.set_current(side);
         fixture.set_next_boot(second);
         store_active(
@@ -1395,11 +1399,11 @@ mod tests {
 
     #[test]
     fn merged_canary_resumes_the_tracked_tip() {
-        let (fixture, initial) = Fixture::new();
-        let second = commit(&fixture.origin, "main", &[initial], "second");
-        let side = commit(&fixture.origin, "canary", &[second], "side");
+        let (fixture, origin, initial) = Fixture::new();
+        let second = commit(&origin, "main", &[initial], "second");
+        let side = commit(&origin, "canary", &[second], "side");
         // The branch merges back into main via a merge commit.
-        let merge = commit(&fixture.origin, "main", &[second, side], "merge");
+        let merge = commit(&origin, "main", &[second, side], "merge");
         fixture.set_current(side);
         fixture.set_next_boot(second);
         store_active(&fixture.config, side, None);
@@ -1418,9 +1422,9 @@ mod tests {
 
     #[test]
     fn manual_update_clears_an_active_canary() {
-        let (fixture, initial) = Fixture::new();
-        let second = commit(&fixture.origin, "main", &[initial], "second");
-        let side = commit(&fixture.origin, "canary", &[second], "side");
+        let (fixture, origin, initial) = Fixture::new();
+        let second = commit(&origin, "main", &[initial], "second");
+        let side = commit(&origin, "canary", &[second], "side");
         fixture.set_current(side);
         fixture.set_next_boot(second);
         store_active(&fixture.config, side, None);
@@ -1435,5 +1439,175 @@ mod tests {
             }
         );
         assert_eq!(finish_reason(&fixture.config), FinishReason::Cleared);
+    }
+
+    /// Trial `branch`'s tip on a host currently running main, and leave the
+    /// fixture as the next scheduled cycle finds it: the trial running, the
+    /// branch point staged for boot. Returns the commit the daemon pinned.
+    fn apply_canary(fixture: &Fixture, jj: &Jj, branch: &str) -> Oid {
+        let base = jj.tip("main");
+        fixture.set_current(base);
+        fixture.set_next_boot(base);
+
+        let outcome = run(
+            &fixture.config,
+            &MockSystem::default(),
+            now(),
+            BOOT,
+            Trigger::StartCanary {
+                branch: branch.to_string(),
+                timeout: None,
+                persist: false,
+            },
+        )
+        .unwrap();
+
+        let Outcome::CanaryStarted {
+            commit, next_boot, ..
+        } = outcome
+        else {
+            panic!("expected a canary to start, got {outcome:?}")
+        };
+        assert_eq!(next_boot, base.to_string());
+        let pinned = Oid::from_str(&commit).unwrap();
+        fixture.set_current(pinned);
+        pinned
+    }
+
+    #[test]
+    fn a_reworded_jj_canary_merges_and_resumes_the_tracked_tip() {
+        let (fixture, jj) = Fixture::jj();
+        jj.commit("main", "canary change", "canary");
+        jj.set_bookmark("jj/blah", "@");
+        let pushed = jj.push("jj/blah");
+        let pinned = apply_canary(&fixture, &jj, "jj/blah");
+        assert_eq!(pinned, pushed);
+
+        // Reworded during review, then merged. jj rewrote the commit, so the
+        // hash the daemon pinned is on no branch at all any more — only its
+        // change-id ties the running system to what landed.
+        jj.describe("jj/blah", "canary change, reworded");
+        let rewritten = jj.push("jj/blah");
+        assert_ne!(rewritten, pinned);
+        jj.merge_into_main("jj/blah", "merge jj/blah");
+        let main_tip = jj.push("main");
+
+        let system = MockSystem::default();
+        let outcome = run(&fixture.config, &system, now(), BOOT, Trigger::Scheduled).unwrap();
+
+        assert_eq!(
+            outcome,
+            Outcome::Switched {
+                commit: main_tip.to_string()
+            }
+        );
+        assert_eq!(finish_reason(&fixture.config), FinishReason::Merged);
+    }
+
+    #[test]
+    fn a_squashed_jj_canary_merges_when_its_change_lands() {
+        let (fixture, jj) = Fixture::jj();
+        jj.commit("main", "canary change", "canary");
+        jj.set_bookmark("jj/blah", "@");
+        jj.push("jj/blah");
+        let pinned = apply_canary(&fixture, &jj, "jj/blah");
+
+        // Amended rather than reworded, and landed by fast-forward instead of
+        // a merge commit: main's tip is the rewrite itself.
+        jj.squash_into("jj/blah", "amended");
+        let rewritten = jj.push("jj/blah");
+        assert_ne!(rewritten, pinned);
+        jj.set_bookmark("main", "jj/blah");
+        let main_tip = jj.push("main");
+        assert_eq!(main_tip, rewritten);
+
+        let system = MockSystem::default();
+        let outcome = run(&fixture.config, &system, now(), BOOT, Trigger::Scheduled).unwrap();
+
+        assert_eq!(
+            outcome,
+            Outcome::Switched {
+                commit: main_tip.to_string()
+            }
+        );
+        assert_eq!(finish_reason(&fixture.config), FinishReason::Merged);
+    }
+
+    #[test]
+    fn a_rewritten_jj_canary_is_held_until_its_change_lands() {
+        let (fixture, jj) = Fixture::jj();
+        let base = jj.tip("main");
+        jj.commit("main", "canary change", "canary");
+        jj.set_bookmark("jj/blah", "@");
+        jj.push("jj/blah");
+        let pinned = apply_canary(&fixture, &jj, "jj/blah");
+
+        // Rewritten but not merged, while main moved on without it.
+        jj.describe("jj/blah", "canary change, reworded");
+        jj.push("jj/blah");
+        jj.commit("main", "unrelated", "unrelated");
+        jj.set_bookmark("main", "@");
+        jj.push("main");
+
+        let system = MockSystem::default();
+        let outcome = run(&fixture.config, &system, now(), BOOT, Trigger::Scheduled).unwrap();
+
+        // A rewrite alone is not a merge; the trial holds at its floor.
+        assert_eq!(
+            outcome,
+            Outcome::CanaryHeld {
+                commit: pinned.to_string(),
+                next_boot: base.to_string(),
+            }
+        );
+        assert!(system.calls.borrow().is_empty());
+    }
+
+    #[test]
+    fn a_jj_canary_stack_merges_only_once_all_of_it_lands() {
+        let (fixture, jj) = Fixture::jj();
+        let base = jj.tip("main");
+        jj.commit("main", "lower", "lower");
+        jj.set_bookmark("lower", "@");
+        jj.commit("lower", "upper", "upper");
+        jj.set_bookmark("jj/stack", "@");
+        jj.push("lower");
+        jj.push("jj/stack");
+        let pinned = apply_canary(&fixture, &jj, "jj/stack");
+
+        // The upper change is pulled out of the stack and landed on its own.
+        // The host runs both changes, so it must not roll forward yet: the
+        // tracked tip is missing the lower one.
+        jj.rebase("jj/stack", "main");
+        jj.push("jj/stack");
+        jj.merge_into_main("jj/stack", "merge the upper change");
+        jj.push("main");
+
+        let system = MockSystem::default();
+        let outcome = run(&fixture.config, &system, now(), BOOT, Trigger::Scheduled).unwrap();
+
+        assert_eq!(
+            outcome,
+            Outcome::CanaryHeld {
+                commit: pinned.to_string(),
+                next_boot: base.to_string(),
+            }
+        );
+
+        // The lower change lands too, so every change the host runs is now
+        // on the branch and the trial is done.
+        jj.merge_into_main("lower", "merge the lower change");
+        let main_tip = jj.push("main");
+
+        let system = MockSystem::default();
+        let outcome = run(&fixture.config, &system, now(), BOOT, Trigger::Scheduled).unwrap();
+
+        assert_eq!(
+            outcome,
+            Outcome::Switched {
+                commit: main_tip.to_string()
+            }
+        );
+        assert_eq!(finish_reason(&fixture.config), FinishReason::Merged);
     }
 }
