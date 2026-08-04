@@ -87,7 +87,11 @@ in
       restartIfChanged = false;
       stopIfChanged = false;
 
-      path = [ config.nix.package config.systemd.package ];
+      path = [
+        config.nix.package
+        config.systemd.package
+        pkgs.gitMinimal
+      ];
 
       serviceConfig = {
         ExecStart = "${cfg.package}/bin/ogygia-updated --config /etc/ogygia/updated.toml";
