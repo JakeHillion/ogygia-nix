@@ -34,6 +34,12 @@ impl Activation {
 pub trait System {
     /// Substitute `flake_ref` from binary caches without building locally.
     fn prefetch(&self, flake_ref: &str) -> Result<()>;
+    /// Whether `flake_ref`'s attribute is defined by the flake, checked by
+    /// evaluation without building. An attribute added to the flake only
+    /// recently is absent from an older commit, so its system cannot be
+    /// built there. An absent attribute is distinct from one that fails to
+    /// evaluate, which is an error.
+    fn attr_defined(&self, flake_ref: &str) -> Result<bool>;
     /// Build `flake_ref` and return its store path.
     fn build(&self, flake_ref: &str) -> Result<PathBuf>;
     /// Point `profile` at `store_path` as a new generation.
@@ -60,6 +66,32 @@ impl System for RealSystem {
             .args(["--option", "always-allow-substitutes", "true"])
             .arg("--no-link")
             .arg(flake_ref))
+    }
+
+    fn attr_defined(&self, flake_ref: &str) -> Result<bool> {
+        // `_: true` selects the attribute without forcing its value, so a
+        // present attribute resolves cheaply and an absent one fails at the
+        // selection with a message flake attribute resolution reserves for
+        // exactly that case.
+        let mut command = Command::new("nix");
+        command
+            .arg("eval")
+            .args(EXPERIMENTAL_FEATURES)
+            .arg(flake_ref)
+            .args(["--apply", "_: true"]);
+        info!(?command, "checking attribute is defined");
+        let output = command.output().context("running nix eval")?;
+        if output.status.success() {
+            return Ok(true);
+        }
+        let stderr = str::from_utf8(&output.stderr).context("decoding nix eval output")?;
+        if stderr.contains("does not provide attribute") {
+            return Ok(false);
+        }
+        bail!(
+            "nix eval of {flake_ref} failed with {}:\n{stderr}",
+            output.status
+        );
     }
 
     fn build(&self, flake_ref: &str) -> Result<PathBuf> {
