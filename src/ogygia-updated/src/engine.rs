@@ -350,7 +350,13 @@ fn start_canary(
 /// Stage `merge-base(commit, main_tip)` as the boot default so a reboot
 /// lands on a recent tracked commit rather than the trial. Boot only: it
 /// never touches the running system and never schedules a reboot. Returns
-/// the floor.
+/// the commit a reboot now lands on.
+///
+/// A newly-added host has no entry on the tracked branch yet, so the
+/// branch point predates it and cannot build its system. There is no
+/// tracked floor to fall back to, so the existing boot default — the
+/// system the host is already running — is left in place and reported
+/// instead, letting a canary start without `--persist` on a fresh host.
 fn stage_boot_floor(
     config: &Config,
     system: &impl System,
@@ -360,6 +366,12 @@ fn stage_boot_floor(
 ) -> Result<Oid> {
     let floor = repo.merge_base(commit, main_tip)?;
     let next_boot = read_revision(&config.next_boot_revision_path())?;
+
+    repo.checkout(floor)?;
+    if !system.attr_defined(&flake_ref(config))? {
+        info!(%floor, attr = %config.flake_attr(), "build attribute undefined at boot floor; keeping the current boot default");
+        return Ok(next_boot);
+    }
 
     if next_boot != floor {
         let floor_path = checkout_and_build(config, system, repo, floor)?;
@@ -433,6 +445,15 @@ fn update_to_tip(
     activate(config, system, &store_path, tip, next_boot_on_branch)
 }
 
+/// The flake reference this host's system is built from.
+fn flake_ref(config: &Config) -> String {
+    format!(
+        "git+file://{}#{}",
+        config.repo_path().display(),
+        config.flake_attr()
+    )
+}
+
 /// Check out `commit`, leaving a clean tree, and build this host's system.
 fn checkout_and_build(
     config: &Config,
@@ -441,8 +462,7 @@ fn checkout_and_build(
     commit: Oid,
 ) -> Result<PathBuf> {
     repo.checkout(commit)?;
-    let flake = format!("git+file://{}", config.repo_path().display());
-    let store_path = system.build(&format!("{flake}#{}", config.flake_attr()))?;
+    let store_path = system.build(&flake_ref(config))?;
     info!(store_path = %store_path.display(), %commit, "built system");
     Ok(store_path)
 }
@@ -560,6 +580,11 @@ mod tests {
         booted_kernel: Option<&'static str>,
         built_kernel: Option<&'static str>,
         fail_prefetch: bool,
+        /// Whether `attr_defined` reports the build attribute as present;
+        /// `None` defaults to present, standing in for an attribute on the
+        /// tracked branch. Set to `Some(false)` to model a freshly-added
+        /// host.
+        attr_defined: Option<bool>,
     }
 
     impl System for MockSystem {
@@ -571,6 +596,10 @@ mod tests {
                 anyhow::bail!("prefetch unavailable");
             }
             Ok(())
+        }
+
+        fn attr_defined(&self, _flake_ref: &str) -> Result<bool> {
+            Ok(self.attr_defined.unwrap_or(true))
         }
 
         fn build(&self, flake_ref: &str) -> Result<PathBuf> {
@@ -1005,13 +1034,6 @@ mod tests {
         );
     }
 
-    fn flake_ref(config: &Config) -> String {
-        format!(
-            "git+file://{}#nixosConfigurations.\"host.example.com\".config.system.build.toplevel",
-            config.repo_path().display()
-        )
-    }
-
     fn store_active(config: &Config, commit: Oid, expires_at: Option<DateTime<Utc>>) {
         store_hold(
             config,
@@ -1110,6 +1132,56 @@ mod tests {
                 hold: CanaryHold::Ephemeral { boot_id },
             } if commit == side.to_string() && boot_id == BOOT
         ));
+    }
+
+    #[test]
+    fn new_host_canary_skips_a_missing_boot_floor() {
+        let (fixture, origin, initial) = Fixture::new();
+        let second = commit(&origin, "main", &[initial], "second");
+        let tip = commit(&origin, "main", &[second], "third");
+        let side = commit(&origin, "canary", &[second], "side");
+        // The host tracks the tip and has just been added to the flake on
+        // the canary branch, so it is undefined at the branch point
+        // (`second`) the floor would otherwise build.
+        fixture.set_current(tip);
+        fixture.set_next_boot(tip);
+
+        let system = MockSystem {
+            attr_defined: Some(false),
+            ..MockSystem::default()
+        };
+        let outcome = run(
+            &fixture.config,
+            &system,
+            now(),
+            BOOT,
+            Trigger::StartCanary {
+                branch: "canary".to_string(),
+                timeout: Some(Duration::from_secs(86400)),
+                persist: false,
+            },
+        )
+        .unwrap();
+
+        // No floor is staged: the running tracked system stays the boot
+        // default, so a reboot ends the trial as it would for any ephemeral
+        // canary. The trial is only test-activated.
+        assert_eq!(
+            outcome,
+            Outcome::CanaryStarted {
+                commit: side.to_string(),
+                next_boot: tip.to_string(),
+                persist: false,
+                expires_at: Some(now() + chrono::Duration::seconds(86400)),
+            }
+        );
+        assert_eq!(
+            *system.calls.borrow(),
+            vec![
+                Call::Build(flake_ref(&fixture.config)),
+                Call::SwitchToConfiguration(Activation::Test),
+            ]
+        );
     }
 
     #[test]
