@@ -226,7 +226,7 @@
           };
 
           devShells.default = craneLib.devShell {
-            checks = self.checks.${system};
+            inputsFrom = [ cargoArtifacts ];
             packages = with pkgs; [
               etcd # for etcdctl
               jujutsu # jj, for the ogygia-updated change-id tests
