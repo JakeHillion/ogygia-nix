@@ -34,7 +34,7 @@ tower = "0.5"
 tower-http = { version = "0.6", features = ["trace"] }
 
 # HTTP client
-reqwest = { version = "0.12", default-features = false, features = ["stream", "gzip", "rustls-tls"] }
+reqwest = { version = "0.13", default-features = false, features = ["stream", "gzip", "rustls-tls"] }
 
 # Bloom filters
 fastbloom = "0.17"
