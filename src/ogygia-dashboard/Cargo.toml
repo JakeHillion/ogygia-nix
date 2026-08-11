@@ -43,3 +43,11 @@ enum-map = { workspace = true }
 # Logging
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
+
+[features]
+default = ["nebula"]
+# Nebula certificate expiry alerts. On by default; disable with
+# `--no-default-features` to drop the producer (and its `nix`/`nebula-cert`
+# runtime dependencies). Whether it actually runs is gated at runtime by the
+# `[nebula]` config section, so the expensive evaluation stays opt-in there.
+nebula = []

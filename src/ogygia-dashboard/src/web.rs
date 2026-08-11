@@ -11,6 +11,7 @@ use chrono::DateTime;
 use chrono::Utc;
 use tokio::sync::Mutex;
 
+use crate::alerts::AlertsSnapshot;
 use crate::config::Config;
 use crate::etcd::Etcd;
 use crate::etcd::HostStates;
@@ -44,6 +45,9 @@ pub struct AppState {
     commits_cache: Mutex<Arc<CachedCommits>>,
     html_cache: Mutex<Arc<CachedHtml>>,
     pr_count_cache: Mutex<Arc<CachedPrCount>>,
+    /// Latest alerts, maintained by background producers. Empty when none are
+    /// running (e.g. built without the `nebula` feature).
+    alerts: Arc<Mutex<Arc<AlertsSnapshot>>>,
 }
 
 impl AppState {
@@ -56,10 +60,23 @@ impl AppState {
             crate::archive::spawn(archive, git_manager.clone(), etcd.clone());
         }
 
+        let alerts = Arc::new(Mutex::new(Arc::new(AlertsSnapshot::default())));
+
+        #[cfg(feature = "nebula")]
+        if config.nebula.enable {
+            crate::nebula::spawn(
+                config.clone(),
+                git_manager.clone(),
+                etcd.clone(),
+                alerts.clone(),
+            );
+        }
+
         Ok(Self {
             config,
             git_manager,
             etcd,
+            alerts,
             commits_cache: Mutex::new(Arc::new(CachedCommits {
                 version: 0,
                 commits: Vec::new(),
@@ -194,6 +211,13 @@ impl AppState {
         Ok(html)
     }
 
+    /// Render the current alerts. Cheap string formatting over the background
+    /// snapshot, so it's safe on the request path.
+    async fn alerts_html(&self) -> String {
+        let snapshot = self.alerts.lock().await.clone();
+        crate::alerts::render_alerts_section(&snapshot.alerts, &self.config)
+    }
+
     async fn fetch_pr_count(&self) -> Option<u32> {
         let client = reqwest::Client::new();
         match client.get(self.config.pulls_api_url()).send().await {
@@ -226,6 +250,8 @@ pub async fn index(State(state): State<Arc<AppState>>) -> impl IntoResponse {
         Err(_) => "<p>Error generating git graph</p>".to_string(),
     };
 
+    let alerts_content = state.alerts_html().await;
+
     let title = &state.config.title;
 
     let html = format!(
@@ -239,6 +265,8 @@ pub async fn index(State(state): State<Arc<AppState>>) -> impl IntoResponse {
 <body>
     <div class="container">
         <h1>{title}</h1>
+
+        {alerts_content}
 
         <div class="status-section">
             <div class="git-graph-container">
@@ -651,7 +679,7 @@ fn analyze_commit_structure(commits: &[CommitInfo]) -> CommitGraph {
     CommitGraph { nodes }
 }
 
-fn format_relative_date(timestamp: DateTime<Utc>) -> (String, String) {
+pub(crate) fn format_relative_date(timestamp: DateTime<Utc>) -> (String, String) {
     let now = Utc::now();
     let duration = now.signed_duration_since(timestamp);
 

@@ -31,6 +31,9 @@ let
     title = cfg.title;
   } // lib.optionalAttrs (cfg.hostnameStripSuffix != null) {
     hostname_strip_suffix = cfg.hostnameStripSuffix;
+  } // lib.optionalAttrs cfg.nebula.enable {
+    # Thresholds are fixed fractions of each cert's validity.
+    nebula.enable = true;
   });
 in
 {
@@ -94,6 +97,14 @@ in
         description = "Branch the deployed commits are archived to.";
       };
     };
+
+    nebula = {
+      enable = lib.mkEnableOption ''
+        Nebula certificate expiry alerts. Evaluates each host's certificate via
+        `nix eval` and reads its expiry with `nebula-cert`, then surfaces alerts
+        as the certificates approach their validity horizon. Expensive, so it
+        runs only when enabled here'';
+    };
   };
 
   config = lib.mkIf cfg.enable {
@@ -112,6 +123,10 @@ in
       description = "Ogygia Dashboard - NixOS Host Status Visualization";
       wantedBy = [ "multi-user.target" ];
       after = [ "network.target" ];
+
+      # The nebula alert producer shells out to `nix eval` (which uses git) and
+      # `nebula-cert`; without alerts the service needs neither.
+      path = lib.optionals cfg.nebula.enable [ pkgs.nix pkgs.nebula pkgs.git ];
 
       serviceConfig = {
         ExecStart = "${cfg.package}/bin/ogygia-dashboard --config ${configFile}";
@@ -137,15 +152,22 @@ in
         RestrictSUIDSGID = true;
       } // lib.optionalAttrs cfg.ssh.enable {
         LoadCredential = [ "ssh-key:${cfg.ssh.keyFile}" ];
+      } // lib.optionalAttrs cfg.nebula.enable {
+        # The Nix evaluator maps writable-executable pages, which the default
+        # hardening forbids.
+        MemoryDenyWriteExecute = false;
       };
 
       environment = {
         RUST_LOG = lib.mkDefault "info";
-      } // lib.optionalAttrs cfg.ssh.enable {
+      } // lib.optionalAttrs (cfg.ssh.enable || cfg.nebula.enable) {
         # libgit2's SSH transport resolves $HOME/.ssh/known_hosts before the
         # host key callback and fails outright ("error loading known_hosts")
-        # when HOME is unset, which it is under DynamicUser.
+        # when HOME is unset, which it is under DynamicUser. Nix likewise needs
+        # a writable HOME for its evaluation cache.
         HOME = "/run/ogygia-dashboard";
+      } // lib.optionalAttrs cfg.nebula.enable {
+        NIX_CONFIG = "experimental-features = nix-command flakes";
       };
     };
   };
