@@ -93,12 +93,17 @@ pub async fn sign(args: SignArgs<'_>) -> Result<()> {
     Ok(())
 }
 
-/// The expiry of a signed certificate.
-pub struct Validity {
+/// A signed certificate, as reported by `nebula-cert print`.
+pub struct Cert {
+    /// The name the certificate was signed with. `ogygia nebula rekey` signs
+    /// with the `nixosConfigurations` attribute name, so this identifies the
+    /// host a certificate on disk belongs to.
+    pub name: String,
+    pub groups: Vec<String>,
     pub not_after: DateTime<Utc>,
 }
 
-impl Validity {
+impl Cert {
     /// Whether the certificate is due for LetsEncrypt-style renewal: less than
     /// `1 - renew_after` of the configured `validity_secs` remains before the
     /// cert's actual expiry.
@@ -117,8 +122,8 @@ impl Validity {
     }
 }
 
-/// Read a signed certificate's validity window via `nebula-cert print -json`.
-pub async fn read_validity(cert: &Path) -> Result<Validity> {
+/// Read a signed certificate via `nebula-cert print -json`.
+pub async fn read_cert(cert: &Path) -> Result<Cert> {
     let output = Command::new(bin())
         .arg("print")
         .arg("-json")
@@ -131,20 +136,23 @@ pub async fn read_validity(cert: &Path) -> Result<Validity> {
         let stderr = String::from_utf8_lossy(&output.stderr);
         return Err(anyhow!("nebula-cert print failed: {}", stderr.trim()));
     }
-    parse_validity(&output.stdout)
+    parse_cert(&output.stdout)
 }
 
-/// Extract the validity window from `nebula-cert print -json` output.
+/// Extract the certificate from `nebula-cert print -json` output.
 ///
 /// The command emits a JSON *array* of certificates (a file may hold a chain);
 /// the host certificate is the first entry.
-fn parse_validity(json: &[u8]) -> Result<Validity> {
+fn parse_cert(json: &[u8]) -> Result<Cert> {
     #[derive(Deserialize)]
     struct Printed {
         details: Details,
     }
     #[derive(Deserialize)]
     struct Details {
+        name: String,
+        /// `null`, not `[]`, for a certificate signed without groups.
+        groups: Option<Vec<String>>,
         #[serde(rename = "notAfter")]
         not_after: DateTime<Utc>,
     }
@@ -155,7 +163,9 @@ fn parse_validity(json: &[u8]) -> Result<Validity> {
         .into_iter()
         .next()
         .ok_or_else(|| anyhow!("nebula-cert print returned no certificates"))?;
-    Ok(Validity {
+    Ok(Cert {
+        name: first.details.name,
+        groups: first.details.groups.unwrap_or_default(),
         not_after: first.details.not_after,
     })
 }
@@ -242,23 +252,29 @@ mod tests {
         Utc.timestamp_opt(secs, 0).unwrap()
     }
 
-    /// A cert issued at t=0 and expiring at day 90.
-    fn window() -> Validity {
-        Validity {
-            not_after: at(90 * 86400),
+    fn cert_expiring_at(secs: i64) -> Cert {
+        Cert {
+            name: "host".to_string(),
+            groups: Vec::new(),
+            not_after: at(secs),
         }
     }
 
+    /// A cert issued at t=0 and expiring at day 90.
+    fn window() -> Cert {
+        cert_expiring_at(90 * 86400)
+    }
+
     /// End-to-end: mint a CA, generate a host keypair, sign a cert, then read
-    /// its validity back — proving `read_validity`/`parse_validity` track the
-    /// actual `nebula-cert print -json` output rather than an assumed shape.
+    /// it back — proving `read_cert`/`parse_cert` track the actual
+    /// `nebula-cert print -json` output rather than an assumed shape.
     ///
     /// Hard-requires the real `nebula-cert`, provided on PATH by the dev shell
     /// and embedded into the CI nextest archive. A missing binary means a
     /// broken test environment and must fail loudly, not silently skip — a
     /// skipped round-trip is what let a parser bug reach the fleet before.
     #[tokio::test]
-    async fn read_validity_round_trips_a_signed_cert() {
+    async fn read_cert_round_trips_a_signed_cert() {
         let dir = tempfile::tempdir().unwrap();
         let ca_crt = dir.path().join("ca.crt");
         let ca_key = dir.path().join("ca.key");
@@ -288,14 +304,17 @@ mod tests {
             in_pub: &host_pub,
             name: "host.round-trip.test",
             networks: "10.0.0.1/24",
-            groups: &[],
+            groups: &["servers".to_string(), "laptops".to_string()],
             duration_seconds: duration_secs,
             out_cert: &out_cert,
         })
         .await
         .unwrap();
 
-        let v = read_validity(&out_cert).await.unwrap();
+        let v = read_cert(&out_cert).await.unwrap();
+
+        assert_eq!(v.name, "host.round-trip.test");
+        assert_eq!(v.groups, ["servers", "laptops"]);
 
         // nebula signs from ~now, so expiry lands one duration out (whole-second
         // rounding plus a few seconds of test slop).
@@ -315,7 +334,14 @@ mod tests {
 
     #[test]
     fn empty_cert_array_is_an_error() {
-        assert!(parse_validity(b"[]").is_err());
+        assert!(parse_cert(b"[]").is_err());
+    }
+
+    #[test]
+    fn null_groups_parse_as_empty() {
+        let json =
+            br#"[{"details":{"name":"bare","groups":null,"notAfter":"2026-10-27T18:28:48Z"}}]"#;
+        assert!(parse_cert(json).unwrap().groups.is_empty());
     }
 
     #[test]
@@ -365,7 +391,6 @@ mod tests {
     #[test]
     fn at_expiry_is_due() {
         // Zero remaining is at or below any positive renew window.
-        let v = Validity { not_after: at(0) };
-        assert!(v.past_renewal(at(0), VALIDITY_90D, 1.0 / 3.0));
+        assert!(cert_expiring_at(0).past_renewal(at(0), VALIDITY_90D, 1.0 / 3.0));
     }
 }
