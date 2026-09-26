@@ -43,6 +43,7 @@ Ogygia extracts these battle-tested patterns into standalone, reusable component
 - **📝 Configuration Revision Tracking**: Automatically embed Git revision information into your NixOS system closure
 - **🔍 System Status Inspection**: CLI tool to view build revisions across different system states
 - **🌐 Fleet Visibility**: Query etcd to see build revisions across all hosts in your infrastructure
+- **🔐 Clevis Blob Maintenance**: Keep a Tang-bound disk encryption blob converging on a declarative spec as servers come and go or rotate keys
 - **⚙️ NixOS Module Integration**: Easy integration into existing NixOS configurations via flake
 - **📦 Cachix Support**: Pre-built binaries available via Cachix for faster installations
 - **🦀 Built with Rust**: Fast, reliable CLI written in Rust using Clap
@@ -360,6 +361,54 @@ This queries your local irisd, which checks peers' bloom filters and returns mat
 3. **Path lookup**: When Nix needs a path, irisd checks local and peer bloom filters
 4. **NAR serving**: If found locally, irisd serves the NAR; if on a peer, it redirects/proxies
 5. **Caching**: Downloaded NARs are cached locally with configurable TTL and size limits
+
+### Clevis Blob Maintenance
+
+#### Overview
+
+Hosts that unlock their disks at boot with Clevis and Tang carry a JWE blob
+bound to a fixed set of Tang servers. Binding requires every server to be up,
+adding a server or rotating its keys means re-binding every host by hand, and
+nothing records which servers a blob should be bound to. `ogygia-clevis`
+replaces that with a declarative spec: the `clevis encrypt sss` configuration,
+with the thumbprint of each server's signing key.
+
+```nix
+ogygia.clevis = {
+  enable = true;
+  secretFile = "/data/disk_encryption.jwe";
+  spec = {
+    t = 1;
+    pins.tang = [
+      { url = "http://tang1.example.com:7654"; thp = "H9qQk8sByKi5aXUGYVDVXMnH_QV9wSOjMiVnNxqKAyE"; }
+      { url = "http://tang2.example.com:7654"; thp = "Bai-SYCM1Jg3VJLRCpVyNosWrgSDSlv5HvFmZTTsZms"; }
+    ];
+  };
+};
+```
+
+The blob must be created once by hand (`clevis encrypt sss`) so the secret
+never has to be stored in the clear. From then on a timer runs `ogygia-clevis`
+hourly, which:
+
+1. Reads which servers the current blob is bound to from its JWE headers.
+2. Asks every server in the spec for an advertisement signed by the pinned key.
+3. Re-encrypts against every reachable specced server, but only if that covers
+   more reachable specced servers than the current blob does. A blob is never
+   traded for one covering fewer servers, and never for one covering none.
+4. Verifies the new blob decrypts to the same secret, then swaps it in
+   atomically, keeping the file's permissions.
+
+Rotate a server's keys by updating its `thp` in the spec; each host re-binds
+the next time it can reach the new key. The blob on disk takes effect at the
+next `nixos-rebuild`, when `boot.initrd.clevis` copies it into the initrd.
+
+#### Security Considerations
+
+The `thp` is mandatory. Without it Clevis trusts whatever keys a URL serves,
+and whoever holds those keys can decrypt the blob offline from its header.
+Pinning the signing key means an attacker on the path to a Tang server can at
+most make it look unreachable.
 
 ## Binary Cache
 

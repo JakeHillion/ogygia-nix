@@ -2005,6 +2005,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "ogygia-clevis"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "base64 0.22.1",
+ "clap",
+ "futures",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "ogygia-dashboard"
 version = "0.1.0"
 dependencies = [

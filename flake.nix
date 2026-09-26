@@ -61,6 +61,7 @@
             fileset = lib.fileset.unions [
               (craneLib.fileset.commonCargoSources ./.)
               ./src/ogygia-dashboard/src/web.css
+              ./src/ogygia-clevis/tests/fixtures/sss.jwe
             ];
           };
           inherit (craneLib.crateNameFromCargoToml { inherit src; }) version;
@@ -177,6 +178,12 @@
             '';
           });
 
+          ogygia-clevis = craneLib.buildPackage (individualCrateArgs // {
+            pname = "ogygia-clevis";
+            cargoExtraArgs = "-p ogygia-clevis";
+            src = fileSetForCrate ./src/ogygia-clevis;
+          });
+
           ogygia-dashboard = craneLib.buildPackage (individualCrateArgs // {
             pname = "ogygia-dashboard";
             cargoExtraArgs = "-p ogygia-dashboard";
@@ -221,7 +228,7 @@
         in
         {
           packages = {
-            inherit ogygia ogygia-irisd ogygia-hostinfod ogygia-dashboard ogygia-updated ogygia-nextest-archive;
+            inherit ogygia ogygia-irisd ogygia-hostinfod ogygia-dashboard ogygia-updated ogygia-clevis ogygia-nextest-archive;
             default = ogygia;
           };
 
@@ -257,7 +264,7 @@
           formatter = treefmtEval.config.build.wrapper;
 
           checks = {
-            inherit ogygia ogygia-irisd ogygia-hostinfod ogygia-dashboard ogygia-updated;
+            inherit ogygia ogygia-irisd ogygia-hostinfod ogygia-dashboard ogygia-updated ogygia-clevis;
 
             ogygia-clippy = craneLib.cargoClippy (commonArgs // {
               inherit cargoArtifacts;
@@ -291,6 +298,12 @@
               ogygiaModule = self.nixosModules.default;
             };
 
+            ogygia-clevis-config = import ./nixos/tests/clevis-config.nix {
+              inherit pkgs;
+              inherit (nixpkgs) lib;
+              ogygiaModule = self.nixosModules.default;
+            };
+
             ogygia-nebula-module = import ./nixos/tests/nebula-module.nix {
               inherit pkgs;
               inherit (nixpkgs) lib;
@@ -316,6 +329,12 @@
               inherit (nixpkgs) lib;
               ogygiaModule = self.nixosModules.default;
             };
+
+            ogygia-clevis-sync = import ./nixos/tests/clevis-sync.nix {
+              inherit pkgs system;
+              inherit (nixpkgs) lib;
+              ogygiaModule = self.nixosModules.default;
+            };
           };
         }) // {
       nixosModules.default = { pkgs, ... }: {
@@ -324,6 +343,7 @@
         _module.args.ogygia-hostinfod = self.packages.${pkgs.stdenv.hostPlatform.system}.ogygia-hostinfod;
         _module.args.ogygia-dashboard = self.packages.${pkgs.stdenv.hostPlatform.system}.ogygia-dashboard;
         _module.args.ogygia-updated = self.packages.${pkgs.stdenv.hostPlatform.system}.ogygia-updated;
+        _module.args.ogygia-clevis = self.packages.${pkgs.stdenv.hostPlatform.system}.ogygia-clevis;
       };
 
       ci = nixpkgs.lib.genAttrs [ "aarch64-linux" "x86_64-linux" ] (system:
