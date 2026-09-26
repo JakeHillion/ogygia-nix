@@ -16,6 +16,9 @@ use crate::config::Config;
 use crate::etcd::Etcd;
 use crate::etcd::HostStates;
 use crate::git::GitManager;
+use crate::graph::Row;
+use crate::graph::Segment;
+use crate::graph::Y;
 use crate::nixos::CommitInfo;
 
 #[derive(Clone)]
@@ -316,8 +319,8 @@ fn generate_git_graph_html(
 ) -> String {
     let mut html = String::new();
 
-    // Analyze commit structure - all commits treated as main branch (linear timeline)
-    let commit_graph = analyze_commit_structure(commits);
+    let rows = crate::graph::layout(commits);
+    let graph_width = rows.iter().map(Row::width).max().unwrap_or(1);
 
     // Start git graph container
     html.push_str(r#"<div class="git-graph">"#);
@@ -342,28 +345,10 @@ fn generate_git_graph_html(
         config.pulls_web_url()
     ));
 
-    // Process commits using the analyzed graph structure
-    for (index, node) in commit_graph.nodes.iter().enumerate() {
-        let _next_node = commit_graph.nodes.get(index + 1);
-
-        // Find the original commit info for host badges
-        let commit = commits
-            .iter()
-            .find(|c| {
-                let hash = match c {
-                    CommitInfo::Missing(hash) => hash,
-                    CommitInfo::Complete { hash, .. } => hash,
-                };
-                hash == &node.hash
-            })
-            .unwrap();
-
+    for (commit, row) in commits.iter().zip(&rows) {
         // Collect hosts for this commit
         let mut host_badges = Vec::new();
-        let hash = match commit {
-            CommitInfo::Missing(hash) => hash,
-            CommitInfo::Complete { hash, .. } => hash,
-        };
+        let hash = commit.hash();
         let Ok(commit_oid) = git2::Oid::from_str(hash) else {
             tracing::warn!("Skipping commit with invalid OID format: '{hash}'");
             continue;
@@ -408,77 +393,12 @@ fn generate_git_graph_html(
             }
         }
 
-        // Determine line classes
-        let mut line_classes = Vec::new();
-
-        // Check if we need dashed line (skipped commits between main commits)
-        if node.is_main_branch && index < commit_graph.nodes.len() - 1 {
-            let next_main_distance = commit_graph
-                .nodes
-                .iter()
-                .skip(index + 1)
-                .position(|n| n.is_main_branch)
-                .unwrap_or(0);
-            if next_main_distance > 0 {
-                line_classes.push("main-dashed");
-            }
-        }
-
-        // Check if this is the first commit (no line above)
-        if index == 0 {
-            line_classes.push("no-line-above");
-        }
-
-        // Check if this is the last commit or last main commit (no line below)
-        let has_main_commits_below = commit_graph
-            .nodes
-            .iter()
-            .skip(index + 1)
-            .any(|n| n.is_main_branch);
-        if !has_main_commits_below {
-            line_classes.push("no-line-below");
-        }
-
-        // Check if this commit has a branch coming off it
-        let has_branch_child = commit_graph
-            .nodes
-            .iter()
-            .any(|n| !n.is_main_branch && n.parents.contains(&node.hash));
-        if has_branch_child {
-            line_classes.push("has-branch");
-        }
-
         // Format the commit date
         let timestamp = match commit {
             CommitInfo::Missing(_) => Utc::now(),
             CommitInfo::Complete { timestamp, .. } => *timestamp,
         };
         let (relative_date, absolute_date) = format_relative_date(timestamp);
-
-        // Generate commit row with proper Gitea-style lines
-        html.push_str(r#"<div class="commit-row">"#);
-
-        // Add git graph lines and connections
-        html.push_str(r#"<div class="commit-line">"#);
-
-        // Main branch line (always present except for first/last)
-        if index > 0 && has_main_commits_below {
-            html.push_str(r#"<div class="git-graph-line main"></div>"#);
-        }
-
-        // Branch connections for non-main commits
-        if !node.is_main_branch {
-            html.push_str(r#"<div class="git-graph-connection branch-out angled"></div>"#);
-            html.push_str(r#"<div class="git-graph-line branch"></div>"#);
-        }
-
-        // Commit bubble
-        let mut bubble_classes = Vec::new();
-        if node.is_main_branch {
-            bubble_classes.push("main-branch");
-        } else {
-            bubble_classes.push("branch");
-        }
 
         let message = match commit {
             CommitInfo::Missing(hash) => {
@@ -487,13 +407,13 @@ fn generate_git_graph_html(
             CommitInfo::Complete { message, .. } => message.clone(),
         };
 
-        html.push_str(&format!(
-            r#"<div class="commit-bubble {}" title="{}"></div>"#,
-            bubble_classes.join(" "),
-            message.replace("\"", "&quot;")
+        html.push_str(r#"<div class="commit-row">"#);
+        html.push_str(&render_graph_cell(
+            row,
+            graph_width,
+            matches!(commit, CommitInfo::Missing(_)),
+            &message,
         ));
-
-        html.push_str(r#"</div>"#); // Close commit-line
 
         // Commit info
         let hash_class = if matches!(commit, CommitInfo::Missing(_)) {
@@ -631,52 +551,64 @@ fn generate_git_graph_html(
     html
 }
 
-#[derive(Debug, Clone)]
-struct CommitNode {
-    hash: String,
-    parents: Vec<String>,
-    is_main_branch: bool,
-}
+/// Horizontal space given to each graph lane, in pixels.
+const LANE_WIDTH: usize = 16;
+/// Number of `lane-N` colour classes in the stylesheet.
+const LANE_COLOURS: usize = 6;
 
-#[derive(Debug)]
-struct CommitGraph {
-    nodes: Vec<CommitNode>,
-}
+/// Draw one row of the commit graph. Lines are positioned with percentages
+/// so they span the full row however tall its contents make it.
+fn render_graph_cell(row: &Row, width: usize, missing: bool, message: &str) -> String {
+    let x = |lane: usize| lane * LANE_WIDTH + LANE_WIDTH / 2;
+    let y = |y: Y| match y {
+        Y::Top => "0%",
+        Y::Middle => "50%",
+        Y::Bottom => "100%",
+    };
+    let class = |lane: usize, elided: bool| {
+        let dashed = if elided { " elided" } else { "" };
+        format!("lane-{}{dashed}", lane % LANE_COLOURS)
+    };
 
-/// Analyze commit structure into a linear graph.
-/// TODO: Implement real graph analysis using git parent data for proper branch visualization.
-/// For now, all commits are treated as main-branch (linear timeline).
-fn analyze_commit_structure(commits: &[CommitInfo]) -> CommitGraph {
-    let mut nodes = Vec::new();
+    let lines: String = row
+        .segments
+        .iter()
+        .map(|segment| match *segment {
+            Segment::Vertical {
+                lane,
+                from,
+                to,
+                elided,
+            } => format!(
+                r#"<line class="{}" x1="{}" y1="{}" x2="{}" y2="{}"/>"#,
+                class(lane, elided),
+                x(lane),
+                y(from),
+                x(lane),
+                y(to),
+            ),
+            Segment::Horizontal {
+                from,
+                to,
+                lane,
+                elided,
+            } => format!(
+                r#"<line class="{}" x1="{}" y1="50%" x2="{}" y2="50%"/>"#,
+                class(lane, elided),
+                x(from),
+                x(to),
+            ),
+        })
+        .collect();
 
-    for (index, commit) in commits.iter().enumerate() {
-        // All commits treated as main branch (linear timeline)
-        let is_main_branch = true;
-
-        // Connect to the next commit in chronological order
-        let mut parents = Vec::new();
-        if index < commits.len() - 1 {
-            let next_commit = &commits[index + 1];
-            let hash = match next_commit {
-                CommitInfo::Missing(hash) => hash,
-                CommitInfo::Complete { hash, .. } => hash,
-            };
-            parents.push(hash.clone());
-        }
-
-        let hash = match commit {
-            CommitInfo::Missing(hash) => hash,
-            CommitInfo::Complete { hash, .. } => hash,
-        };
-
-        nodes.push(CommitNode {
-            hash: hash.clone(),
-            parents,
-            is_main_branch,
-        });
-    }
-
-    CommitGraph { nodes }
+    let missing = if missing { " missing" } else { "" };
+    format!(
+        r#"<div class="commit-graph" style="width: {width}px"><svg width="{width}" height="100%">{lines}</svg><div class="commit-bubble lane-{colour}{missing}" style="left: {left}px" title="{title}"></div></div>"#,
+        width = width * LANE_WIDTH,
+        colour = row.column % LANE_COLOURS,
+        left = x(row.column),
+        title = message.replace('"', "&quot;"),
+    )
 }
 
 /// Describe `timestamp` relative to now, either in the past ("3 days ago") or

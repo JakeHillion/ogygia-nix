@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::collections::HashSet;
 use std::path::PathBuf;
 
@@ -15,6 +16,7 @@ use crate::config::ArchiveConfig;
 use crate::config::Config;
 use crate::config::SshConfig;
 use crate::nixos::CommitInfo;
+use crate::nixos::GraphParent;
 
 pub struct GitManager {
     temp_dir: Option<TempDir>,
@@ -247,6 +249,20 @@ impl GitManager {
             }
         }
 
+        let shown: Vec<Oid> = commits
+            .iter()
+            .filter(|c| matches!(c, CommitInfo::Complete { .. }))
+            .map(|c| Oid::from_str(c.hash()))
+            .collect::<Result<_, _>>()?;
+        let mut graph_parents = graph_parents(&repo, &shown)?;
+        for commit in &mut commits {
+            if let CommitInfo::Complete { hash, parents, .. } = commit {
+                *parents = graph_parents
+                    .remove(&Oid::from_str(hash)?)
+                    .unwrap_or_default();
+            }
+        }
+
         // Sort by missing status first (missing commits at top), then by timestamp (newest first)
         commits.sort_by(|a, b| {
             match (a, b) {
@@ -268,7 +284,7 @@ impl GitManager {
             }
         });
 
-        Ok(commits)
+        Ok(crate::graph::topo_order(commits))
     }
 
     pub fn get_main_tip(&self) -> Result<Oid> {
@@ -322,8 +338,60 @@ impl GitManager {
             timestamp,
             branch,
             hosts_using: vec![hostname.to_string()],
+            parents: Vec::new(),
         })
     }
+}
+
+/// Connect each shown commit to its nearest shown ancestors, as `jj log` does
+/// for a revset that skips commits. Ancestors that are only reachable through
+/// another shown ancestor are left out. Parents reachable through an earlier
+/// real parent come first, so the first-parent line stays in one lane.
+fn graph_parents(repo: &Repository, shown: &[Oid]) -> Result<HashMap<Oid, Vec<GraphParent>>> {
+    let descends = |a: Oid, b: Oid| a == b || repo.graph_descendant_of(a, b).unwrap_or(false);
+
+    let mut ancestry = HashSet::new();
+    for &a in shown {
+        for &b in shown {
+            if a != b && descends(a, b) {
+                ancestry.insert((a, b));
+            }
+        }
+    }
+
+    shown
+        .iter()
+        .map(|&oid| {
+            let real_parents: Vec<Oid> = repo.find_commit(oid)?.parent_ids().collect();
+            let ancestors: Vec<Oid> = shown
+                .iter()
+                .copied()
+                .filter(|&b| ancestry.contains(&(oid, b)))
+                .collect();
+            let mut nearest: Vec<(usize, Oid)> = ancestors
+                .iter()
+                .copied()
+                .filter(|&b| !ancestors.iter().any(|&m| ancestry.contains(&(m, b))))
+                .map(|b| {
+                    let via = real_parents
+                        .iter()
+                        .position(|&p| descends(p, b))
+                        .unwrap_or(usize::MAX);
+                    (via, b)
+                })
+                .collect();
+            nearest.sort();
+
+            let parents = nearest
+                .into_iter()
+                .map(|(_, b)| GraphParent {
+                    hash: b.to_string(),
+                    elided: !real_parents.contains(&b),
+                })
+                .collect();
+            Ok((oid, parents))
+        })
+        .collect()
 }
 
 fn ssh_callbacks(ssh: &SshConfig) -> git2::RemoteCallbacks<'_> {
@@ -475,6 +543,10 @@ mod tests {
         let remote_path = dir.path().join("remote.git");
         let remote = Repository::init_bare(&remote_path).unwrap();
         create_commit(&remote, "main", "initial", None);
+        // init.defaultBranch decides which name init_bare points HEAD at, so
+        // without this the clone has no default branch to check out wherever
+        // that setting isn't "main".
+        remote.set_head("refs/heads/main").unwrap();
 
         let clone_path = dir.path().join("clone");
         let clone = Repository::clone(remote_path.to_str().unwrap(), &clone_path).unwrap();
@@ -587,6 +659,40 @@ mod tests {
             head_commit.parent_ids().collect::<Vec<_>>(),
             vec![external, c2]
         );
+    }
+
+    #[test]
+    fn test_graph_parents_skip_hidden_commits() {
+        let (_dir, _remote, clone, _manager, _config) = setup();
+        let base = clone.refname_to_id("refs/heads/main").unwrap();
+        let hidden = create_commit(&clone, "pr", "hidden", Some(base));
+        let pr = create_commit(&clone, "pr", "pr", Some(hidden));
+        let main = create_commit(&clone, "main", "main", Some(base));
+        let merge = {
+            let signature = Signature::now("test", "test@example.com").unwrap();
+            let main_commit = clone.find_commit(main).unwrap();
+            let pr_commit = clone.find_commit(pr).unwrap();
+            clone
+                .commit(
+                    None,
+                    &signature,
+                    &signature,
+                    "merge",
+                    &main_commit.tree().unwrap(),
+                    &[&main_commit, &pr_commit],
+                )
+                .unwrap()
+        };
+
+        let parents = graph_parents(&clone, &[merge, pr, main, base]).unwrap();
+        let edge = |oid: Oid, elided| GraphParent {
+            hash: oid.to_string(),
+            elided,
+        };
+        assert_eq!(parents[&merge], [edge(main, false), edge(pr, false)]);
+        assert_eq!(parents[&pr], [edge(base, true)]);
+        assert_eq!(parents[&main], [edge(base, false)]);
+        assert!(parents[&base].is_empty());
     }
 
     #[test]
