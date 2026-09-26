@@ -31,6 +31,7 @@ in
     ./hostinfod
     ./dashboard
     ./updated
+    ./clevis
   ];
 
   config = lib.mkIf cfg.enable {
