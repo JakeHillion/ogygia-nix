@@ -75,99 +75,55 @@ h1 {
 
 .commit-row {
     display: flex;
-    align-items: center;
-    margin-bottom: 8px;
-    position: relative;
+    align-items: stretch;
+    min-height: 32px;
 }
 
-.commit-line {
-    width: 24px;
-    height: 24px;
+.commit-graph {
+    flex: none;
     position: relative;
     margin-right: 8px;
-    display: flex;
-    align-items: center;
-    justify-content: center;
 }
 
-.git-graph-line {
+.commit-graph svg {
     position: absolute;
-    width: 2px;
-    height: 100%;
-    top: 0;
-    background: var(--line-color, #d1d5da);
+    inset: 0;
+    overflow: visible;
 }
 
-.git-graph-line.main {
-    --line-color: #22c55e;
-    left: 11px;
+.commit-graph line {
+    stroke: var(--lane-color);
+    stroke-width: 2;
+    stroke-linecap: square;
 }
 
-.git-graph-line.branch {
-    --line-color: #f97316;
-    left: 19px;
+.commit-graph line.elided {
+    stroke-dasharray: 3 4;
+    stroke-linecap: butt;
 }
 
-.git-graph-line.dashed {
-    background: repeating-linear-gradient(
-        to bottom,
-        var(--line-color) 0,
-        var(--line-color) 3px,
-        transparent 3px,
-        transparent 6px
-    );
-}
-
-.git-graph-connection {
-    position: absolute;
-    width: 10px;
-    height: 2px;
-    top: 11px;
-    left: 11px;
-    background: var(--line-color, #f97316);
-}
-
-.git-graph-connection.branch-out {
-    --line-color: #f97316;
-}
-
-.git-graph-connection.angled::after {
-    content: '';
-    position: absolute;
-    right: -2px;
-    top: 0;
-    width: 2px;
-    height: 12px;
-    background: var(--line-color, #f97316);
-}
-
-.git-graph-connection.angled-in::before {
-    content: '';
-    position: absolute;
-    right: -2px;
-    top: -10px;
-    width: 2px;
-    height: 12px;
-    background: var(--line-color, #f97316);
-}
+.lane-0 { --lane-color: #22c55e; }
+.lane-1 { --lane-color: #f97316; }
+.lane-2 { --lane-color: #3b82f6; }
+.lane-3 { --lane-color: #a855f7; }
+.lane-4 { --lane-color: #ec4899; }
+.lane-5 { --lane-color: #14b8a6; }
 
 .commit-bubble {
-    width: 12px;
-    height: 12px;
-    background: #f6f8fa;
-    border: 2px solid #d1d5da;
+    position: absolute;
+    top: 50%;
+    width: 8px;
+    height: 8px;
+    transform: translate(-50%, -50%);
+    background: #fff;
+    border: 2px solid var(--lane-color);
     border-radius: 50%;
-    position: relative;
-    z-index: 2;
     cursor: help;
 }
 
-.commit-bubble.main-branch {
-    margin-right: 8px;
-}
-
-.commit-bubble.branch {
-    margin-left: 8px;
+.commit-bubble.missing {
+    border-color: #dc2626;
+    border-style: dashed;
 }
 
 .commit-hash.missing {
@@ -176,6 +132,7 @@ h1 {
 }
 
 .commit-info {
+    padding: 4px 0;
     display: flex;
     align-items: center;
     flex: 1;

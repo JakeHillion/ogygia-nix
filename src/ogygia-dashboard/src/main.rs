@@ -18,6 +18,7 @@ mod archive;
 mod config;
 mod etcd;
 mod git;
+mod graph;
 #[cfg(feature = "nebula")]
 mod nebula;
 mod nixos;

@@ -26,16 +26,37 @@ pub enum CommitInfo {
         timestamp: DateTime<Utc>,
         branch: String,
         hosts_using: Vec<String>, // Which hosts are using this commit
+        /// Nearest ancestors among the commits being shown, real parents first.
+        parents: Vec<GraphParent>,
     },
 }
 
+/// An edge from a shown commit to one of its nearest shown ancestors.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GraphParent {
+    pub hash: String,
+    /// Whether commits that aren't shown lie between the two.
+    pub elided: bool,
+}
+
 impl CommitInfo {
-    /// Get the short version of the commit hash (first 7 characters)
-    pub fn short_hash(&self) -> &str {
-        let hash = match self {
+    pub fn hash(&self) -> &str {
+        match self {
             CommitInfo::Missing(hash) => hash,
             CommitInfo::Complete { hash, .. } => hash,
-        };
+        }
+    }
+
+    pub fn parents(&self) -> &[GraphParent] {
+        match self {
+            CommitInfo::Missing(_) => &[],
+            CommitInfo::Complete { parents, .. } => parents,
+        }
+    }
+
+    /// Get the short version of the commit hash (first 7 characters)
+    pub fn short_hash(&self) -> &str {
+        let hash = self.hash();
         &hash[..7.min(hash.len())]
     }
 }
@@ -53,6 +74,7 @@ mod tests {
             timestamp: Utc::now(),
             branch: "main".to_string(),
             hosts_using: vec!["host1".to_string(), "host2".to_string()],
+            parents: Vec::new(),
         };
 
         assert_eq!(commit_info.short_hash(), "abcdef1");
