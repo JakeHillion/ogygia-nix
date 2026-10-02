@@ -92,3 +92,15 @@ notify = { version = "7", default-features = false, features = ["macos_fsevent"]
 
 # Process utilities
 which = "7"
+
+# Nix evaluation
+bumpalo = "3"
+lasso = { version = "0.7", features = ["multi-threaded"] }
+md-5 = "0.10"
+sha1 = "0.10"
+regex = "1"
+rnix = "0.14"
+rowan = "0.16"
+
+# Custom test harnesses
+libtest-mimic = "0.8"

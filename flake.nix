@@ -54,6 +54,9 @@
               };
               nixpkgs-fmt.enable = true;
             };
+            # Equivalence test cases are Nix source whose exact layout is part
+            # of what they test.
+            settings.global.excludes = [ "src/ogygia-nix-eval/tests/cases/**" ];
           };
 
           src = lib.fileset.toSource {
@@ -62,6 +65,7 @@
               (craneLib.fileset.commonCargoSources ./.)
               ./src/ogygia-dashboard/src/web.css
               ./src/ogygia-clevis/tests/fixtures/sss.jwe
+              ./src/ogygia-nix-eval/tests/cases
             ];
           };
           inherit (craneLib.crateNameFromCargoToml { inherit src; }) version;
@@ -205,6 +209,7 @@
             # runner has neither on PATH.
             env.OGYGIA_NEBULA_CERT_BIN = "${pkgs.nebula}/bin/nebula-cert";
             env.OGYGIA_JJ_BIN = "${pkgs.jujutsu}/bin/jj";
+            env.OGYGIA_NIX_INSTANTIATE_BIN = "${pkgs.nix}/bin/nix-instantiate";
             nativeBuildInputs = commonArgs.nativeBuildInputs ++ [
               pkgs.cargo-nextest
               pkgs.zstd
@@ -285,6 +290,15 @@
             ogygia-deny = craneLib.cargoDeny {
               inherit src;
             };
+
+            # Compare ogygia-nix-eval against the pinned Nix on every case in
+            # src/ogygia-nix-eval/tests/cases, including the nixpkgs lib suites.
+            ogygia-nix-eval-equiv = craneLib.cargoTest (commonArgs // {
+              inherit cargoArtifacts;
+              cargoTestExtraArgs = "-p ogygia-nix-eval";
+              env.OGYGIA_NIX_INSTANTIATE_BIN = "${pkgs.nix}/bin/nix-instantiate";
+              env.OGYGIA_NIX_EVAL_NIXPKGS = "${nixpkgs}";
+            });
 
             ogygia-cli-config = import ./nixos/tests/cli-config.nix {
               inherit pkgs;
