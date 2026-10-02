@@ -1,0 +1,21 @@
+let l = [ 3 1 2 ]; in
+[
+  (builtins.head l)
+  (builtins.tail l)
+  (builtins.length l)
+  (builtins.elemAt l 1)
+  (builtins.elem 2 l)
+  (builtins.map (x: x * 2) l)
+  (builtins.filter (x: x > 1) l)
+  (builtins.all (x: x > 0) l)
+  (builtins.any (x: x > 2) l)
+  (builtins.concatLists [ [ 1 ] [ ] [ 2 3 ] ])
+  (builtins.concatMap (x: [ x x ]) l)
+  (builtins.foldl' (a: b: a + b) 0 l)
+  (builtins.genList (i: i * i) 5)
+  (builtins.sort builtins.lessThan l)
+  (builtins.sort (a: b: a.k < b.k) [ { k = 2; v = "a"; } { k = 1; v = "b"; } { k = 2; v = "c"; } { k = 1; v = "d"; } ])
+  (builtins.partition (x: x > 1) l)
+  (builtins.groupBy (x: if x > 1 then "big" else "small") l)
+  (builtins.genericClosure { startSet = [ { key = 1; } ]; operator = x: if x.key < 5 then [ { key = x.key + 1; } { key = x.key; } ] else [ ]; })
+]
