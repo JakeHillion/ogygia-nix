@@ -1,0 +1,12 @@
+[
+  (builtins.toJSON { b = [ 1 2.5 "x" null true ]; a = { c = "d\n\"\\"; }; })
+  (builtins.toJSON 0.1)
+  (builtins.toJSON 1.0)
+  (builtins.toJSON 1.0e20)
+  (builtins.toJSON 123456789.123)
+  (builtins.toJSON "\t\r")
+  (builtins.toJSON { outPath = "x"; })
+  (builtins.toJSON { __toString = self: "y"; })
+  (builtins.fromJSON ''{"a": [1, 2.5, "x", null, true, {"b": -3}], "c": 1e3}'')
+  (builtins.fromJSON "\"\\u00e9\"")
+]
