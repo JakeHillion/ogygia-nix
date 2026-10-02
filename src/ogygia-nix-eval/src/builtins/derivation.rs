@@ -126,7 +126,9 @@ pub fn derivation_strict<'a>(ev: &Eval<'a>, args: &[Value<'a>]) -> R<'a> {
         if ignore_nulls && matches!(ev.force(e.value)?, Value::Null) {
             continue;
         }
-        if key == "__structuredAttrs" {
+        // `__structuredAttrs = false` stays in the environment like any
+        // other attribute.
+        if key == "__structuredAttrs" && structured {
             continue;
         }
         if key == "args" {
@@ -163,7 +165,12 @@ pub fn derivation_strict<'a>(ev: &Eval<'a>, args: &[Value<'a>]) -> R<'a> {
             }
             continue;
         }
-        let (s, c) = ev.coerce_to_string(e.value, more)?;
+        let (s, c) = ev.coerce_to_string(e.value, more).map_err(|mut err| {
+            err.trace.push(format!(
+                "while evaluating attribute '{key}' of derivation '{name}'"
+            ));
+            err
+        })?;
         ctx.extend(c);
         match key {
             "builder" => drv.builder = s.clone(),
