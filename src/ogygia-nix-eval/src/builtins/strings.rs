@@ -285,11 +285,18 @@ pub fn split<'a>(ev: &Eval<'a>, args: &[Value<'a>]) -> R<'a> {
     let r = compile_regex(ev, re, false)?;
     let mut out = Vec::new();
     let mut last = 0;
-    for caps in r.captures_iter(s.s) {
+    let mut pos = 0;
+    // Like POSIX regex iteration, an empty match may directly follow a
+    // non-empty one; only after an empty match does the search move on.
+    while pos <= s.s.len() {
+        let Some(caps) = r.captures_at(s.s, pos) else {
+            break;
+        };
         let m = caps.get(0).expect("group 0 always matches");
         out.push(ev.str_val(&s.s[last..m.start()], &[]));
         out.push(captures_list(ev, &caps));
         last = m.end();
+        pos = if m.is_empty() { m.end() + 1 } else { m.end() };
     }
     out.push(ev.str_val(&s.s[last..], &[]));
     Ok(ev.list(&out))

@@ -146,9 +146,16 @@ fn run_ours(case: &Case, expr: &str) -> Result<String, String> {
 }
 
 fn run_case(case: &Case) -> Result<(), Failed> {
-    let expr = format!("{DEEP_COPY} (import {})", case.path.display());
-    let theirs = run_nix(case, &expr);
-    let ours = run_ours(case, &expr);
+    compare(
+        case,
+        &format!("{DEEP_COPY} (import {})", case.path.display()),
+    )
+}
+
+/// Evaluate `expr` with both evaluators, in the setting of `case`.
+fn compare(case: &Case, expr: &str) -> Result<(), Failed> {
+    let theirs = run_nix(case, expr);
+    let ours = run_ours(case, expr);
     match (&theirs, &ours) {
         (Ok(a), Ok(b)) if a == b => Ok(()),
         (Err(_), Err(_)) => Ok(()),
@@ -213,6 +220,7 @@ fn main() {
         })
         .collect();
     trials.extend(flake_trials(&version));
+    trials.extend(modules_trials(&version));
     libtest_mimic::run(&args, trials).exit();
 }
 
@@ -526,4 +534,143 @@ fn flake_trials(version: &Result<(), String>) -> Vec<Trial> {
         }
     }
     trials
+}
+
+/// Split a shell command line into words, honouring single and double quotes
+/// and backslash escapes. Returns `None` for constructs this does not model
+/// (expansions, substitutions).
+fn shell_words(line: &str) -> Option<Vec<String>> {
+    let mut words = Vec::new();
+    let mut cur = String::new();
+    let mut in_word = false;
+    let mut chars = line.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            '\'' => {
+                in_word = true;
+                for c in chars.by_ref() {
+                    if c == '\'' {
+                        break;
+                    }
+                    cur.push(c);
+                }
+            }
+            '"' => {
+                in_word = true;
+                while let Some(c) = chars.next() {
+                    match c {
+                        '"' => break,
+                        '\\' => match chars.next() {
+                            Some(n @ ('"' | '\\' | '$' | '`')) => cur.push(n),
+                            Some(n) => {
+                                cur.push('\\');
+                                cur.push(n);
+                            }
+                            None => return None,
+                        },
+                        '$' | '`' => return None,
+                        c => cur.push(c),
+                    }
+                }
+            }
+            '\\' => {
+                in_word = true;
+                cur.push(chars.next()?);
+            }
+            '$' | '`' => return None,
+            '#' if !in_word => break,
+            c if c.is_whitespace() => {
+                if in_word {
+                    words.push(std::mem::take(&mut cur));
+                    in_word = false;
+                }
+            }
+            c => {
+                in_word = true;
+                cur.push(c);
+            }
+        }
+    }
+    if in_word {
+        words.push(cur);
+    }
+    Some(words)
+}
+
+/// One `checkConfigOutput`/`checkConfigError` line of nixpkgs'
+/// `lib/tests/modules.sh`: an attribute and the module files to evaluate.
+struct ModulesCheck {
+    line: usize,
+    attr: String,
+    modules: Vec<String>,
+}
+
+fn modules_checks(script: &str) -> Vec<ModulesCheck> {
+    let mut out = Vec::new();
+    for (i, line) in script.lines().enumerate() {
+        let trimmed = line.trim_start();
+        let rest = trimmed.strip_prefix("STRICT_EVAL=1 ").unwrap_or(trimmed);
+        let Some(words) = shell_words(rest) else {
+            continue;
+        };
+        let [cmd, _expected, attr, modules @ ..] = words.as_slice() else {
+            continue;
+        };
+        if cmd != "checkConfigOutput" && cmd != "checkConfigError" {
+            continue;
+        }
+        if modules.is_empty() || !modules.iter().all(|m| m.starts_with("./")) {
+            continue;
+        }
+        out.push(ModulesCheck {
+            line: i + 1,
+            attr: attr.clone(),
+            modules: modules.to_vec(),
+        });
+    }
+    out
+}
+
+/// Trials for nixpkgs' module system test suite, when nixpkgs is available.
+fn modules_trials(version: &Result<(), String>) -> Vec<Trial> {
+    let Ok(nixpkgs) = std::env::var("OGYGIA_NIX_EVAL_NIXPKGS") else {
+        return Vec::new();
+    };
+    let dir = Path::new(&nixpkgs).join("lib/tests/modules");
+    let Ok(script) = std::fs::read_to_string(Path::new(&nixpkgs).join("lib/tests/modules.sh"))
+    else {
+        return Vec::new();
+    };
+    modules_checks(&script)
+        .into_iter()
+        .map(|check| {
+            let version = version.clone();
+            let dir = dir.clone();
+            let name = format!("nixpkgs/modules.sh/{}:{}", check.line, check.attr);
+            Trial::test(name, move || {
+                version?;
+                let modules = check
+                    .modules
+                    .iter()
+                    .map(|m| dir.join(m).display().to_string())
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                let attr_path = check
+                    .attr
+                    .split('.')
+                    .map(|a| format!("\"{a}\""))
+                    .collect::<Vec<_>>()
+                    .join(".");
+                let expr = format!(
+                    "{DEEP_COPY} (import {}/default.nix {{ modules = [ {modules} ]; }}).{attr_path}",
+                    dir.display()
+                );
+                let case = Case {
+                    path: dir.join("default.nix"),
+                    nix_path: Vec::new(),
+                };
+                compare(&case, &expr)
+            })
+        })
+        .collect()
 }

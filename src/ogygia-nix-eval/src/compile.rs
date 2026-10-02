@@ -221,8 +221,10 @@ impl<'a> Compiler<'a> {
                     }
                 },
                 ast::LiteralKind::Float(f) => match f.value() {
-                    Ok(v) => Expr::Float(v),
-                    Err(_) => return err(format!("invalid float at {pos}")),
+                    Ok(v) if float_in_range(v, f.syntax().text()) => Expr::Float(v),
+                    _ => {
+                        return err(format!("invalid float '{}' at {pos}", f.syntax().text()));
+                    }
                 },
                 ast::LiteralKind::Uri(u) => Expr::Str(self.lit_str(u.syntax().text().as_bytes())),
             },
@@ -884,4 +886,14 @@ fn child<T>(o: Option<T>) -> CResult<T> {
     o.ok_or_else(|| CompileError {
         msg: "syntax error: incomplete expression".into(),
     })
+}
+
+/// Whether a float literal is representable: Nix rejects literals that
+/// overflow, are subnormal, or underflow to zero from a non-zero mantissa.
+fn float_in_range(v: f64, text: &str) -> bool {
+    if !v.is_finite() || v.is_subnormal() {
+        return false;
+    }
+    let mantissa = text.split(['e', 'E']).next().unwrap_or(text);
+    v != 0.0 || !mantissa.bytes().any(|b| (b'1'..=b'9').contains(&b))
 }

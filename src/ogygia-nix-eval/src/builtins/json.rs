@@ -118,32 +118,42 @@ pub fn from_json<'a>(ev: &Eval<'a>, args: &[Value<'a>]) -> R<'a> {
         Ok(v) => v,
         Err(e) => return eval_err(format!("JSON parse error: {e}")),
     };
-    Ok(json_to_value(ev, &parsed))
+    json_to_value(ev, &parsed)
 }
 
-pub fn json_to_value<'a>(ev: &Eval<'a>, j: &serde_json::Value) -> Value<'a> {
-    match j {
+pub fn json_to_value<'a>(ev: &Eval<'a>, j: &serde_json::Value) -> R<'a> {
+    Ok(match j {
         serde_json::Value::Null => Value::Null,
         serde_json::Value::Bool(b) => Value::Bool(*b),
-        serde_json::Value::Number(n) => match n.as_i64() {
-            Some(i) => Value::Int(i),
-            None => Value::Float(n.as_f64().unwrap_or(f64::NAN)),
+        serde_json::Value::Number(n) => match (n.as_i64(), n.as_u64()) {
+            (Some(i), _) => Value::Int(i),
+            (None, Some(u)) => {
+                return eval_err(format!(
+                    "unsigned json number {u} outside of Nix integer range"
+                ));
+            }
+            (None, None) => Value::Float(n.as_f64().unwrap_or(f64::NAN)),
         },
         serde_json::Value::String(s) => ev.string(s),
         serde_json::Value::Array(items) => {
-            let items: Vec<Value<'a>> = items.iter().map(|i| json_to_value(ev, i)).collect();
+            let items = items
+                .iter()
+                .map(|i| json_to_value(ev, i))
+                .collect::<R<'a, Vec<_>>>()?;
             ev.list(&items)
         }
         serde_json::Value::Object(map) => ev.attrs(
             map.iter()
-                .map(|(k, v)| Entry {
-                    name: ev.sym(k),
-                    value: json_to_value(ev, v),
-                    pos: None,
+                .map(|(k, v)| {
+                    Ok(Entry {
+                        name: ev.sym(k),
+                        value: json_to_value(ev, v)?,
+                        pos: None,
+                    })
                 })
-                .collect(),
+                .collect::<R<'a, Vec<_>>>()?,
         ),
-    }
+    })
 }
 
 pub fn from_toml<'a>(ev: &Eval<'a>, args: &[Value<'a>]) -> R<'a> {
