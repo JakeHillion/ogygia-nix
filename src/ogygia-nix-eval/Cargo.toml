@@ -7,7 +7,12 @@ license.workspace = true
 [dependencies]
 anyhow = { workspace = true }
 bumpalo = { workspace = true }
+flate2 = { workspace = true }
 gix = { workspace = true }
+gix-pack = { workspace = true }
+lzma-rs = { workspace = true }
+reqwest = { workspace = true, features = ["blocking"] }
+tar = { workspace = true }
 hex = { workspace = true }
 lasso = { workspace = true }
 md-5 = { workspace = true }

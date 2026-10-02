@@ -76,6 +76,8 @@ pub type KeepFn<'f> = &'f dyn Fn(&str, FileType) -> Result<bool>;
 pub struct Io {
     mounts: RefCell<Vec<Mount>>,
     store_paths: RefCell<HashMap<String, String>>,
+    fetch_cache: Option<PathBuf>,
+    ignore_nix_store: bool,
 }
 
 /// `logical` relative to `root`, if it is `root` or inside it.
@@ -100,6 +102,28 @@ fn core_file(logical: &str) -> Option<&'static str> {
 }
 
 impl Io {
+    /// Keep fetched flake inputs in `dir` rather than the user's cache
+    /// directory.
+    pub fn with_fetch_cache(mut self, dir: PathBuf) -> Io {
+        self.fetch_cache = Some(dir);
+        self
+    }
+
+    /// Treat the local Nix store as empty: flake inputs are always fetched.
+    pub fn ignoring_nix_store(mut self) -> Io {
+        self.ignore_nix_store = true;
+        self
+    }
+
+    /// Whether the store path `logical` can be read from the local Nix store.
+    pub(crate) fn in_nix_store(&self, logical: &str) -> bool {
+        !self.ignore_nix_store && self.exists(logical)
+    }
+
+    pub(crate) fn fetch_cache(&self) -> Option<&Path> {
+        self.fetch_cache.as_deref()
+    }
+
     fn add_mount(&self, logical: &str, target: Target, filter: Option<HashSet<String>>) {
         let mut mounts = self.mounts.borrow_mut();
         mounts.retain(|m| m.logical != logical);

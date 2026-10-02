@@ -14,6 +14,7 @@ mod compile;
 mod context;
 mod derivation;
 mod eval;
+mod fetch;
 mod flake;
 mod io;
 mod ir;
@@ -91,15 +92,43 @@ pub struct FlakeSession<'a> {
     flake: Value<'a>,
 }
 
+/// Options for opening a flake.
+#[derive(Clone, Debug, Default)]
+pub struct FlakeOptions {
+    /// Where to keep inputs fetched because they are not in the Nix store;
+    /// defaults to `$XDG_CACHE_HOME/ogygia-nix-eval/sources`.
+    pub fetch_cache: Option<std::path::PathBuf>,
+    /// Fetch every input rather than using copies already in the local Nix
+    /// store, as on a machine without Nix.
+    pub ignore_nix_store: bool,
+}
+
 /// Open the local flake `flake_ref` (a directory, optionally prefixed with
 /// `path:` or `git+file://`) and run `f` against it on an evaluation thread.
-/// Queries made through one session share evaluation work.
+/// Queries made through one session share evaluation work. Inputs missing
+/// from the Nix store are fetched when evaluation first needs them.
 pub fn with_flake<T: Send>(
     flake_ref: &str,
     f: impl for<'a> FnOnce(&FlakeSession<'a>) -> T + Send,
 ) -> anyhow::Result<T> {
+    with_flake_options(flake_ref, &FlakeOptions::default(), f)
+}
+
+/// [`with_flake`] with explicit options.
+pub fn with_flake_options<T: Send>(
+    flake_ref: &str,
+    options: &FlakeOptions,
+    f: impl for<'a> FnOnce(&FlakeSession<'a>) -> T + Send,
+) -> anyhow::Result<T> {
     run_with_stack(|| {
-        let ctx = Context::new(Io::default());
+        let mut io = Io::default();
+        if let Some(dir) = &options.fetch_cache {
+            io = io.with_fetch_cache(dir.clone());
+        }
+        if options.ignore_nix_store {
+            io = io.ignoring_nix_store();
+        }
+        let ctx = Context::new(io);
         let bump = bumpalo::Bump::new();
         let settings = Settings {
             current_system: None,

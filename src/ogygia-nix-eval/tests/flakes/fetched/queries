@@ -1,0 +1,14 @@
+fromTarball
+fromGit
+tarballInfo
+gitInfo
+rawInfo
+tarballOutPath
+gitOutPath
+rawOutPath
+rawText
+rawFiles
+rawSub
+tool
+gitFiles
+gitLink

@@ -192,8 +192,8 @@ fn locked_source(io: &Io, locked: &serde_json::Map<String, Json>) -> Result<Sour
         .ok_or_else(|| anyhow!("locked {ty} input has no narHash"))?;
     let (_, digest) = store::parse_hash(nar_hash, Some("sha256"))?;
     let out_path = store::source_path(&digest, "source");
-    if !io.exists(&out_path) {
-        bail!("{ty} input {out_path} is not in the Nix store; fetch it with `nix flake archive`");
+    if !io.in_nix_store(&out_path) {
+        crate::fetch::fetch(io, locked, &out_path, &digest)?;
     }
     let mut info = BTreeMap::new();
     if let Some(t) = locked.get("lastModified").and_then(Json::as_i64) {
@@ -431,12 +431,6 @@ pub fn lock(io: &Io, source: Source) -> Result<LockedFlake> {
         sources: BTreeMap::new(),
     };
     flake.sources.insert(root, source);
-    let keys: Vec<String> = flake.nodes.keys().cloned().collect();
-    for key in keys {
-        flake
-            .resolve_source(io, &key)
-            .with_context(|| format!("locating flake input '{key}'"))?;
-    }
     Ok(flake)
 }
 
@@ -524,8 +518,14 @@ impl<'a> Eval<'a> {
 
     fn build_flake_node(&self, id: usize, key: &'a str) -> R<'a> {
         let (src, is_flake, inputs) = {
-            let flakes = self.flakes.borrow();
-            let flake = &flakes[id];
+            let mut flakes = self.flakes.borrow_mut();
+            let flake = &mut flakes[id];
+            // Inputs are located, and fetched if need be, only once
+            // evaluation reaches them.
+            let src = flake
+                .resolve_source(&self.ctx.io, key)
+                .with_context(|| format!("locating flake input '{key}'"))
+                .map_err(to_eval_err)?;
             let node = &flake.nodes[key];
             let inputs = node
                 .inputs
@@ -533,7 +533,7 @@ impl<'a> Eval<'a> {
                 .map(|name| Ok((name.clone(), flake.input_node(key, name)?)))
                 .collect::<Result<Vec<_>>>()
                 .map_err(to_eval_err)?;
-            (flake.sources[key].clone(), node.flake, inputs)
+            (src, node.flake, inputs)
         };
         let info = source_info(self, &src);
         let info_attrs = self.force_attrs(info)?;

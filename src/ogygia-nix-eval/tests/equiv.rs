@@ -278,11 +278,35 @@ fn copy_tree(from: &Path, to: &Path) -> std::io::Result<()> {
 }
 
 /// Copy a fixture into a fresh directory set up for `mode`.
-fn stage_flake(fixture: &Path, mode: FlakeMode, dest: &Path) -> Result<(), String> {
+fn stage_flake(fixture: &Path, mode: FlakeMode, work: &Path, dest: &Path) -> Result<(), String> {
     copy_tree(fixture, dest).map_err(|e| format!("copying fixture: {e}"))?;
     // Fixture files in the source tree may be read-only (the Nix store).
     let _ = Command::new("chmod").args(["-R", "u+w"]).arg(dest).status();
     std::fs::remove_file(dest.join("queries")).map_err(|e| e.to_string())?;
+    let deps = dest.join("deps");
+    if deps.exists() {
+        stage_deps(&deps, work)?;
+        std::fs::remove_dir_all(&deps).map_err(|e| e.to_string())?;
+        let flake_nix = dest.join("flake.nix");
+        let text = std::fs::read_to_string(&flake_nix).map_err(|e| e.to_string())?;
+        std::fs::write(
+            &flake_nix,
+            text.replace("@WORK@", &work.display().to_string()),
+        )
+        .map_err(|e| e.to_string())?;
+        // Inputs are locked, and so copied, into Nix's private store only.
+        let out = nix_flakes_command(&work.join("store"))
+            .args(["flake", "lock"])
+            .arg(format!("path:{}", dest.display()))
+            .output()
+            .map_err(|e| format!("running nix flake lock: {e}"))?;
+        if !out.status.success() {
+            return Err(format!(
+                "nix flake lock failed: {}",
+                String::from_utf8_lossy(&out.stderr)
+            ));
+        }
+    }
     match mode {
         FlakeMode::Path => {}
         FlakeMode::Git | FlakeMode::GitDirty => {
@@ -295,6 +319,36 @@ fn stage_flake(fixture: &Path, mode: FlakeMode, dest: &Path) -> Result<(), Strin
                 let mut text = std::fs::read_to_string(&flake_nix).map_err(|e| e.to_string())?;
                 text.push_str("# uncommitted\n");
                 std::fs::write(&flake_nix, text).map_err(|e| e.to_string())?;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Turn each `deps/<name>` of a fixture into an input in `work`: a Git
+/// repository at `work/git` for `git`, else a tarball `work/<name>.tar.gz`
+/// with a single top-level directory.
+fn stage_deps(deps: &Path, work: &Path) -> Result<(), String> {
+    for entry in std::fs::read_dir(deps).map_err(|e| e.to_string())? {
+        let entry = entry.map_err(|e| e.to_string())?;
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if name == "git" {
+            let repo = work.join("git");
+            copy_tree(&entry.path(), &repo).map_err(|e| e.to_string())?;
+            run_git(&repo, &["init", "-q"])?;
+            run_git(&repo, &["add", "-A"])?;
+            run_git(&repo, &["commit", "-q", "-m", "dependency"])?;
+        } else {
+            let status = Command::new("tar")
+                .arg("-C")
+                .arg(deps)
+                .arg("-czf")
+                .arg(work.join(format!("{name}.tar.gz")))
+                .arg(&name)
+                .status()
+                .map_err(|e| format!("running tar: {e}"))?;
+            if !status.success() {
+                return Err(format!("tar failed for {name}"));
             }
         }
     }
@@ -325,12 +379,8 @@ fn parse_query(line: &str) -> Query {
     }
 }
 
-fn nix_eval_flake(
-    flake_ref: &str,
-    store: &Path,
-    attr: &str,
-    apply: Option<&str>,
-) -> Result<String, String> {
+/// The pinned `nix` command, with flakes enabled and a private store at `store`.
+fn nix_flakes_command(store: &Path) -> Command {
     let nix = Path::new(&nix_instantiate()).with_file_name("nix");
     let mut cmd = Command::new(if nix.is_absolute() {
         nix.into_os_string()
@@ -349,8 +399,18 @@ fn nix_eval_flake(
         .args(["--option", "flake-registry", ""])
         .args(["--option", "use-registries", "false"])
         .arg("--store")
-        .arg(format!("local?root={}", store.display()))
-        .args(["eval", "--json", "--no-write-lock-file"])
+        .arg(format!("local?root={}", store.display()));
+    cmd
+}
+
+fn nix_eval_flake(
+    flake_ref: &str,
+    store: &Path,
+    attr: &str,
+    apply: Option<&str>,
+) -> Result<String, String> {
+    let mut cmd = nix_flakes_command(store);
+    cmd.args(["eval", "--json", "--no-write-lock-file"])
         .arg(format!("{flake_ref}#{attr}"));
     if let Some(apply) = apply {
         cmd.args(["--apply", apply]);
@@ -370,7 +430,7 @@ fn run_flake(fixture: &Path, mode: FlakeMode) -> Result<(), Failed> {
     ));
     let _ = std::fs::remove_dir_all(&work);
     let dir = work.join("src");
-    stage_flake(fixture, mode, &dir)?;
+    stage_flake(fixture, mode, &work, &dir)?;
     let flake_ref = match mode {
         FlakeMode::Path => format!("path:{}", dir.display()),
         FlakeMode::Git | FlakeMode::GitDirty => format!("git+file://{}", dir.display()),
@@ -382,18 +442,23 @@ fn run_flake(fixture: &Path, mode: FlakeMode) -> Result<(), Failed> {
         .map(parse_query)
         .collect();
 
-    let ours: Vec<Result<String, String>> = ogygia_nix_eval::with_flake(&flake_ref, |session| {
-        queries
-            .iter()
-            .map(|q| {
-                session
-                    .eval_json(&q.attr, q.apply.as_deref())
-                    .map(|v| v.to_string())
-                    .map_err(|e| format!("{e:#}"))
-            })
-            .collect()
-    })
-    .map_err(|e| format!("opening flake: {e:#}"))?;
+    let options = ogygia_nix_eval::FlakeOptions {
+        fetch_cache: Some(work.join("fetch-cache")),
+        ..Default::default()
+    };
+    let ours: Vec<Result<String, String>> =
+        ogygia_nix_eval::with_flake_options(&flake_ref, &options, |session| {
+            queries
+                .iter()
+                .map(|q| {
+                    session
+                        .eval_json(&q.attr, q.apply.as_deref())
+                        .map(|v| v.to_string())
+                        .map_err(|e| format!("{e:#}"))
+                })
+                .collect()
+        })
+        .map_err(|e| format!("opening flake: {e:#}"))?;
 
     let mut failures = Vec::new();
     for (q, ours) in queries.iter().zip(ours) {

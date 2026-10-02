@@ -97,6 +97,10 @@ which = "7"
 bumpalo = "3"
 lasso = { version = "0.7", features = ["multi-threaded"] }
 gix = { version = "0.88", default-features = false, features = ["sha1", "revision", "index"] }
+gix-pack = { version = "0.75", default-features = false, features = ["streaming-input", "sha1"] }
+flate2 = "1"
+lzma-rs = "0.3"
+tar = "0.4"
 md-5 = "0.10"
 sha1 = "0.10"
 regex = "1"
