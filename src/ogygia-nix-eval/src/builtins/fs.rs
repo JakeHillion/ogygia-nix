@@ -97,6 +97,10 @@ pub fn find_file<'a>(ev: &Eval<'a>, args: &[Value<'a>]) -> R<'a> {
     let name = ev.force_str_no_ctx(args[1])?;
     let name = String::from_utf8_lossy(name).into_owned();
     let syms = &ev.ctx.syms;
+    // Nix serves `<nix/...>` itself, ahead of the search path.
+    if name.starts_with("nix/") {
+        return Ok(ev.path_val(&format!("<{name}>")));
+    }
     for entry in search {
         let entry = ev.force_attrs(*entry)?;
         let prefix = match entry.get(syms.prefix) {
@@ -126,8 +130,12 @@ pub fn find_file<'a>(ev: &Eval<'a>, args: &[Value<'a>]) -> R<'a> {
             return Ok(ev.path_val(&candidate));
         }
     }
-    eval_err(format!(
-        "file '{name}' was not found in the Nix search path (add it using $NIX_PATH or -I)"
+    // Nix reports this as a thrown error, so `tryEval` catches it.
+    Err(error(
+        ErrorKind::Throw,
+        format!(
+            "file '{name}' was not found in the Nix search path (add it using $NIX_PATH or -I)"
+        ),
     ))
 }
 

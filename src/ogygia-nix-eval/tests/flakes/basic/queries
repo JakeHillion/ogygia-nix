@@ -1,0 +1,17 @@
+files
+subFiles
+data
+selfKeys
+outputKeys
+hasRev
+info
+type
+copied
+pkg
+shadowed
+legacy
+nested.attr."with.dot"
+data --apply d: d.answer + 1
+data.list --apply builtins.length
+outPathIsStore
+selfOutPath

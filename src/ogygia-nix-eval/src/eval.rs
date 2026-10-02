@@ -72,6 +72,10 @@ pub struct Eval<'a> {
     /// Derivations created in this session, with their modulo hashes, by
     /// `.drv` path.
     pub(crate) drvs: RefCell<HashMap<String, (crate::derivation::Derivation, [u8; 32])>>,
+    /// Flakes opened in this session.
+    pub(crate) flakes: RefCell<Vec<crate::flake::LockedFlake>>,
+    /// Flake values by (flake, lock node).
+    pub(crate) flake_cache: RefCell<HashMap<(usize, String), Value<'a>>>,
     pub(crate) empty_attrs: &'a Attrs<'a>,
     pub(crate) empty_list: &'a List<'a>,
 }
@@ -105,6 +109,8 @@ impl<'a> Eval<'a> {
             import_cache: RefCell::new(HashMap::new()),
             depth: Cell::new(0),
             drvs: RefCell::new(HashMap::new()),
+            flakes: RefCell::new(Vec::new()),
+            flake_cache: RefCell::new(HashMap::new()),
             empty_attrs: bump.alloc(Attrs { entries: &[] }),
             empty_list: bump.alloc(List { items: &[] }),
         };
@@ -781,6 +787,11 @@ impl<'a> Eval<'a> {
                             slot.set(v);
                         }
                         None => match formal.default {
+                            // A default naming another formal (or the `@` binding)
+                            // may refer to a slot that is not filled in yet.
+                            Some(d @ Expr::Var(0, _)) => {
+                                slot.set(self.thunk(ThunkState::Expr(d, env)))
+                            }
                             Some(d) => slot.set(self.lazy(d, env)),
                             None => {
                                 return eval_err(format!(
@@ -1266,5 +1277,18 @@ pub fn as_f64(v: Value<'_>) -> f64 {
         Value::Int(i) => i as f64,
         Value::Float(f) => f,
         _ => 0.0,
+    }
+}
+
+impl Eval<'_> {
+    /// Write every derivation created in this session to `dir` as a `.drv`
+    /// file named after its store path, for comparison with Nix's.
+    pub fn dump_derivations(&self, dir: &std::path::Path) -> std::io::Result<()> {
+        std::fs::create_dir_all(dir)?;
+        for (path, (drv, _)) in self.drvs.borrow().iter() {
+            let name = path.rsplit('/').next().unwrap_or(path);
+            std::fs::write(dir.join(name), drv.unparse(&drv.input_drvs))?;
+        }
+        Ok(())
     }
 }

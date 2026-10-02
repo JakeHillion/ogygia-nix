@@ -59,13 +59,27 @@
             settings.global.excludes = [ "src/ogygia-nix-eval/tests/cases/**" ];
           };
 
+          workspaceFiles = lib.fileset.unions [
+            (craneLib.fileset.commonCargoSources ./.)
+            ./src/ogygia-dashboard/src/web.css
+            ./src/ogygia-clevis/tests/fixtures/sss.jwe
+            ./src/ogygia-nix-eval/src/corepkgs
+          ];
+
           src = lib.fileset.toSource {
             root = ./.;
+            fileset = workspaceFiles;
+          };
+
+          # The equivalence tests also read their cases, flake fixtures, and the
+          # NixOS modules some cases evaluate.
+          equivSrc = lib.fileset.toSource {
+            root = ./.;
             fileset = lib.fileset.unions [
-              (craneLib.fileset.commonCargoSources ./.)
-              ./src/ogygia-dashboard/src/web.css
-              ./src/ogygia-clevis/tests/fixtures/sss.jwe
+              workspaceFiles
               ./src/ogygia-nix-eval/tests/cases
+              ./src/ogygia-nix-eval/tests/flakes
+              ./nixos
             ];
           };
           inherit (craneLib.crateNameFromCargoToml { inherit src; }) version;
@@ -209,6 +223,7 @@
             # runner has neither on PATH.
             env.OGYGIA_NEBULA_CERT_BIN = "${pkgs.nebula}/bin/nebula-cert";
             env.OGYGIA_JJ_BIN = "${pkgs.jujutsu}/bin/jj";
+            env.OGYGIA_GIT_BIN = "${pkgs.git}/bin/git";
             env.OGYGIA_NIX_INSTANTIATE_BIN = "${pkgs.nix}/bin/nix-instantiate";
             nativeBuildInputs = commonArgs.nativeBuildInputs ++ [
               pkgs.cargo-nextest
@@ -292,9 +307,13 @@
             };
 
             # Compare ogygia-nix-eval against the pinned Nix on every case in
-            # src/ogygia-nix-eval/tests/cases, including the nixpkgs lib suites.
+            # src/ogygia-nix-eval/tests/{cases,flakes}, including the nixpkgs
+            # lib suites and NixOS configurations.
             ogygia-nix-eval-equiv = craneLib.cargoTest (commonArgs // {
               inherit cargoArtifacts;
+              src = equivSrc;
+              nativeBuildInputs = commonArgs.nativeBuildInputs ++ [ pkgs.git ];
+              env.OGYGIA_GIT_BIN = "${pkgs.git}/bin/git";
               cargoTestExtraArgs = "-p ogygia-nix-eval";
               env.OGYGIA_NIX_INSTANTIATE_BIN = "${pkgs.nix}/bin/nix-instantiate";
               env.OGYGIA_NIX_EVAL_NIXPKGS = "${nixpkgs}";

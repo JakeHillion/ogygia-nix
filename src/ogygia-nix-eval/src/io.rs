@@ -88,6 +88,17 @@ fn relative<'p>(logical: &'p str, root: &str) -> Option<&'p str> {
         .strip_prefix('/')
 }
 
+/// Files Nix provides itself, reachable as `<nix/NAME>`.
+const CORE_FILES: &[(&str, &str)] =
+    &[("<nix/fetchurl.nix>", include_str!("corepkgs/fetchurl.nix"))];
+
+fn core_file(logical: &str) -> Option<&'static str> {
+    CORE_FILES
+        .iter()
+        .find(|(name, _)| *name == logical)
+        .map(|(_, text)| *text)
+}
+
 impl Io {
     fn add_mount(&self, logical: &str, target: Target, filter: Option<HashSet<String>>) {
         let mut mounts = self.mounts.borrow_mut();
@@ -139,6 +150,9 @@ impl Io {
     }
 
     pub fn read(&self, logical: &str) -> Result<Vec<u8>> {
+        if let Some(text) = core_file(logical) {
+            return Ok(text.as_bytes().to_vec());
+        }
         let p = self.physical(logical)?;
         std::fs::read(&p).with_context(|| format!("reading file '{logical}'"))
     }
@@ -151,6 +165,9 @@ impl Io {
     /// The type of `logical` without following a final symlink, or `None` if
     /// it does not exist.
     pub fn file_type(&self, logical: &str) -> Option<FileType> {
+        if core_file(logical).is_some() {
+            return Some(FileType::Regular);
+        }
         let p = self.physical(logical).ok()?;
         std::fs::symlink_metadata(&p)
             .ok()
@@ -159,6 +176,9 @@ impl Io {
 
     /// Whether `logical` exists, following symlinks.
     pub fn exists(&self, logical: &str) -> bool {
+        if core_file(logical).is_some() {
+            return true;
+        }
         match self.physical(logical) {
             Ok(p) => p.exists() || std::fs::symlink_metadata(&p).is_ok(),
             Err(_) => false,

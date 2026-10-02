@@ -1,0 +1,22 @@
+{
+  "nodes": {
+    "nested": {
+      "locked": {
+        "path": "./nested",
+        "type": "path"
+      },
+      "original": {
+        "path": "./nested",
+        "type": "path"
+      },
+      "parent": []
+    },
+    "root": {
+      "inputs": {
+        "nested": "nested"
+      }
+    }
+  },
+  "root": "root",
+  "version": 7
+}
