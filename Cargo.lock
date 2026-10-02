@@ -2894,6 +2894,7 @@ dependencies = [
  "futures",
  "hostname",
  "humantime",
+ "ogygia-nix-eval",
  "ogygia-nixutils",
  "ogygia-updated",
  "reqwest",

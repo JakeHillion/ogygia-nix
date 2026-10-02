@@ -12,10 +12,10 @@ use chrono::DateTime;
 use chrono::TimeDelta;
 use chrono::Utc;
 use clap::Args;
-use ogygia_nixutils::Nix;
 
 use super::config::Config;
 use super::flake_eval;
+use super::flake_eval::Evaluator;
 use super::nebula_cert;
 use super::nebula_cert::Cert;
 use super::nebula_cert::SignArgs;
@@ -46,6 +46,9 @@ pub struct RekeyArgs {
     /// Flake reference; defaults to the current directory.
     #[arg(long, default_value = ".")]
     pub flake: String,
+    /// How to evaluate the flake.
+    #[arg(long, value_enum, default_value_t)]
+    pub evaluator: Evaluator,
 }
 
 pub fn run(args: &RekeyArgs) -> Result<()> {
@@ -71,13 +74,7 @@ async fn async_run(args: &RekeyArgs) -> Result<()> {
         None
     };
 
-    let nix = Nix::default();
-
-    let targets: Vec<String> = if let Some(host) = &args.host {
-        vec![host.clone()]
-    } else {
-        flake_eval::list_hosts(&nix, &args.flake).await?
-    };
+    let infos = flake_eval::hosts(args.evaluator, &args.flake, args.host.as_deref()).await?;
 
     let on_disk = read_cert_dir(&config.cert_dir).await?;
     let now = Utc::now();
@@ -86,8 +83,8 @@ async fn async_run(args: &RekeyArgs) -> Result<()> {
     let mut signed = 0usize;
     let mut skipped = 0usize;
 
-    for host in &targets {
-        let info = flake_eval::host_info(&nix, &args.flake, host).await?;
+    for info in &infos {
+        let host = &info.host;
         if !info.enabled {
             tracing::debug!(%host, "skipping (nebula disabled)");
             skipped += 1;

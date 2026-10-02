@@ -190,8 +190,9 @@ in
 
     # Read-only derived values. `ipv4` is exposed for consumers like
     # `ogygia.irisd` that need this host's Nebula address as a bare IP;
-    # `spec`/`specHash`/`certPath` are surfaced for the `ogygia nebula` CLI
-    # via `nix eval`. All null when the host has no topology record.
+    # `spec`/`specHash`/`certPath` are surfaced for the `ogygia nebula` CLI,
+    # which evaluates them from the flake. All null when the host has no
+    # topology record.
     ipv4 = lib.mkOption {
       type = lib.types.nullOr lib.types.str;
       readOnly = true;

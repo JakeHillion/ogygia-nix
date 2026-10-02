@@ -13,6 +13,7 @@ irisd = [
     "dep:ogygia-nixutils",
 ]
 nebula = [
+    "dep:ogygia-nix-eval",
     "dep:tempfile",
     "dep:which",
     "dep:serde_json",
@@ -41,6 +42,7 @@ reqwest = { workspace = true, features = ["json"], optional = true }
 serde_json = { workspace = true, optional = true }
 futures = { workspace = true, optional = true }
 ogygia-nixutils = { path = "../ogygia-nixutils", optional = true }
+ogygia-nix-eval = { path = "../ogygia-nix-eval", optional = true }
 
 # Optional deps for nebula feature
 tempfile = { workspace = true, optional = true }

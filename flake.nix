@@ -116,9 +116,9 @@
             ];
           };
 
-          # ogygia's default `irisd` and `updated` features depend on the
-          # ogygia-nixutils and ogygia-updated path crates, so their sources
-          # must be present when building it.
+          # ogygia's default `irisd`, `nebula` and `updated` features depend on
+          # the ogygia-nixutils, ogygia-nix-eval and ogygia-updated path crates,
+          # so their sources must be present when building it.
           ogygiaSrc = lib.fileset.toSource {
             root = ./.;
             fileset = lib.fileset.unions [
@@ -126,6 +126,8 @@
               ./Cargo.lock
               (craneLib.fileset.commonCargoSources ./src/ogygia)
               (craneLib.fileset.commonCargoSources ./src/ogygia-nixutils)
+              (craneLib.fileset.commonCargoSources ./src/ogygia-nix-eval)
+              ./src/ogygia-nix-eval/src/corepkgs
               (craneLib.fileset.commonCargoSources ./src/ogygia-updated)
             ];
           };
