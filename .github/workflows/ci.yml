@@ -61,11 +61,226 @@ jobs:
           --test-threads num-cpus \
           --no-fail-fast
 
+  macos-app:
+    runs-on: xcode-27
+
+    # Pushes to main release, one at a time so the appcast cannot be
+    # overwritten by an older build finishing late; a newer queued release
+    # replaces an older pending one.
+    concurrency:
+      group: ${{ github.event_name == 'push' && 'macos-app-release' || format('macos-app-{0}', github.ref) }}
+      cancel-in-progress: false
+
+    env:
+      APP: ogygia-macos/Applications/Ogygia.app
+      ASSETS_BUCKET: ogygia-assets
+      ASSETS_URL: https://assets.ogygia.dev
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      with:
+        fetch-depth: 0
+
+    # No S3 cache step here: this job adds Xcode to the store, and Xcode's
+    # licence forbids pushing it to the public cache.
+    - name: Install Nix
+      uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24 # v31
+      with:
+        extra_nix_config: |
+          accept-flake-config = true
+          extra-substituters = https://nixcache.jakehillion.me
+          extra-trusted-public-keys = nixcache.jakehillion.me-1:HQsjYdrcs3ilS/ngtlbTQXU4Xfsm+va5NN7yoK0wKMg=
+          sandbox = true
+          # The host paths ogygia-macos declares in __impureHostDeps.
+          allowed-impure-host-deps = /System/Library /bin/sh /dev /usr/lib /usr/share/firmlinks /Library/Developer/PrivateFrameworks /Library/Apple/System/Library/PrivateFrameworks /Library/Preferences/com.apple.dt.Xcode.plist /usr/bin/codesign /usr/bin/touch
+
+    # Xcode cannot be downloaded without an Apple ID, so the runner's copy
+    # is added under the hash nixpkgs pins. A runner image whose Xcode
+    # differs from the pin fails here rather than building with it.
+    - name: Add Xcode to the Nix store
+      run: |
+        expected="$(nix eval --raw .#packages.aarch64-darwin.ogygia-macos.xcode.outPath)"
+        cp -cR /Applications/Xcode_27.app "$RUNNER_TEMP/Xcode.app"
+        added="$(nix-store --add-fixed --recursive sha256 "$RUNNER_TEMP/Xcode.app")"
+        rm -rf "$RUNNER_TEMP/Xcode.app"
+        if [ "$added" != "$expected" ]; then
+          echo "::error::Runner Xcode is $added, but the pin expects $expected"
+          exit 1
+        fi
+
+    - name: Build
+      run: nix build -L --out-link ogygia-macos .#packages.aarch64-darwin.ogygia-macos
+
+    # The build number is the flake's commit count, which falls back to 0
+    # when history is missing; Sparkle would then never offer an update.
+    - name: Check the build number
+      run: test "$(plutil -extract CFBundleVersion raw "$APP/Contents/Info.plist")" = "$(git rev-list --count HEAD)"
+
+    # Everything below runs outside the Nix sandbox: it needs the signing
+    # identity, Apple's notary service and the asset bucket, none of which
+    # belong in a derivation. It only signs and publishes what Nix built.
+    - name: Import the Developer ID certificate
+      if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+      env:
+        MACOS_CERT_P12_BASE64: ${{ secrets.MACOS_CERT_P12_BASE64 }}
+        MACOS_CERT_PASSWORD: ${{ secrets.MACOS_CERT_PASSWORD }}
+      run: |
+        keychain="$RUNNER_TEMP/signing.keychain-db"
+        keychain_password="$(openssl rand -hex 32)"
+        security create-keychain -p "$keychain_password" "$keychain"
+        security set-keychain-settings -lut 21600 "$keychain"
+        security unlock-keychain -p "$keychain_password" "$keychain"
+        echo "$MACOS_CERT_P12_BASE64" | base64 --decode > "$RUNNER_TEMP/cert.p12"
+        security import "$RUNNER_TEMP/cert.p12" -k "$keychain" -P "$MACOS_CERT_PASSWORD" -f pkcs12 -T /usr/bin/codesign
+        rm "$RUNNER_TEMP/cert.p12"
+        security set-key-partition-list -S apple-tool:,apple: -k "$keychain_password" "$keychain" > /dev/null
+        # Keep the existing search list; its entries are space-free paths.
+        # shellcheck disable=SC2046
+        security list-keychains -d user -s "$keychain" $(security list-keychains -d user | tr -d '"')
+
+    - name: Sign
+      if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+      run: |
+        # The store copy is read-only; sign a writable copy.
+        mkdir -p "$RUNNER_TEMP/release"
+        ditto "$APP" "$RUNNER_TEMP/release/Ogygia.app"
+        chmod -R u+w "$RUNNER_TEMP/release/Ogygia.app"
+        app="$RUNNER_TEMP/release/Ogygia.app"
+
+        if [ -z "$(plutil -extract SUPublicEDKey raw "$app/Contents/Info.plist")" ]; then
+          echo "::error::SPARKLE_PUBLIC_ED_KEY is empty, so this build could never verify an update"
+          exit 1
+        fi
+
+        # Inside out, as Sparkle documents for apps outside the App Sandbox.
+        sign() { codesign --force --sign "Developer ID Application" --options runtime --timestamp "$@"; }
+        sparkle="$app/Contents/Frameworks/Sparkle.framework"
+        sign "$sparkle/Versions/B/XPCServices/Installer.xpc"
+        sign --preserve-metadata=entitlements "$sparkle/Versions/B/XPCServices/Downloader.xpc"
+        sign "$sparkle/Versions/B/Autoupdate"
+        sign "$sparkle/Versions/B/Updater.app"
+        sign "$sparkle"
+        sign --entitlements app/macos/Ogygia/Ogygia.entitlements "$app"
+        codesign --verify --deep --strict --verbose=2 "$app"
+
+    - name: Notarise
+      if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+      env:
+        ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
+        ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
+        ASC_KEY_P8: ${{ secrets.ASC_KEY_P8 }}
+      run: |
+        app="$RUNNER_TEMP/release/Ogygia.app"
+        key="$RUNNER_TEMP/AuthKey.p8"
+        echo "$ASC_KEY_P8" > "$key"
+        ditto -c -k --keepParent "$app" "$RUNNER_TEMP/notarise.zip"
+        xcrun notarytool submit "$RUNNER_TEMP/notarise.zip" \
+          --key "$key" --key-id "$ASC_KEY_ID" --issuer "$ASC_ISSUER_ID" --wait
+        rm "$key" "$RUNNER_TEMP/notarise.zip"
+        xcrun stapler staple "$app"
+        spctl --assess --type execute --verbose=2 "$app"
+
+    # The image holds the stapled app beside a link to /Applications, so
+    # installing is a drag from one to the other. It is notarised in its
+    # own right, so Gatekeeper accepts it when opened, while the app
+    # inside keeps its own ticket for when it runs from Applications.
+    - name: Make the disk image
+      if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+      env:
+        ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
+        ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
+        ASC_KEY_P8: ${{ secrets.ASC_KEY_P8 }}
+      run: |
+        app="$RUNNER_TEMP/release/Ogygia.app"
+        plist="$app/Contents/Info.plist"
+        version="$(plutil -extract CFBundleShortVersionString raw "$plist")"
+        build="$(plutil -extract CFBundleVersion raw "$plist")"
+        dmg="$RUNNER_TEMP/release/Ogygia-$version-$build.dmg"
+
+        stage="$RUNNER_TEMP/dmg"
+        mkdir "$stage"
+        ditto "$app" "$stage/Ogygia.app"
+        ln -s /Applications "$stage/Applications"
+        # APFS with lzfse, which Sparkle recommends for updating from images.
+        diskutil image create from --format ULFO --volumeName Ogygia "$stage" "$dmg"
+        rm -rf "$stage"
+
+        codesign --sign "Developer ID Application" --timestamp "$dmg"
+        key="$RUNNER_TEMP/AuthKey.p8"
+        echo "$ASC_KEY_P8" > "$key"
+        xcrun notarytool submit "$dmg" \
+          --key "$key" --key-id "$ASC_KEY_ID" --issuer "$ASC_ISSUER_ID" --wait
+        rm "$key"
+        xcrun stapler staple "$dmg"
+        spctl --assess --type open --context context:primary-signature --verbose=2 "$dmg"
+
+    - name: Publish
+      if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+      env:
+        SPARKLE_ED_PRIVATE_KEY: ${{ secrets.SPARKLE_ED_PRIVATE_KEY }}
+        AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+        AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+        AWS_DEFAULT_REGION: auto
+        AWS_ENDPOINT_URL: https://28e45df51086264c6d9cf2b5e6ecc190.r2.cloudflarestorage.com
+        # R2 does not accept every checksum newer AWS clients send by default.
+        AWS_REQUEST_CHECKSUM_CALCULATION: when_required
+        AWS_RESPONSE_CHECKSUM_VALIDATION: when_required
+      run: |
+        app="$RUNNER_TEMP/release/Ogygia.app"
+        plist="$app/Contents/Info.plist"
+        version="$(plutil -extract CFBundleShortVersionString raw "$plist")"
+        build="$(plutil -extract CFBundleVersion raw "$plist")"
+        minimum="$(plutil -extract LSMinimumSystemVersion raw "$plist")"
+        archive="Ogygia-$version-$build.dmg"
+        # Releases are stored by content, so a name never changes what it
+        # holds and can be cached forever. A rebuild of the same commit
+        # signs and notarises afresh, so reusing a versioned name would let
+        # caches serve bytes that no longer match the feed's signature.
+        object="macos/$(shasum -a 256 "$RUNNER_TEMP/release/$archive" | cut -d' ' -f1).dmg"
+
+        tools="$(nix build --no-link --print-out-paths .#packages.aarch64-darwin.ogygia-macos.sparkleTools)"
+        signature="$(echo "$SPARKLE_ED_PRIVATE_KEY" | "$tools/bin/sign_update" --ed-key-file - -p "$RUNNER_TEMP/release/$archive")"
+        length="$(stat -f %z "$RUNNER_TEMP/release/$archive")"
+
+        # One channel, so the feed only ever lists the newest build; Sparkle
+        # never offers an update older than what is installed.
+        cat > "$RUNNER_TEMP/appcast.xml" <<XML
+        <?xml version="1.0" encoding="utf-8"?>
+        <rss version="2.0" xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle">
+          <channel>
+            <title>Ogygia</title>
+            <item>
+              <title>Ogygia $version ($build)</title>
+              <pubDate>$(LC_ALL=C date -u "+%a, %d %b %Y %H:%M:%S +0000")</pubDate>
+              <sparkle:version>$build</sparkle:version>
+              <sparkle:shortVersionString>$version</sparkle:shortVersionString>
+              <sparkle:minimumSystemVersion>$minimum</sparkle:minimumSystemVersion>
+              <enclosure url="$ASSETS_URL/$object" length="$length" type="application/x-apple-diskimage" sparkle:edSignature="$signature"/>
+            </item>
+          </channel>
+        </rss>
+        XML
+        # The feed is signed too, so the bucket is trusted for neither.
+        echo "$SPARKLE_ED_PRIVATE_KEY" | "$tools/bin/sign_update" --ed-key-file - "$RUNNER_TEMP/appcast.xml"
+
+        aws() { nix run --inputs-from . nixpkgs#awscli2 -- "$@"; }
+        # The image must exist before the feed points at it.
+        aws s3 cp "$RUNNER_TEMP/release/$archive" "s3://$ASSETS_BUCKET/$object" \
+          --content-type application/x-apple-diskimage --cache-control "public, max-age=31536000, immutable"
+        # A fixed name to link downloads to; it always holds the newest build.
+        aws s3 cp "$RUNNER_TEMP/release/$archive" "s3://$ASSETS_BUCKET/macos/Ogygia.dmg" \
+          --content-type application/x-apple-diskimage --cache-control "public, max-age=300"
+        aws s3 cp "$RUNNER_TEMP/appcast.xml" "s3://$ASSETS_BUCKET/macos/appcast.xml" \
+          --content-type application/xml --cache-control "public, max-age=300"
+
   all-checks:
-    needs: nix
+    needs: [nix, macos-app]
     if: always()
     runs-on: ubuntu-24.04
 
     steps:
     - name: Require every build and test job to pass
-      run: test "${{ needs.nix.result }}" = success
+      run: |
+        test "${{ needs.nix.result }}" = success
+        test "${{ needs.macos-app.result }}" = success
