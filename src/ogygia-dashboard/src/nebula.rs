@@ -1,13 +1,16 @@
 //! Nebula certificate-expiry alerts: a background producer feeding the generic
 //! [`crate::alerts`] subsystem. Compiled only with the `nebula` feature.
 //!
-//! Two independent facts feed a host's expiry alert, and they come from
+//! Three independent facts feed a host's expiry alert, and they come from
 //! different points in history:
 //!
 //!   * the certificate's real `notAfter` — a property of the *deployed* commit,
 //!     since that's the cert the host is actually pinned to. We `nix eval` the
 //!     host's `ogygia.nebula.certPath` at that commit, then read the expiry out
 //!     of the signed cert with `nebula-cert print`.
+//!   * the same `notAfter` for the cert on the main tip — what a deploy would
+//!     give the host today. Comparing the two separates a cert the CA still
+//!     has to sign from one the host has merely not picked up yet.
 //!   * `validitySecs` — the *policy* the alert thresholds scale against. That's
 //!     a property of *now*, so it's evaluated on the main tip; changing it takes
 //!     effect immediately rather than waiting for every host to redeploy.
@@ -115,7 +118,17 @@ struct HostExpiry {
     not_after: Option<DateTime<Utc>>,
     source: Option<CommitState>,
     validity_secs: Option<u64>,
+    /// The cert the main tip would deploy, when it could be evaluated and
+    /// nebula is still enabled for the host there.
+    tip: Option<TipCert>,
     note: Option<String>,
+}
+
+/// The certificate sitting in the repository right now, for one host.
+#[derive(Debug, Clone, Copy)]
+struct TipCert {
+    oid: Oid,
+    not_after: DateTime<Utc>,
 }
 
 /// Memoized eval results, persisted across version bumps so a change only
@@ -206,7 +219,11 @@ async fn resolve_host(
                 relevant = true;
                 tracing::warn!(%host, %oid, "nebula cert eval failed: {e:#}");
                 note.get_or_insert_with(|| {
-                    format!("could not evaluate certificate at commit {}", short(oid))
+                    format!(
+                        "The cert at commit {} could not be evaluated. The dashboard log has \
+                         the nix eval error.",
+                        short(oid)
+                    )
                 });
             }
         }
@@ -215,6 +232,21 @@ async fn resolve_host(
     if !relevant {
         return None; // not a nebula host on either pinned commit
     }
+
+    // What deploying the main tip would give this host. A failure here only
+    // costs us the ability to narrow the remediation, so it degrades to `None`
+    // rather than a user-visible note.
+    let tip = match main_tip {
+        Some(oid) => match resolve_pin(repo, oid, host, memo).await {
+            Ok(Some(not_after)) => Some(TipCert { oid, not_after }),
+            Ok(None) => None, // nebula disabled at the tip
+            Err(e) => {
+                tracing::warn!(%host, %oid, "nebula tip cert eval failed: {e:#}");
+                None
+            }
+        },
+        None => None,
+    };
 
     // validitySecs comes from the main tip (current policy). Fall back to the
     // pinned commit that gave us the earliest expiry, then give up.
@@ -233,6 +265,7 @@ async fn resolve_host(
         not_after: earliest.map(|(na, _, _)| na),
         source: earliest.map(|(_, s, _)| s),
         validity_secs,
+        tip,
         note,
     })
 }
@@ -292,7 +325,11 @@ async fn resolve_validity(
             Err(e) => tracing::warn!(%host, %oid, "nebula validitySecs eval failed: {e:#}"),
         }
     }
-    note.get_or_insert_with(|| "could not determine certificate validity policy".to_string());
+    note.get_or_insert_with(|| {
+        "The cert validity policy could not be determined, so expiry cannot be judged. The \
+         dashboard log has the nix eval error."
+            .to_string()
+    });
     None
 }
 
@@ -309,45 +346,115 @@ fn alert_for(expiry: &HostExpiry, now: DateTime<Utc>) -> Option<Alert> {
         // Couldn't fully resolve — surface it rather than hide the host.
         return expiry.note.as_ref().map(|note| Alert {
             level: AlertLevel::Info,
-            title: format!("Nebula cert for {} could not be evaluated", expiry.host),
+            title: format!("Nebula cert on {} could not be evaluated", expiry.host),
             detail: note.clone(),
             hosts: vec![expiry.host.clone()],
         });
     };
 
-    let remaining = (not_after - now).num_seconds();
+    let level = level_for(not_after, now, validity)?; // healthy runway -> silent
+    let remedy = Remedy::classify(expiry.tip, now, validity);
+
     let source = expiry
         .source
         .map(|s| s.as_ref().to_owned())
         .unwrap_or_else(|| "deployed".to_owned());
-    let (relative, absolute) = crate::web::format_relative_date(not_after);
-    let when = format!("{relative} ({absolute})");
-    let remediation = "Renew with `ogygia nebula rekey`, then deploy.";
-
-    if remaining <= 0 {
-        return Some(Alert {
-            level: AlertLevel::Critical,
-            title: format!("Nebula cert for {} has EXPIRED", expiry.host),
-            detail: format!("Certificate ({source}) expired {when}. {remediation}"),
-            hosts: vec![expiry.host.clone()],
-        });
-    }
-
-    let fraction = remaining as f64 / validity as f64;
-    let level = if fraction < WARNING_FRACTION {
-        AlertLevel::Warning
-    } else if fraction < INFO_FRACTION {
-        AlertLevel::Info
+    let expired = not_after <= now;
+    let state = if expired {
+        "has expired"
     } else {
-        return None; // healthy runway
+        "expires soon"
+    };
+
+    // The title carries the call to action, so it survives into anything that
+    // shows titles alone; the detail carries the dates and the command.
+    let title = match remedy.call_to_action() {
+        Some(cta) => format!("Nebula cert on {} {state}: {cta}", expiry.host),
+        None => format!("Nebula cert on {} {state}", expiry.host),
+    };
+
+    let fact = format!(
+        "The {source} generation's cert {verb} {at}.",
+        verb = if expired { "expired" } else { "expires" },
+        at = when(not_after),
+    );
+    let action = match remedy {
+        Remedy::Rekey => format!(
+            "No newer cert on main: run `ogygia nebula rekey --host {host}`, then commit and \
+             deploy.",
+            host = expiry.host,
+        ),
+        Remedy::Deploy(tip) => format!(
+            "A newer cert on main expires {tip_when}. Deploy {commit}; no rekey needed.",
+            tip_when = when(tip.not_after),
+            commit = short(tip.oid),
+        ),
+        Remedy::Unknown => format!(
+            "The cert on main could not be read. Check whether main is already rekeyed; if \
+             not, run `ogygia nebula rekey --host {host}`.",
+            host = expiry.host,
+        ),
     };
 
     Some(Alert {
         level,
-        title: format!("Nebula cert for {} expires soon", expiry.host),
-        detail: format!("Certificate ({source}) expires {when}. {remediation}"),
+        title,
+        detail: format!("{fact} {action}"),
         hosts: vec![expiry.host.clone()],
     })
+}
+
+/// What the operator actually has to do, derived by asking whether the cert in
+/// the repository would raise an alert of its own.
+#[derive(Clone, Copy)]
+enum Remedy {
+    /// The tip's cert is expiring too, usually because it is the same cert, so
+    /// a deploy alone would fix nothing.
+    Rekey,
+    /// The tip's cert is healthy: the host only has to deploy it.
+    Deploy(TipCert),
+    /// The tip's cert could not be read, so advise both steps.
+    Unknown,
+}
+
+impl Remedy {
+    fn classify(tip: Option<TipCert>, now: DateTime<Utc>, validity: u64) -> Self {
+        match tip {
+            Some(tip) if level_for(tip.not_after, now, validity).is_none() => Remedy::Deploy(tip),
+            Some(_) => Remedy::Rekey,
+            None => Remedy::Unknown,
+        }
+    }
+
+    fn call_to_action(self) -> Option<&'static str> {
+        match self {
+            Remedy::Rekey => Some("rekey needed"),
+            Remedy::Deploy(_) => Some("deploy needed"),
+            Remedy::Unknown => None,
+        }
+    }
+}
+
+/// The severity a certificate's remaining runway earns, or `None` when it has
+/// enough life left to stay quiet.
+fn level_for(not_after: DateTime<Utc>, now: DateTime<Utc>, validity: u64) -> Option<AlertLevel> {
+    let remaining = (not_after - now).num_seconds();
+    if remaining <= 0 {
+        return Some(AlertLevel::Critical);
+    }
+    let fraction = remaining as f64 / validity as f64;
+    if fraction < WARNING_FRACTION {
+        Some(AlertLevel::Warning)
+    } else if fraction < INFO_FRACTION {
+        Some(AlertLevel::Info)
+    } else {
+        None
+    }
+}
+
+fn when(at: DateTime<Utc>) -> String {
+    let (relative, absolute) = crate::web::format_relative_date(at);
+    format!("{relative} ({absolute})")
 }
 
 fn short(oid: Oid) -> String {
@@ -490,17 +597,28 @@ async fn nix_eval<T: DeserializeOwned>(
 mod tests {
     use super::*;
 
+    /// A host whose tip cert couldn't be read, so the remedy is unknown.
     fn host_expiry(remaining_secs: i64, validity: u64) -> HostExpiry {
         HostExpiry {
             host: "host1.example.com".to_string(),
             not_after: Some(Utc::now() + chrono::Duration::seconds(remaining_secs)),
             source: Some(CommitState::Current),
             validity_secs: Some(validity),
+            tip: None,
             note: None,
         }
     }
 
+    fn with_tip(mut expiry: HostExpiry, tip_remaining_secs: i64) -> HostExpiry {
+        expiry.tip = Some(TipCert {
+            oid: Oid::from_str("0123456789abcdef0123456789abcdef01234567").unwrap(),
+            not_after: Utc::now() + chrono::Duration::seconds(tip_remaining_secs),
+        });
+        expiry
+    }
+
     const VALIDITY: u64 = 90 * 86400;
+    const HEALTHY: i64 = (VALIDITY as i64) * 90 / 100;
 
     #[test]
     fn healthy_cert_has_no_alert() {
@@ -529,7 +647,82 @@ mod tests {
         let e = host_expiry(-1, VALIDITY);
         let alert = alert_for(&e, Utc::now()).unwrap();
         assert_eq!(alert.level, AlertLevel::Critical);
-        assert!(alert.title.contains("EXPIRED"));
+        assert!(alert.title.contains("has expired"));
+    }
+
+    #[test]
+    fn renewed_tip_asks_for_a_deploy() {
+        let e = with_tip(host_expiry((VALIDITY as i64) * 40 / 100, VALIDITY), HEALTHY);
+        let alert = alert_for(&e, Utc::now()).unwrap();
+        assert_eq!(alert.level, AlertLevel::Info);
+        assert!(alert.title.contains("expires soon: deploy needed"));
+        assert!(alert.detail.contains("no rekey needed"));
+        assert!(alert.detail.contains("Deploy 0123456789ab"));
+    }
+
+    #[test]
+    fn the_remedy_does_not_change_severity() {
+        // Whether a deploy is achievable depends on reachability the dashboard
+        // cannot see: a host that pulls its config over the overlay is
+        // stranded by an expired cert. Severity describes the cert.
+        for remaining in [
+            -1,
+            (VALIDITY as i64) * 20 / 100,
+            (VALIDITY as i64) * 40 / 100,
+        ] {
+            let base = host_expiry(remaining, VALIDITY);
+            let level = |e: HostExpiry| alert_for(&e, Utc::now()).map(|a| a.level);
+            let rekey = level(with_tip(base.clone(), remaining));
+            let deploy = level(with_tip(base.clone(), HEALTHY));
+            assert_eq!(rekey, deploy, "remaining={remaining}");
+            assert_eq!(rekey, level(base), "remaining={remaining}");
+        }
+    }
+
+    #[test]
+    fn aging_tip_asks_for_a_rekey() {
+        // The tip cert is itself inside the info window, so a deploy alone
+        // wouldn't fix anything: the CA has to sign.
+        let e = with_tip(
+            host_expiry((VALIDITY as i64) * 20 / 100, VALIDITY),
+            (VALIDITY as i64) * 40 / 100,
+        );
+        let alert = alert_for(&e, Utc::now()).unwrap();
+        assert_eq!(alert.level, AlertLevel::Warning);
+        assert!(alert.title.contains("expires soon: rekey needed"));
+        assert!(
+            alert
+                .detail
+                .contains("ogygia nebula rekey --host host1.example.com")
+        );
+    }
+
+    #[test]
+    fn expired_with_renewed_tip_still_asks_for_a_deploy() {
+        let e = with_tip(host_expiry(-1, VALIDITY), HEALTHY);
+        let alert = alert_for(&e, Utc::now()).unwrap();
+        assert_eq!(alert.level, AlertLevel::Critical);
+        assert!(alert.title.contains("has expired: deploy needed"));
+        assert!(alert.detail.contains("cert expired"));
+    }
+
+    #[test]
+    fn unknown_tip_advises_both_steps() {
+        let e = host_expiry((VALIDITY as i64) * 20 / 100, VALIDITY);
+        let alert = alert_for(&e, Utc::now()).unwrap();
+        assert_eq!(alert.level, AlertLevel::Warning);
+        assert!(alert.detail.contains("ogygia nebula rekey --host"));
+        assert!(alert.detail.contains("The cert on main could not be read"));
+    }
+
+    #[test]
+    fn healthy_tip_does_not_alert_on_its_own() {
+        // A healthy deployed cert stays silent whatever the tip says.
+        let e = with_tip(
+            host_expiry((VALIDITY as i64) * 60 / 100, VALIDITY),
+            (VALIDITY as i64) * 10 / 100,
+        );
+        assert!(alert_for(&e, Utc::now()).is_none());
     }
 
     #[test]
@@ -539,6 +732,7 @@ mod tests {
             not_after: None,
             source: None,
             validity_secs: None,
+            tip: None,
             note: Some("could not evaluate".to_string()),
         };
         assert_eq!(alert_for(&e, Utc::now()).unwrap().level, AlertLevel::Info);
@@ -551,6 +745,7 @@ mod tests {
             not_after: None,
             source: None,
             validity_secs: None,
+            tip: None,
             note: None,
         };
         assert!(alert_for(&e, Utc::now()).is_none());

@@ -427,6 +427,7 @@ h1 {
 .alert-info {
     background: #ddf4ff;
     border-color: #b6e3ff;
+    border-left-color: #0969da;
 }
 
 .alert-info .alert-level {
@@ -437,6 +438,7 @@ h1 {
 .alert-warning {
     background: #fff8c5;
     border-color: #fcd34d;
+    border-left-color: #d97706;
 }
 
 .alert-warning .alert-level {
@@ -447,6 +449,7 @@ h1 {
 .alert-critical {
     background: #ffebe9;
     border-color: #ffcecb;
+    border-left-color: #cf222e;
 }
 
 .alert-critical .alert-level {
