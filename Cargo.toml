@@ -111,5 +111,5 @@ rowan = "0.16"
 libtest-mimic = "0.8"
 
 # Fuzzing
-arbitrary = "1"
+libc = "0.2"
 libfuzzer-sys = "0.4"

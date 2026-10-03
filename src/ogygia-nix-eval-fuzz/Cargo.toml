@@ -9,8 +9,9 @@ publish = false
 cargo-fuzz = true
 
 [dependencies]
-arbitrary = { workspace = true }
+libc = { workspace = true }
 libfuzzer-sys = { workspace = true }
+rnix = { workspace = true }
 ogygia-nix-eval = { path = "../ogygia-nix-eval" }
 
 [[bin]]

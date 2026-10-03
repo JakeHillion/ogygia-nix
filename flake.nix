@@ -263,8 +263,38 @@
             installPhaseCommand = ''
               install -D target/${pkgs.stdenv.hostPlatform.rust.rustcTarget}/release/differential \
                 $out/bin/ogygia-nix-eval-fuzz-differential
+              mkdir -p $out/share
+              ln -s ${fuzzSeeds} $out/share/ogygia-nix-eval-fuzz
             '';
           });
+
+          # Real Nix code for the fuzzer to start from: our equivalence cases,
+          # nixpkgs' lib, and rnix's parser tests. The dictionary adds the
+          # name of every builtin of the pinned Nix.
+          fuzzSeeds =
+            let
+              lock = builtins.fromTOML (builtins.readFile ./Cargo.lock);
+              rnix = craneLib.downloadCargoPackage
+                (lib.findFirst (p: p.name == "rnix") null lock.package);
+            in
+            pkgs.runCommand "ogygia-nix-eval-fuzz-seeds"
+              { nativeBuildInputs = [ pkgs.nix pkgs.jq ]; }
+              ''
+                mkdir -p $out/seeds
+                find ${./src/ogygia-nix-eval/tests/cases} ${nixpkgs}/lib \
+                  ${rnix}/test_data/parser -name '*.nix' -print0 |
+                  while IFS= read -r -d "" f; do
+                    # Named by content, so duplicates are kept once.
+                    seed=$out/seeds/$(sha1sum < "$f" | cut -c1-40)
+                    [ -e "$seed" ] || cp "$f" "$seed"
+                  done
+
+                export HOME=$TMPDIR NIX_STATE_DIR=$TMPDIR/state
+                cat ${./src/ogygia-nix-eval-fuzz/nix.dict} > $out/nix.dict
+                nix-instantiate --eval --json --readonly-mode --store dummy:// \
+                  --expr 'builtins.attrNames builtins' |
+                  jq -r '.[] | "\"\(.)\""' >> $out/nix.dict
+              '';
 
         in
         {

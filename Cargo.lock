@@ -3051,9 +3051,10 @@ dependencies = [
 name = "ogygia-nix-eval-fuzz"
 version = "0.1.0"
 dependencies = [
- "arbitrary",
+ "libc",
  "libfuzzer-sys",
  "ogygia-nix-eval",
+ "rnix",
 ]
 
 [[package]]
