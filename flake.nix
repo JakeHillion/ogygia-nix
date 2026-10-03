@@ -247,10 +247,29 @@
             '';
           });
 
+          # The ogygia-nix-eval differential fuzzer, instrumented by cargo-fuzz.
+          # Run it with libFuzzer's flags and a corpus directory.
+          ogygia-nix-eval-fuzz = craneLib.mkCargoDerivation (commonArgs // {
+            pname = "ogygia-nix-eval-fuzz";
+            inherit version;
+            cargoArtifacts = null;
+            doInstallCargoArtifacts = false;
+            env.OGYGIA_NIX_INSTANTIATE_BIN = "${pkgs.nix}/bin/nix-instantiate";
+            nativeBuildInputs = commonArgs.nativeBuildInputs ++ [ pkgs.cargo-fuzz ];
+            buildPhaseCargoCommand = ''
+              cargo fuzz build --sanitizer none --release \
+                --fuzz-dir src/ogygia-nix-eval-fuzz differential
+            '';
+            installPhaseCommand = ''
+              install -D target/${pkgs.stdenv.hostPlatform.rust.rustcTarget}/release/differential \
+                $out/bin/ogygia-nix-eval-fuzz-differential
+            '';
+          });
+
         in
         {
           packages = {
-            inherit ogygia ogygia-irisd ogygia-hostinfod ogygia-dashboard ogygia-updated ogygia-clevis ogygia-nextest-archive;
+            inherit ogygia ogygia-irisd ogygia-hostinfod ogygia-dashboard ogygia-updated ogygia-clevis ogygia-nextest-archive ogygia-nix-eval-fuzz;
             default = ogygia;
           };
 
@@ -258,6 +277,7 @@
             inputsFrom = [ cargoArtifacts ];
             packages = with pkgs; [
               etcd # for etcdctl
+              cargo-fuzz # for src/ogygia-nix-eval-fuzz
               jujutsu # jj, for the ogygia-updated change-id tests
               nebula # nebula-cert, for the nebula round-trip test
               rust-analyzer

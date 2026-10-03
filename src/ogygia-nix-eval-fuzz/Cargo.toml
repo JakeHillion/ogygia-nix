@@ -1,0 +1,21 @@
+[package]
+name = "ogygia-nix-eval-fuzz"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+arbitrary = { workspace = true }
+libfuzzer-sys = { workspace = true }
+ogygia-nix-eval = { path = "../ogygia-nix-eval" }
+
+[[bin]]
+name = "differential"
+path = "fuzz_targets/differential.rs"
+test = false
+doc = false
+bench = false
