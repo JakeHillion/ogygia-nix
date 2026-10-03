@@ -247,10 +247,62 @@
             '';
           });
 
+          # The ogygia-nix-eval differential fuzzer, instrumented by cargo-fuzz.
+          # `ogygia-nix-eval-fuzz run DIR` fuzzes until stopped; see its --help.
+          ogygia-nix-eval-fuzz = craneLib.mkCargoDerivation (commonArgs // {
+            pname = "ogygia-nix-eval-fuzz";
+            inherit version;
+            cargoArtifacts = null;
+            doInstallCargoArtifacts = false;
+            env = {
+              OGYGIA_NIX_INSTANTIATE_BIN = "${pkgs.nix}/bin/nix-instantiate";
+              OGYGIA_NIX_EVAL_FUZZ_SEEDS = "${fuzzSeeds}";
+              OGYGIA_NIX_EVAL_FUZZ_REV = self.rev or self.dirtyRev or "unknown";
+            };
+            nativeBuildInputs = commonArgs.nativeBuildInputs ++ [ pkgs.cargo-fuzz ];
+            buildPhaseCargoCommand = ''
+              cargo fuzz build --sanitizer none --release \
+                --fuzz-dir src/ogygia-nix-eval-fuzz differential
+            '';
+            installPhaseCommand = ''
+              install -D target/${pkgs.stdenv.hostPlatform.rust.rustcTarget}/release/differential \
+                $out/bin/ogygia-nix-eval-fuzz
+            '';
+            meta.mainProgram = "ogygia-nix-eval-fuzz";
+          });
+
+          # Real Nix code for the fuzzer to start from: our equivalence cases,
+          # nixpkgs' lib, and rnix's parser tests. The dictionary adds the
+          # name of every builtin of the pinned Nix.
+          fuzzSeeds =
+            let
+              lock = builtins.fromTOML (builtins.readFile ./Cargo.lock);
+              rnix = craneLib.downloadCargoPackage
+                (lib.findFirst (p: p.name == "rnix") null lock.package);
+            in
+            pkgs.runCommand "ogygia-nix-eval-fuzz-seeds"
+              { nativeBuildInputs = [ pkgs.nix pkgs.jq ]; }
+              ''
+                mkdir -p $out/seeds
+                find ${./src/ogygia-nix-eval/tests/cases} ${nixpkgs}/lib \
+                  ${rnix}/test_data/parser -name '*.nix' -print0 |
+                  while IFS= read -r -d "" f; do
+                    # Named by content, so duplicates are kept once.
+                    seed=$out/seeds/$(sha1sum < "$f" | cut -c1-40)
+                    [ -e "$seed" ] || cp "$f" "$seed"
+                  done
+
+                export HOME=$TMPDIR NIX_STATE_DIR=$TMPDIR/state
+                cat ${./src/ogygia-nix-eval-fuzz/nix.dict} > $out/nix.dict
+                nix-instantiate --eval --json --readonly-mode --store dummy:// \
+                  --expr 'builtins.attrNames builtins' |
+                  jq -r '.[] | "\"\(.)\""' >> $out/nix.dict
+              '';
+
         in
         {
           packages = {
-            inherit ogygia ogygia-irisd ogygia-hostinfod ogygia-dashboard ogygia-updated ogygia-clevis ogygia-nextest-archive;
+            inherit ogygia ogygia-irisd ogygia-hostinfod ogygia-dashboard ogygia-updated ogygia-clevis ogygia-nextest-archive ogygia-nix-eval-fuzz;
             default = ogygia;
           };
 
@@ -258,6 +310,7 @@
             inputsFrom = [ cargoArtifacts ];
             packages = with pkgs; [
               etcd # for etcdctl
+              cargo-fuzz # for src/ogygia-nix-eval-fuzz
               jujutsu # jj, for the ogygia-updated change-id tests
               nebula # nebula-cert, for the nebula round-trip test
               rust-analyzer

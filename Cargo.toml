@@ -109,3 +109,7 @@ rowan = "0.16"
 
 # Custom test harnesses
 libtest-mimic = "0.8"
+
+# Fuzzing
+libc = "0.2"
+libfuzzer-sys = "0.4"
