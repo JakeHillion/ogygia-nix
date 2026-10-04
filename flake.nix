@@ -223,6 +223,7 @@
             env.OGYGIA_NEBULA_CERT_BIN = "${pkgs.nebula}/bin/nebula-cert";
             env.OGYGIA_JJ_BIN = "${pkgs.jujutsu}/bin/jj";
             env.OGYGIA_NIX_INSTANTIATE_BIN = "${pkgs.nix}/bin/nix-instantiate";
+            env.OGYGIA_NIX_EVAL_DEFAULT_INCLUDE_PATH = "${nixIncludePath}";
             nativeBuildInputs = commonArgs.nativeBuildInputs ++ [
               pkgs.cargo-nextest
               pkgs.zstd
@@ -252,6 +253,7 @@
             doInstallCargoArtifacts = false;
             env = {
               OGYGIA_NIX_INSTANTIATE_BIN = "${pkgs.nix}/bin/nix-instantiate";
+              OGYGIA_NIX_EVAL_DEFAULT_INCLUDE_PATH = "${nixIncludePath}";
               OGYGIA_NIX_EVAL_FUZZ_SEEDS = "${fuzzSeeds}";
               OGYGIA_NIX_EVAL_FUZZ_REV = self.rev or self.dirtyRev or "unknown";
             };
@@ -266,6 +268,18 @@
             '';
             meta.mainProgram = "ogygia-nix-eval-fuzz";
           });
+
+          # The files Nix ships with itself, which `<nix/...>` paths find under
+          # nix/. They are Nix's own (LGPL-2.1), so ogygia-nix-eval refers to
+          # them by path rather than including them.
+          nixIncludePath = pkgs.runCommand "nix-include-path" { meta.license = lib.licenses.lgpl21; } ''
+            mkdir -p $out/nix
+            # Nix embeds the file as a raw string literal opened on the line
+            # before it (nix-meson-build-support/generate-header), so what it
+            # serves starts with a newline.
+            { echo; cat ${pkgs.nix.src}/src/libexpr/fetchurl.nix; } > $out/nix/fetchurl.nix
+            cp ${pkgs.nix.src}/COPYING $out/
+          '';
 
           # Real Nix code for the fuzzer to start from: our equivalence cases,
           # nixpkgs' lib, and rnix's parser tests. The dictionary adds the
@@ -304,6 +318,7 @@
 
           devShells.default = craneLib.devShell {
             inputsFrom = [ cargoArtifacts ];
+            OGYGIA_NIX_EVAL_DEFAULT_INCLUDE_PATH = "${nixIncludePath}";
             packages = with pkgs; [
               etcd # for etcdctl
               cargo-fuzz # for src/ogygia-nix-eval-fuzz
@@ -364,6 +379,7 @@
               inherit cargoArtifacts;
               cargoTestExtraArgs = "-p ogygia-nix-eval -p ogygia-nix-eval-fuzz";
               env.OGYGIA_NIX_INSTANTIATE_BIN = "${pkgs.nix}/bin/nix-instantiate";
+              env.OGYGIA_NIX_EVAL_DEFAULT_INCLUDE_PATH = "${nixIncludePath}";
               env.OGYGIA_NIX_EVAL_NIXPKGS = "${nixpkgs}";
             });
 
