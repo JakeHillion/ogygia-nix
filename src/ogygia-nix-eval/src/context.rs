@@ -28,10 +28,10 @@ pub struct Context {
     pub syms: Syms,
     pub io: Io,
     globals: HashSet<Sym>,
-    /// Compiled files by path. The `'static` is a lie told to the type
+    /// Compiled files by path and purity. The `'static` is a lie told to the type
     /// system: the expressions live in `arena` and are only handed out with
     /// the lifetime of a borrow of `self`.
-    files: RefCell<HashMap<String, ExprRef<'static>>>,
+    files: RefCell<HashMap<(String, bool), ExprRef<'static>>>,
     /// Compiled `builtins.match` patterns by source.
     pub(crate) match_regexes: RefCell<HashMap<Vec<u8>, Rc<regex::bytes::Regex>>>,
     /// Compiled `builtins.split` patterns by source.
@@ -101,36 +101,44 @@ impl Context {
         })
     }
 
-    /// Compile an expression that did not come from a file.
-    pub fn compile_str(&self, text: &str, base_dir: &str) -> Result<ExprRef<'_>, CompileError> {
-        compile::compile(self, self.source(None, text), base_dir, None)
+    /// Compile an expression that did not come from a file. `pure` rejects
+    /// what Nix rejects while parsing in pure evaluation mode.
+    pub fn compile_str(
+        &self,
+        text: &str,
+        base_dir: &str,
+        pure: bool,
+    ) -> Result<ExprRef<'_>, CompileError> {
+        compile::compile(self, self.source(None, text), base_dir, pure, None)
     }
 
     /// Compile the file at the logical path `path`, which must be a file, not
-    /// a directory. Repeated calls return the same expression.
-    pub fn compile_file(&self, path: &str) -> Result<ExprRef<'_>> {
-        if let Some(e) = self.files.borrow().get(path) {
+    /// a directory, as [`compile_str`](Self::compile_str) does. Repeated calls
+    /// return the same expression.
+    pub fn compile_file(&self, path: &str, pure: bool) -> Result<ExprRef<'_>> {
+        let key = (path.to_owned(), pure);
+        if let Some(e) = self.files.borrow().get(&key) {
             return Ok(e);
         }
         let text = self.io.read_to_string(path)?;
         let dir = crate::path::dir_of(path);
-        let expr = compile::compile(self, self.source(Some(path), &text), dir, None)
+        let expr = compile::compile(self, self.source(Some(path), &text), dir, pure, None)
             .map_err(|e| anyhow::anyhow!("{}", e.msg))?;
         // SAFETY: `expr` lives in `self.arena`, which is neither reset nor
         // dropped while `self` is alive, and the cache only returns it with the
         // lifetime of a borrow of `self`.
         let stored: ExprRef<'static> = unsafe { std::mem::transmute(expr) };
-        self.files.borrow_mut().insert(path.to_owned(), stored);
+        self.files.borrow_mut().insert(key, stored);
         Ok(expr)
     }
 
     /// Compile Nix source that ships with the evaluator, once per context.
     pub fn compile_internal(&self, name: &str, text: &str) -> Result<ExprRef<'_>, CompileError> {
-        let key = format!("<nix/{name}>");
+        let key = (format!("<nix/{name}>"), true);
         if let Some(e) = self.files.borrow().get(&key) {
             return Ok(e);
         }
-        let expr = compile::compile(self, self.source(Some(&key), text), "/", None)?;
+        let expr = compile::compile(self, self.source(Some(&key.0), text), "/", true, None)?;
         // SAFETY: as in `compile_file`.
         let stored: ExprRef<'static> = unsafe { std::mem::transmute(expr) };
         self.files.borrow_mut().insert(key, stored);
@@ -139,10 +147,15 @@ impl Context {
 
     /// Compile a file with extra names in scope (`scopedImport`). Not cached:
     /// the names differ per call.
-    pub fn compile_file_scoped(&self, path: &str, names: &[Sym]) -> Result<ExprRef<'_>> {
+    pub fn compile_file_scoped(
+        &self,
+        path: &str,
+        pure: bool,
+        names: &[Sym],
+    ) -> Result<ExprRef<'_>> {
         let text = self.io.read_to_string(path)?;
         let dir = crate::path::dir_of(path);
-        compile::compile(self, self.source(Some(path), &text), dir, Some(names))
+        compile::compile(self, self.source(Some(path), &text), dir, pure, Some(names))
             .map_err(|e| anyhow::anyhow!("{}", e.msg))
     }
 }

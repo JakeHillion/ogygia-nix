@@ -51,15 +51,18 @@ struct Compiler<'a> {
     source: &'a Source<'a>,
     /// Directory relative path literals are resolved against.
     base_dir: &'a str,
+    pure: bool,
     scopes: Vec<Scope>,
 }
 
 /// Parse and compile `source`. `extra_scope` names are bound in an outermost
-/// frame (`scopedImport`).
+/// frame (`scopedImport`). In `pure` mode, `~/` paths are a compile error, as
+/// Nix rejects them while parsing.
 pub fn compile<'a>(
     ctx: &'a Context,
     source: &'a Source<'a>,
     base_dir: &str,
+    pure: bool,
     extra_scope: Option<&[Sym]>,
 ) -> CResult<ExprRef<'a>> {
     let parse = rnix::Root::parse(source.text);
@@ -91,6 +94,7 @@ pub fn compile<'a>(
         ctx,
         source,
         base_dir: ctx.alloc_str(base_dir),
+        pure,
         scopes: Vec::new(),
     };
     if let Some(names) = extra_scope {
@@ -500,6 +504,11 @@ impl<'a> Compiler<'a> {
                 InterpolPart::Literal(l) => {
                     let text = l.text();
                     if i == 0 {
+                        if l.is_home() && self.pure {
+                            return err(format!(
+                                "the path '{text}' can not be resolved in pure mode at {pos}"
+                            ));
+                        }
                         let resolved = self.resolve_path_literal(text, l.is_home());
                         let path = self.ctx.alloc(PathV(self.ctx.alloc_str(&resolved)));
                         out.push(self.leak(Expr::Path(path)));
