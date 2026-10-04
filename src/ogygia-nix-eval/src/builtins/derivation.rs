@@ -247,8 +247,18 @@ pub fn derivation_strict<'a>(ev: &Eval<'a>, args: &[Value<'a>]) -> R<'a> {
             return eval_err("multiple outputs are not supported in fixed-output derivations");
         }
         let algo = output_hash_algo.filter(|a| !a.is_empty());
-        let (algo, bytes) = crate::store::parse_hash(&hash, algo.as_deref())
-            .map_err(|e| error(ErrorKind::Eval, format!("{e:#}")))?;
+        let (algo, bytes) = if hash.is_empty() {
+            let Some(algo) = algo else {
+                return eval_err("empty hash requires explicit hash algorithm");
+            };
+            let Some(size) = crate::store::hash_size(&algo) else {
+                return eval_err(format!("unknown hash algorithm '{algo}'"));
+            };
+            (algo, vec![0; size])
+        } else {
+            crate::store::parse_hash(&hash, algo.as_deref())
+                .map_err(|e| error(ErrorKind::Eval, format!("{e:#}")))?
+        };
         let path = crate::store::fixed_output_path(recursive, &algo, &bytes, &name);
         drv.env.insert("out".to_owned(), path.clone().into_bytes());
         drv.outputs.insert(
