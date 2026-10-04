@@ -50,7 +50,7 @@ enum Scope {
 struct Compiler<'a> {
     ctx: &'a Context,
     source: &'a Source<'a>,
-    /// Offsets of the spaces [`separate_division`] inserted.
+    /// Offsets of the spaces [`separate_tokens`] inserted.
     spaces: Vec<u32>,
     /// Directory relative path literals are resolved against.
     base_dir: &'a str,
@@ -69,7 +69,7 @@ pub fn compile<'a>(
     extra_scope: Option<&[Sym]>,
 ) -> CResult<ExprRef<'a>> {
     let text = end_comments_at_cr(source.text);
-    let (text, spaces) = separate_division(&text);
+    let (text, spaces) = separate_tokens(&text);
     let pos = |offset: rnix::TextSize| Pos {
         source,
         offset: source_offset(&spaces, u32::from(offset)),
@@ -189,34 +189,28 @@ fn end_comments_at_cr(text: &str) -> Cow<'_, str> {
     }
 }
 
-/// rnix lexes `a/` followed by a character that cannot continue a path, as in
-/// `a/(b)` or `a/"b"`, as a path with a trailing slash, but Nix only lexes a
-/// path when a path character or `${` follows the `/`, so this is `a / ...`.
-/// Inserts a space before each such `/`, retokenising after each as the text
-/// after it changes, and returns the offsets of the spaces in the result.
-fn separate_division(text: &str) -> (Cow<'_, str>, Vec<u32>) {
+/// Inserts a space wherever rnix lexes one token but Nix lexes two,
+/// retokenising after each as the text after it changes, and returns the
+/// offsets of the spaces in the result.
+fn separate_tokens(text: &str) -> (Cow<'_, str>, Vec<u32>) {
     let mut text = Cow::Borrowed(text);
     let mut spaces = Vec::new();
-    if !text.contains('/') {
+    if !text.contains(['/', '.']) {
         return (text, spaces);
     }
     loop {
         let mut start = 0;
         let mut prev = None;
-        let slash = rnix::tokenize(&text).find_map(|(kind, s)| {
+        let split = rnix::tokenize(&text).find_map(|(kind, s)| {
             let at = start;
             start += s.len();
-            // A path continued after an interpolation, as in `./a${b}c/`,
-            // has a trailing slash in Nix too.
-            let continues_path = prev == Some(rnix::SyntaxKind::TOKEN_INTERPOL_END);
+            let after_interpol = prev == Some(rnix::SyntaxKind::TOKEN_INTERPOL_END);
             prev = Some(kind);
-            (kind == rnix::SyntaxKind::TOKEN_ERROR
-                && !continues_path
-                && !s.starts_with('~')
-                && s.find('/') == Some(s.len() - 1))
-            .then_some(at + s.len() - 1)
+            split_division(kind, s, after_interpol)
+                .or_else(|| split_number(kind, s))
+                .map(|i| at + i)
         });
-        match slash {
+        match split {
             Some(i) => {
                 text.to_mut().insert(i, ' ');
                 spaces.push(i as u32);
@@ -226,7 +220,63 @@ fn separate_division(text: &str) -> (Cow<'_, str>, Vec<u32>) {
     }
 }
 
-/// Maps an offset in the text [`separate_division`] returned to the source.
+/// rnix lexes `a/` followed by a character that cannot continue a path, as in
+/// `a/(b)` or `a/"b"`, as a path with a trailing slash, but Nix only lexes a
+/// path when a path character or `${` follows the `/`, so this is `a / ...`.
+/// Returns the offset of that `/` in the token.
+fn split_division(kind: rnix::SyntaxKind, s: &str, after_interpol: bool) -> Option<usize> {
+    // A path continued after an interpolation, as in `./a${b}c/`, has a
+    // trailing slash in Nix too.
+    (kind == rnix::SyntaxKind::TOKEN_ERROR
+        && !after_interpol
+        && !s.starts_with('~')
+        && s.find('/') == Some(s.len() - 1))
+    .then_some(s.len() - 1)
+}
+
+/// Nix lexes a float as `(([1-9][0-9]*\.[0-9]*)|(0?\.[0-9]+))([Ee][+-]?[0-9]+)?`
+/// and an integer as `[0-9]+`, but rnix lexes `0.` followed by a non-digit as
+/// a float and an exponent marker without digits, as in `1.5e`, as an error,
+/// where Nix lexes `0 .x` and `1.5 e`. Returns where Nix's number ends in a
+/// number token rnix lexed longer.
+fn split_number(kind: rnix::SyntaxKind, s: &str) -> Option<usize> {
+    let numeric = match kind {
+        rnix::SyntaxKind::TOKEN_FLOAT => true,
+        rnix::SyntaxKind::TOKEN_ERROR => {
+            s.starts_with(|c: char| c.is_ascii_digit() || c == '.')
+                && s.bytes()
+                    .all(|c| c.is_ascii_digit() || b".eE+-".contains(&c))
+        }
+        _ => false,
+    };
+    if !numeric {
+        return None;
+    }
+    let b = s.as_bytes();
+    let digits = |from: usize| from + b[from..].iter().take_while(|c| c.is_ascii_digit()).count();
+    let int = digits(0);
+    let mantissa = if b.first().is_some_and(|c| (b'1'..=b'9').contains(c)) {
+        (b.get(int) == Some(&b'.')).then(|| digits(int + 1))
+    } else {
+        let dot = usize::from(b.first() == Some(&b'0'));
+        (b.get(dot) == Some(&b'.') && b.get(dot + 1).is_some_and(u8::is_ascii_digit))
+            .then(|| digits(dot + 1))
+    };
+    let len = match mantissa {
+        Some(m) if matches!(b.get(m), Some(b'e' | b'E')) => {
+            let sign = m + 1 + usize::from(matches!(b.get(m + 1), Some(b'+' | b'-')));
+            match digits(sign) {
+                end if end > sign => end,
+                _ => m,
+            }
+        }
+        Some(m) => m,
+        None => int,
+    };
+    (0 < len && len < s.len()).then_some(len)
+}
+
+/// Maps an offset in the text [`separate_tokens`] returned to the source.
 fn source_offset(spaces: &[u32], offset: u32) -> u32 {
     offset - spaces.partition_point(|&s| s < offset) as u32
 }
