@@ -1,5 +1,6 @@
 //! Lowering of the rnix syntax tree into [`crate::ir`].
 
+use std::borrow::Cow;
 use std::collections::HashMap;
 
 use rnix::ast;
@@ -65,7 +66,7 @@ pub fn compile<'a>(
     pure: bool,
     extra_scope: Option<&[Sym]>,
 ) -> CResult<ExprRef<'a>> {
-    let parse = rnix::Root::parse(source.text);
+    let parse = rnix::Root::parse(&end_comments_at_cr(source.text));
     if let Some(e) = parse.errors().first() {
         let range = match e {
             rnix::ParseError::Unexpected(r)
@@ -143,6 +144,32 @@ pub fn compile<'a>(
         c.scopes.push(scope_of(names));
     }
     c.expr(&expr)
+}
+
+/// Nix ends a `#` comment at `\r` as well as `\n`, but rnix only at `\n`.
+/// Rewrites each `\r` that ends a comment to `\n`, which keeps offsets and
+/// changes nothing else, then retokenises as the text after it is now code.
+fn end_comments_at_cr(text: &str) -> Cow<'_, str> {
+    let mut text = Cow::Borrowed(text);
+    if !text.contains('\r') {
+        return text;
+    }
+    loop {
+        let mut start = 0;
+        let cr = rnix::tokenize(&text).find_map(|(kind, s)| {
+            let at = start;
+            start += s.len();
+            if kind == rnix::SyntaxKind::TOKEN_COMMENT && s.starts_with('#') {
+                s.find('\r').map(|i| at + i)
+            } else {
+                None
+            }
+        });
+        match cr {
+            Some(i) => text.to_mut().replace_range(i..=i, "\n"),
+            None => return text,
+        }
+    }
 }
 
 /// The parts of an attribute set or `let` before compilation, with nested
