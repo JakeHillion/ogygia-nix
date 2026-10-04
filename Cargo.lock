@@ -2222,6 +2222,7 @@ dependencies = [
  "sha1",
  "sha2",
  "toml",
+ "toml_parser",
 ]
 
 [[package]]
