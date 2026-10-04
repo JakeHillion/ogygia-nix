@@ -161,11 +161,11 @@ pub fn replace_strings<'a>(ev: &Eval<'a>, args: &[Value<'a>]) -> R<'a> {
     Ok(ev.str_with_ctx(&out, ctx))
 }
 
-/// Translate a POSIX extended regular expression to `regex` syntax, writing
-/// the end anchor `$` as `end`.
+/// Translate a POSIX extended regular expression to `regex` syntax for
+/// matching bytes with Unicode disabled, writing the end anchor `$` as `end`.
+/// As in `std::regex`, each byte of `re` is one character.
 fn translate_regex(re: &[u8], end: &str) -> Result<String, String> {
-    let re = String::from_utf8_lossy(re);
-    let chars: Vec<char> = re.chars().collect();
+    let chars: Vec<char> = re.iter().map(|&b| char::from(b)).collect();
     let mut out = String::with_capacity(re.len() + 8);
     let mut depth = 0usize;
     let mut i = 0;
@@ -211,7 +211,7 @@ fn translate_regex(re: &[u8], end: &str) -> Result<String, String> {
                 i += 1;
             }
             c => {
-                out.push(c);
+                push_byte(&mut out, c);
                 i += 1;
             }
         }
@@ -365,9 +365,22 @@ enum BracketToken {
     Class(String),
 }
 
-/// Push `c` as a literal member of a `regex` character class.
+/// Push the byte `c` as is, or as an escape if it is not ASCII.
+fn push_byte(out: &mut String, c: char) {
+    if c.is_ascii() {
+        out.push(c);
+    } else {
+        out.push_str(&format!("\\x{:02X}", u32::from(c)));
+    }
+}
+
+/// Push the byte `c` as a literal member of a `regex` character class.
 fn push_class_char(out: &mut String, c: char) {
-    out.push_str(&regex::escape(c.encode_utf8(&mut [0; 4])));
+    if c.is_ascii() {
+        out.push_str(&regex::escape(c.encode_utf8(&mut [0; 4])));
+    } else {
+        push_byte(out, c);
+    }
 }
 
 /// Push `c`, if any, as a literal member of a `regex` character class.
@@ -513,6 +526,7 @@ fn compile_match_regex<'a>(ev: &Eval<'a>, re: &[u8]) -> R<'a, Rc<regex::bytes::R
         translate_regex(re, "$").map_err(|e| regex_error(re, e))?
     );
     let r = regex::bytes::RegexBuilder::new(&pattern)
+        .unicode(false)
         .dot_matches_new_line(true)
         .build()
         .map_err(|e| regex_error(re, e))?;
@@ -567,7 +581,12 @@ fn compile_split_regex<'a>(ev: &Eval<'a>, re: &[u8]) -> R<'a, Rc<SplitRegex>> {
     let build = |pattern: &str, kind| {
         meta::Builder::new()
             .configure(meta::Config::new().match_kind(kind).utf8_empty(false))
-            .syntax(syntax::Config::new().utf8(false).dot_matches_new_line(true))
+            .syntax(
+                syntax::Config::new()
+                    .unicode(false)
+                    .utf8(false)
+                    .dot_matches_new_line(true),
+            )
             .build(pattern)
             .map_err(|e| regex_error(re, e))
     };
