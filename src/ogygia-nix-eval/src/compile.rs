@@ -191,8 +191,9 @@ fn end_comments_at_cr(text: &str) -> Cow<'_, str> {
 }
 
 /// Inserts text wherever rnix lexes the source differently from Nix: a space
-/// where rnix lexes one token but Nix lexes several, and `./` before an ellipsis
-/// Nix lexes as the start of a path. Retokenises after each as the text after
+/// where rnix lexes one token but Nix lexes several, `./` before an ellipsis
+/// Nix lexes as the start of a path, and an empty interpolation between the
+/// slashes of `//` in a path continued after an interpolation. Retokenises after each as the text after
 /// it changes, and returns the offsets of the inserted bytes in the result.
 fn match_nix_tokens(text: &str) -> (Cow<'_, str>, Vec<u32>) {
     let mut text = Cow::Borrowed(text);
@@ -213,6 +214,9 @@ fn match_nix_tokens(text: &str) -> (Cow<'_, str>, Vec<u32>) {
                 .or_else(|| split_less(kind, s))
                 .map(|i| (at + i, " "))
                 .or_else(|| ellipsis_path(kind, &text[at..]).then_some((at, "./")))
+                .or_else(|| {
+                    empty_path_segment(kind, s, after_interpol).map(|i| (at + i, "${\"\"}"))
+                })
         });
         match insert {
             Some((i, s)) => {
@@ -222,6 +226,18 @@ fn match_nix_tokens(text: &str) -> (Cow<'_, str>, Vec<u32>) {
             None => return (text, inserted),
         }
     }
+}
+
+/// Nix lexes each `/` that ends a segment of a path continued after an
+/// interpolation as its own string, so `./a/${b}//c` is `./a/` `b` `/` `/c`,
+/// but rnix lexes the rest of the path as one token, an error when it contains
+/// `//`. Returns the offset of the second `/` in such a token, where an empty
+/// interpolation makes rnix lex the same strings.
+fn empty_path_segment(kind: rnix::SyntaxKind, s: &str, after_interpol: bool) -> Option<usize> {
+    (kind == rnix::SyntaxKind::TOKEN_ERROR && after_interpol)
+        .then(|| s.find("//"))
+        .flatten()
+        .map(|i| i + 1)
 }
 
 /// Nix lexes `...` followed by path characters and a `/` that continues the
