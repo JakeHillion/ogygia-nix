@@ -8,6 +8,7 @@ mod json;
 mod lists;
 mod misc;
 pub(crate) mod strings;
+mod xml;
 
 use std::cell::Cell;
 use std::collections::HashMap;
@@ -170,6 +171,7 @@ primops! {
     "toJSON" => 1, json::to_json;
     "toPath" => 1, fs::to_path;
     "toString" => 1, strings::to_string;
+    "toXML" => 1, xml::to_xml;
     "trace" => 2, misc::trace;
     "traceVerbose" => 2, misc::trace_verbose;
     "tryEval" => 1, misc::try_eval;
