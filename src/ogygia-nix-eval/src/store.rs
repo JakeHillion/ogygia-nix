@@ -169,8 +169,6 @@ pub fn hash_size(algo: &str) -> Option<usize> {
 /// base16, Nix base-32 or base64 of a digest of `algo`. Returns the
 /// algorithm and the digest.
 pub fn parse_hash(s: &str, algo: Option<&str>) -> Result<(String, Vec<u8>)> {
-    use base64::Engine;
-    let b64 = base64::engine::general_purpose::STANDARD;
     if let Some((a, rest)) = s.split_once('-')
         && let Some(size) = hash_size(a)
     {
@@ -179,13 +177,10 @@ pub fn parse_hash(s: &str, algo: Option<&str>) -> Result<(String, Vec<u8>)> {
         {
             bail!("hash '{s}' should have type '{expected}'");
         }
-        let bytes = b64
-            .decode(rest)
-            .map_err(|e| anyhow::anyhow!("invalid SRI hash '{s}': {e}"))?;
-        if bytes.len() != size {
-            bail!("invalid SRI hash '{s}': wrong length");
-        }
-        return Ok((a.to_owned(), bytes));
+        return match base64_decode(rest) {
+            Some(bytes) if bytes.len() == size => Ok((a.to_owned(), bytes)),
+            _ => bail!("invalid SRI hash '{s}'"),
+        };
     }
     let (algo, s) = match s.split_once(':') {
         Some((a, rest)) if hash_size(a).is_some() => (a, rest),
@@ -202,7 +197,7 @@ pub fn parse_hash(s: &str, algo: Option<&str>) -> Result<(String, Vec<u8>)> {
     } else if s.len() == (size * 8).div_ceil(5) {
         base32_decode(s)
     } else if s.len() == size.div_ceil(3) * 4 {
-        b64.decode(s).ok()
+        base64_decode(s)
     } else {
         None
     };
@@ -210,6 +205,32 @@ pub fn parse_hash(s: &str, algo: Option<&str>) -> Result<(String, Vec<u8>)> {
         Some(b) if b.len() == size => Ok((algo.to_owned(), b)),
         _ => bail!("invalid hash '{s}' for algorithm '{algo}'"),
     }
+}
+
+/// Decode base64 as Nix does: decoding stops at the first `=`, newlines
+/// are skipped, and the padding and trailing bits are not checked.
+fn base64_decode(s: &str) -> Option<Vec<u8>> {
+    let mut out = Vec::with_capacity(s.len() / 4 * 3);
+    let (mut acc, mut bits) = (0u32, 0u32);
+    for c in s.bytes() {
+        let digit = match c {
+            b'=' => break,
+            b'\n' => continue,
+            b'A'..=b'Z' => c - b'A',
+            b'a'..=b'z' => c - b'a' + 26,
+            b'0'..=b'9' => c - b'0' + 52,
+            b'+' => 62,
+            b'/' => 63,
+            _ => return None,
+        };
+        acc = (acc << 6 | u32::from(digit)) & 0xfff;
+        bits += 6;
+        if bits >= 8 {
+            bits -= 8;
+            out.push((acc >> bits) as u8);
+        }
+    }
+    Some(out)
 }
 
 /// Render a digest in one of Nix's hash formats.
