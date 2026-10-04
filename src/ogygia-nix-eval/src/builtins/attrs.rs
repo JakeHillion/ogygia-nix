@@ -10,8 +10,8 @@ use crate::value::Value;
 use crate::value::eval_err;
 
 fn sym_arg<'a>(ev: &Eval<'a>, v: Value<'a>) -> R<'a, Sym> {
-    let s = ev.force_str(v)?;
-    Ok(ev.ctx.interner.intern_bytes(s.s))
+    let s = ev.force_str_no_ctx(v)?;
+    Ok(ev.ctx.interner.intern_bytes(s))
 }
 
 pub fn attr_names<'a>(ev: &Eval<'a>, args: &[Value<'a>]) -> R<'a> {
