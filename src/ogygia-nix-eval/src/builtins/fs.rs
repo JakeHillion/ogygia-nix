@@ -278,10 +278,6 @@ pub fn fetch_tarball<'a>(_ev: &Eval<'a>, _args: &[Value<'a>]) -> R<'a> {
     unsupported("fetchTarball")
 }
 
-pub fn fetch_tree<'a>(_ev: &Eval<'a>, _args: &[Value<'a>]) -> R<'a> {
-    unsupported("fetchTree")
-}
-
 pub fn fetchurl<'a>(_ev: &Eval<'a>, _args: &[Value<'a>]) -> R<'a> {
     unsupported("fetchurl")
 }

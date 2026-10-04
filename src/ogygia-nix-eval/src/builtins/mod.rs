@@ -3,6 +3,7 @@
 mod attrs;
 mod context;
 mod derivation;
+mod flake;
 mod fs;
 mod json;
 mod lists;
@@ -39,7 +40,6 @@ const GLOBAL: &[&str] = &[
     "fetchGit",
     "fetchMercurial",
     "fetchTarball",
-    "fetchTree",
     "fromTOML",
     "import",
     "isNull",
@@ -107,11 +107,11 @@ primops! {
     "fetchGit" => 1, fs::fetch_git;
     "fetchMercurial" => 1, fs::fetch_mercurial;
     "fetchTarball" => 1, fs::fetch_tarball;
-    "fetchTree" => 1, fs::fetch_tree;
     "fetchurl" => 1, fs::fetchurl;
     "filter" => 2, lists::filter;
     "filterSource" => 2, fs::filter_source;
     "findFile" => 2, fs::find_file;
+    "flakeRefToString" => 1, flake::flake_ref_to_string;
     "floor" => 1, misc::floor;
     "foldl'" => 3, lists::foldl;
     "fromJSON" => 1, json::from_json;
@@ -122,6 +122,7 @@ primops! {
     "getAttr" => 2, attrs::get_attr;
     "getContext" => 1, context::get_context;
     "getEnv" => 1, misc::get_env;
+    "getFlake" => 1, flake::get_flake;
     "groupBy" => 2, lists::group_by;
     "hasAttr" => 2, attrs::has_attr;
     "hasContext" => 1, context::has_context;
@@ -147,6 +148,7 @@ primops! {
     "match" => 2, strings::match_;
     "mul" => 2, misc::mul;
     "parseDrvName" => 1, strings::parse_drv_name;
+    "parseFlakeRef" => 1, flake::parse_flake_ref;
     "partition" => 2, lists::partition;
     "path" => 1, fs::path;
     "pathExists" => 1, fs::path_exists;
