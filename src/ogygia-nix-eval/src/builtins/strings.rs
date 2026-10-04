@@ -176,20 +176,16 @@ fn translate_regex(re: &[u8], end: &str) -> Result<String, String> {
                 i = translate_bracket(&chars, i + 1, &mut out)?;
             }
             '\\' => {
-                if let Some(&n) = chars.get(i + 1) {
-                    if n.is_ascii_alphanumeric()
-                        && !matches!(n, 'w' | 'W' | 's' | 'S' | 'd' | 'D' | 'b' | 'B')
-                    {
-                        out.push(n);
-                    } else {
+                // libstdc++ only lets an extended regex escape its special
+                // characters.
+                match chars.get(i + 1) {
+                    Some(&n) if "$()*+.?[\\^{|".contains(n) => {
                         out.push('\\');
                         out.push(n);
                     }
-                    i += 2;
-                } else {
-                    out.push_str("\\\\");
-                    i += 1;
+                    _ => return Err("invalid escape".into()),
                 }
+                i += 2;
             }
             '$' => {
                 out.push_str(end);
