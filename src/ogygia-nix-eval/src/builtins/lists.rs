@@ -241,11 +241,14 @@ pub fn generic_closure<'a>(ev: &Eval<'a>, args: &[Value<'a>]) -> R<'a> {
     let Some(start) = set.get(s.start_set) else {
         return eval_err("attribute 'startSet' required");
     };
+    let start = ev.force_list(start)?;
+    if start.is_empty() {
+        return Ok(ev.list(&[]));
+    }
     let Some(op) = set.get(s.operator) else {
         return eval_err("attribute 'operator' required");
     };
-    let mut queue: std::collections::VecDeque<Value<'a>> =
-        ev.force_list(start)?.iter().copied().collect();
+    let mut queue: std::collections::VecDeque<Value<'a>> = start.iter().copied().collect();
     let mut seen: Vec<Value<'a>> = Vec::new();
     let mut out = Vec::new();
     while let Some(item) = queue.pop_front() {
