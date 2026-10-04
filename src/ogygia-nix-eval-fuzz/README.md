@@ -29,7 +29,9 @@ An input on which it runs out of time, memory or stack says nothing about
 equivalence, so it is skipped before ogygia-nix-eval sees it. Both
 evaluators are pointed at a proxy that refuses connections, so fetches fail
 without touching the network. Inputs that are not UTF-8 are ignored, as
-ogygia-nix-eval only accepts text.
+ogygia-nix-eval only accepts text, and so are inputs containing a NUL byte:
+Nix stops reading at the first one outside a string, so it evaluates only
+a prefix of the input.
 
 ## How inputs are found
 

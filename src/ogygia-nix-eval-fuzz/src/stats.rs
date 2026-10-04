@@ -13,9 +13,10 @@ use crate::Outcome;
 /// appended to `file` when given, which is safe from several processes at
 /// once, else to standard error.
 pub fn count(outcome: &Outcome, file: Option<&Path>) {
-    static PENDING: Mutex<Option<(Instant, [u64; 6])>> = Mutex::new(None);
+    static PENDING: Mutex<Option<(Instant, [u64; Outcome::NAMES.len()])>> = Mutex::new(None);
     let mut pending = PENDING.lock().unwrap();
-    let (since, counts) = pending.get_or_insert_with(|| (Instant::now(), [0; 6]));
+    let (since, counts) =
+        pending.get_or_insert_with(|| (Instant::now(), [0; Outcome::NAMES.len()]));
     counts[outcome.index()] += 1;
     if since.elapsed() < Duration::from_secs(15) {
         return;
@@ -39,7 +40,7 @@ pub fn count(outcome: &Outcome, file: Option<&Path>) {
 }
 
 /// A report line: `time`, then each outcome's name and count.
-fn line(time: u64, counts: &[u64; 6]) -> String {
+fn line(time: u64, counts: &[u64; Outcome::NAMES.len()]) -> String {
     let mut line = time.to_string();
     for (name, n) in Outcome::NAMES.iter().zip(counts) {
         line += &format!(" {name} {n}");
@@ -55,8 +56,8 @@ mod tests {
     #[test]
     fn line_pairs_names_with_counts() {
         assert_eq!(
-            line(1700000000, &[1, 2, 3, 4, 5, 6]),
-            "1700000000 parse-rejected 1 skipped 2 values 3 caught 4 uncaught 5 diverged 6\n"
+            line(1700000000, &[1, 2, 3, 4, 5, 6, 7]),
+            "1700000000 ignored 1 parse-rejected 2 skipped 3 values 4 caught 5 uncaught 6 diverged 7\n"
         );
     }
 }
