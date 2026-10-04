@@ -61,6 +61,23 @@ fn to_str(b: &[u8]) -> String {
     String::from_utf8_lossy(b).into_owned()
 }
 
+/// Whether an `outputHashMode` value hashes recursively (NAR) rather than flat.
+fn parse_hash_mode<'a>(mode: &str, name: &str) -> R<'a, bool> {
+    match mode {
+        "flat" => Ok(false),
+        "recursive" | "nar" => Ok(true),
+        "text" => eval_err(format!(
+            "experimental Nix feature 'dynamic-derivations' is disabled (text-hashed derivation '{name}', outputHashMode = \"text\"); add '--extra-experimental-features dynamic-derivations' to enable it"
+        )),
+        "git" => eval_err(
+            "experimental Nix feature 'git-hashing' is disabled; add '--extra-experimental-features git-hashing' to enable it",
+        ),
+        other => eval_err(format!(
+            "invalid value '{other}' for 'outputHashMode' attribute"
+        )),
+    }
+}
+
 pub fn derivation_strict<'a>(ev: &Eval<'a>, args: &[Value<'a>]) -> R<'a> {
     let attrs = ev.force_attrs(args[0])?;
     let syms = &ev.ctx.syms;
@@ -92,7 +109,7 @@ pub fn derivation_strict<'a>(ev: &Eval<'a>, args: &[Value<'a>]) -> R<'a> {
     let mut ctx: Vec<Ctx<'a>> = Vec::new();
     let mut output_hash: Option<String> = None;
     let mut output_hash_algo: Option<String> = None;
-    let mut output_hash_mode: Option<String> = None;
+    let mut recursive = false;
     let mut outputs: Vec<String> = vec!["out".to_owned()];
     let mut json = Vec::new();
     let mut json_first = true;
@@ -150,7 +167,9 @@ pub fn derivation_strict<'a>(ev: &Eval<'a>, args: &[Value<'a>]) -> R<'a> {
                 "system" => drv.platform = ev.force_str(e.value)?.s.to_vec(),
                 "outputHash" => output_hash = Some(to_str(ev.force_str(e.value)?.s)),
                 "outputHashAlgo" => output_hash_algo = Some(to_str(ev.force_str(e.value)?.s)),
-                "outputHashMode" => output_hash_mode = Some(to_str(ev.force_str(e.value)?.s)),
+                "outputHashMode" => {
+                    recursive = parse_hash_mode(&to_str(ev.force_str(e.value)?.s), &name)?;
+                }
                 "outputs" => {
                     let list = ev
                         .force_list(e.value)?
@@ -170,7 +189,7 @@ pub fn derivation_strict<'a>(ev: &Eval<'a>, args: &[Value<'a>]) -> R<'a> {
             "system" => drv.platform = s.clone(),
             "outputHash" => output_hash = Some(to_str(&s)),
             "outputHashAlgo" => output_hash_algo = Some(to_str(&s)),
-            "outputHashMode" => output_hash_mode = Some(to_str(&s)),
+            "outputHashMode" => recursive = parse_hash_mode(&to_str(&s), &name)?,
             "outputs" => set_outputs(
                 to_str(&s)
                     .split_ascii_whitespace()
@@ -227,12 +246,6 @@ pub fn derivation_strict<'a>(ev: &Eval<'a>, args: &[Value<'a>]) -> R<'a> {
         if outputs != ["out"] {
             return eval_err("multiple outputs are not supported in fixed-output derivations");
         }
-        let mode = output_hash_mode.unwrap_or_else(|| "flat".to_owned());
-        let recursive = match mode.as_str() {
-            "flat" => false,
-            "recursive" | "nar" => true,
-            other => return eval_err(format!("unsupported outputHashMode '{other}'")),
-        };
         let algo = output_hash_algo.filter(|a| !a.is_empty());
         let (algo, bytes) = crate::store::parse_hash(&hash, algo.as_deref())
             .map_err(|e| error(ErrorKind::Eval, format!("{e:#}")))?;
