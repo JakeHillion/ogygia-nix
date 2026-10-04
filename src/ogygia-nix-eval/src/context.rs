@@ -15,6 +15,7 @@ use crate::compile::CompileError;
 use crate::io::Io;
 use crate::ir::ExprRef;
 use crate::ir::Source;
+use crate::symbol;
 use crate::symbol::Interner;
 use crate::symbol::Sym;
 use crate::symbol::Syms;
@@ -41,8 +42,14 @@ pub struct Context {
 impl Context {
     pub fn new(io: Io) -> Context {
         let interner = Interner::default();
+        for name in symbol::NIX_STARTUP {
+            if !(io.pure && symbol::NIX_STARTUP_IMPURE.contains(name)) {
+                interner.intern(name);
+            }
+        }
         let syms = Syms::new(&interner);
         let globals = builtins::global_names()
+            .filter(|n| !(io.pure && symbol::NIX_STARTUP_IMPURE.contains(&n.as_str())))
             .map(|n| interner.intern(&n))
             .collect();
         Context {

@@ -74,7 +74,7 @@ pub type KeepFn<'f> = &'f dyn Fn(&str, FileType) -> Result<bool>;
 
 #[derive(Default)]
 pub struct Io {
-    pure: bool,
+    pub(crate) pure: bool,
     mounts: RefCell<Vec<Mount>>,
     store_paths: RefCell<HashMap<String, String>>,
 }

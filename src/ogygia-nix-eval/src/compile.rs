@@ -450,10 +450,10 @@ impl<'a> Compiler<'a> {
                 ast::LiteralKind::Uri(u) => Expr::Str(self.lit_str(u.syntax().text().as_bytes())),
             },
             ast::Expr::Ident(i) => {
-                let name = self.ident(i)?;
-                if name == self.ctx.syms.cur_pos {
+                if i.syntax().text() == "__curPos" {
                     return Ok(Expr::CurPos(pos));
                 }
+                let name = self.ident(i)?;
                 self.resolve(name, 0, pos)?
             }
             ast::Expr::CurPos(_) => Expr::CurPos(pos),

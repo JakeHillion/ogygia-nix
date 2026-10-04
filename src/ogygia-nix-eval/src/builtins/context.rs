@@ -106,7 +106,7 @@ pub fn append_context<'a>(ev: &Eval<'a>, args: &[Value<'a>]) -> R<'a> {
         {
             ctx.push(Ctx::Opaque(path));
         }
-        if let Some(a) = info.get(syms.all_outputs)
+        if let Some(a) = info.get(ev.ctx.intern("allOutputs"))
             && ev.force_bool(a)?
         {
             ctx.push(Ctx::DrvDeep(path));
