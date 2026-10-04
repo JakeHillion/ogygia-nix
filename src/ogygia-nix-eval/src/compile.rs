@@ -88,6 +88,24 @@ pub fn compile<'a>(
             .unwrap_or_default();
         return err(format!("syntax error: {e}{at}"));
     }
+    // rnix closes a parenthesised expression with whatever token follows
+    // it, without reporting an error when that is not `)`.
+    if let Some(t) = parse
+        .syntax()
+        .descendants()
+        .filter(|n| n.kind() == rnix::SyntaxKind::NODE_PAREN)
+        .filter_map(|n| n.last_token())
+        .find(|t| t.kind() != rnix::SyntaxKind::TOKEN_R_PAREN)
+    {
+        return err(format!(
+            "syntax error: unexpected {}, expecting ')' at {}",
+            t.text(),
+            Pos {
+                source,
+                offset: u32::from(t.text_range().start()),
+            }
+        ));
+    }
     let root = parse.tree();
     let expr = child(root.expr())?;
     let mut c = Compiler {
