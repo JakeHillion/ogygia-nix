@@ -352,6 +352,21 @@ mod tests {
     }
 
     #[test]
+    fn forbids_paths_outside_mounts() {
+        assert_eq!(outcome("\"${/bin/sh}\""), "uncaught");
+        assert_eq!(
+            outcome("builtins.toJSON { outPath = /bin/sh; }"),
+            "uncaught"
+        );
+        assert_eq!(outcome("builtins.readFile /nonexistent"), "uncaught");
+        assert_eq!(outcome("builtins.pathExists /bin/sh"), "values");
+        assert_eq!(
+            outcome("builtins.findFile [ { path = \"/bin\"; prefix = \"\"; } ] \"sh\""),
+            "uncaught"
+        );
+    }
+
+    #[test]
     fn ignores_nul_bytes() {
         assert_eq!(outcome("1\0+"), "ignored");
         assert_eq!(outcome("\"a\0b\""), "ignored");

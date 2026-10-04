@@ -74,6 +74,7 @@ pub type KeepFn<'f> = &'f dyn Fn(&str, FileType) -> Result<bool>;
 
 #[derive(Default)]
 pub struct Io {
+    pure: bool,
     mounts: RefCell<Vec<Mount>>,
     store_paths: RefCell<HashMap<String, String>>,
 }
@@ -89,6 +90,31 @@ fn relative<'p>(logical: &'p str, root: &str) -> Option<&'p str> {
 }
 
 impl Io {
+    /// An [`Io`] that, like Nix in pure evaluation mode, forbids access to
+    /// any path outside a mount.
+    pub fn pure() -> Io {
+        Io {
+            pure: true,
+            ..Io::default()
+        }
+    }
+
+    /// Fail if `logical` may not be accessed at all.
+    pub fn check_access(&self, logical: &str) -> Result<()> {
+        if self.pure
+            && !self
+                .mounts
+                .borrow()
+                .iter()
+                .any(|m| relative(logical, &m.logical).is_some())
+        {
+            bail!(
+                "access to absolute path '{logical}' is forbidden in pure evaluation mode (use '--impure' to override)"
+            );
+        }
+        Ok(())
+    }
+
     fn add_mount(&self, logical: &str, target: Target, filter: Option<HashSet<String>>) {
         let mut mounts = self.mounts.borrow_mut();
         mounts.retain(|m| m.logical != logical);
@@ -114,6 +140,11 @@ impl Io {
     /// The physical path behind `logical`, or an error if a mount filter
     /// hides it.
     pub fn physical(&self, logical: &str) -> Result<PathBuf> {
+        self.check_access(logical)?;
+        self.resolve(logical)
+    }
+
+    fn resolve(&self, logical: &str) -> Result<PathBuf> {
         let next = {
             let mounts = self.mounts.borrow();
             let found = mounts
@@ -135,7 +166,7 @@ impl Io {
                 Target::Logical(l) => format!("{}/{rest}", l.trim_end_matches('/')),
             }
         };
-        self.physical(&next)
+        self.resolve(&next)
     }
 
     pub fn read(&self, logical: &str) -> Result<Vec<u8>> {
@@ -192,6 +223,7 @@ impl Io {
     /// The file `import` reads for `logical`: the path itself, or its
     /// `default.nix` if it is a directory.
     pub fn resolve_import(&self, logical: &str) -> Result<String> {
+        self.check_access(logical)?;
         if !self.exists(logical) {
             bail!("path '{logical}' does not exist");
         }
@@ -226,6 +258,7 @@ impl Io {
         keep: Option<KeepFn<'_>>,
     ) -> Result<String> {
         store::check_name(name)?;
+        self.check_access(logical)?;
         if !self.exists(logical) {
             bail!("path '{logical}' does not exist");
         }
@@ -245,6 +278,7 @@ impl Io {
 
     /// SHA-256 of the NAR serialisation of `logical`.
     pub fn nar_hash(&self, logical: &str) -> Result<[u8; 32]> {
+        self.check_access(logical)?;
         if !self.exists(logical) {
             bail!("path '{logical}' does not exist");
         }

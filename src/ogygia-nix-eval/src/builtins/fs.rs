@@ -119,6 +119,10 @@ pub fn find_file<'a>(ev: &Eval<'a>, args: &[Value<'a>]) -> R<'a> {
             name.strip_prefix(&format!("{prefix}/"))
         };
         let Some(rest) = rest else { continue };
+        ev.ctx
+            .io
+            .check_access(&crate::path::canon_path(&path))
+            .map_err(io_err)?;
         let candidate = if rest.is_empty() {
             path
         } else {
