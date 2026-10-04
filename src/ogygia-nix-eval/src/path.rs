@@ -13,10 +13,12 @@ pub fn abs(p: &str) -> &str {
     p.strip_prefix(COREPKGS).unwrap_or(p)
 }
 
-/// `p` as Nix prints it.
-pub fn show(p: &str) -> Cow<'_, str> {
+/// `p` as Nix prints it. In `pure` evaluation mode Nix prints the store
+/// directory itself with a trailing slash.
+pub fn show(p: &str, pure: bool) -> Cow<'_, str> {
     match p.strip_prefix(COREPKGS) {
         Some(rest) => Cow::Owned(format!("<nix{rest}>")),
+        None if pure && p == crate::store::STORE_DIR => Cow::Owned(format!("{p}/")),
         None => Cow::Borrowed(p),
     }
 }

@@ -82,7 +82,10 @@ impl<'a> Writer<'a> {
                 self.ctx.extend_from_slice(s.ctx);
                 self.empty("string", &[("value", s.s)]);
             }
-            Value::Path(p) => self.empty("path", &[("value", crate::path::show(p.0).as_bytes())]),
+            Value::Path(p) => self.empty(
+                "path",
+                &[("value", crate::path::show(p.0, ev.settings.pure).as_bytes())],
+            ),
             Value::Null => self.empty("null", &[]),
             Value::Float(f) => self.empty("float", &[("value", float_g(f).as_bytes())]),
             Value::Attrs(a) if ev.is_derivation(a)? => {
