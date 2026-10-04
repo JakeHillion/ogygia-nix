@@ -178,61 +178,142 @@ pub fn sort<'a>(ev: &Eval<'a>, args: &[Value<'a>]) -> R<'a> {
         let g = ev.call(cmp, a)?;
         ev.force_bool(ev.call(g, b)?)
     };
-    let mut buf = items.clone();
-    merge_sort(&mut items, &mut buf, &less)?;
+    let len = items.len();
+    PeekSort {
+        buf: items.clone(),
+        less: &less,
+    }
+    .sort_range(&mut items, 0, len, 0, len)?;
     Ok(ev.list(&items))
 }
 
-fn merge_sort<'a>(
-    v: &mut [Value<'a>],
-    buf: &mut [Value<'a>],
-    less: &dyn Fn(Value<'a>, Value<'a>) -> R<'a, bool>,
-) -> R<'a, ()> {
-    let n = v.len();
-    if n <= 1 {
-        return Ok(());
+/// The stable natural merge sort (PeekSort) Nix's `builtins.sort` uses. A
+/// comparator that is not a strict weak ordering gives an order that depends
+/// on exactly which comparisons are made, so this makes Nix's comparisons.
+struct PeekSort<'s, 'a> {
+    buf: Vec<Value<'a>>,
+    less: &'s dyn Fn(Value<'a>, Value<'a>) -> R<'a, bool>,
+}
+
+impl<'a> PeekSort<'_, 'a> {
+    /// Whether `next` continues a run after `prev`: a weakly increasing run
+    /// needs `!(next < prev)`, a strictly decreasing one `next < prev`.
+    fn in_run(&self, decreasing: bool, prev: Value<'a>, next: Value<'a>) -> R<'a, bool> {
+        Ok((self.less)(next, prev)? == decreasing)
     }
-    if n <= 16 {
-        // Insertion sort: stable, and few comparisons for short runs.
-        for i in 1..n {
+
+    /// The end of the run starting at `begin`, scanning forwards to `end`.
+    fn run_end(
+        &self,
+        v: &[Value<'a>],
+        decreasing: bool,
+        mut begin: usize,
+        end: usize,
+    ) -> R<'a, usize> {
+        if begin == end {
+            return Ok(begin);
+        }
+        while begin + 1 != end && self.in_run(decreasing, v[begin], v[begin + 1])? {
+            begin += 1;
+        }
+        Ok(begin + 1)
+    }
+
+    /// The start of the run ending at `end`, scanning backwards to `begin`.
+    fn run_start(
+        &self,
+        v: &[Value<'a>],
+        decreasing: bool,
+        begin: usize,
+        mut end: usize,
+    ) -> R<'a, usize> {
+        if begin == end {
+            return Ok(end);
+        }
+        while end - 1 > begin && self.in_run(decreasing, v[end - 2], v[end - 1])? {
+            end -= 1;
+        }
+        Ok(end - 1)
+    }
+
+    fn insertion_sort(&self, v: &mut [Value<'a>]) -> R<'a, ()> {
+        for i in 1..v.len() {
             let mut j = i;
-            while j > 0 && less(v[j], v[j - 1])? {
+            while j > 0 && (self.less)(v[j], v[j - 1])? {
                 v.swap(j, j - 1);
                 j -= 1;
             }
         }
-        return Ok(());
+        Ok(())
     }
-    let mid = n / 2;
-    {
-        let (l, r) = v.split_at_mut(mid);
-        let (bl, br) = buf.split_at_mut(mid);
-        merge_sort(l, bl, less)?;
-        merge_sort(r, br, less)?;
-    }
-    let (mut i, mut j, mut k) = (0, mid, 0);
-    while i < mid && j < n {
-        if less(v[j], v[i])? {
-            buf[k] = v[j];
-            j += 1;
-        } else {
-            buf[k] = v[i];
-            i += 1;
+
+    /// Merges the sorted `v[begin..mid]` and `v[mid..end]`.
+    fn merge(&mut self, v: &mut [Value<'a>], begin: usize, mid: usize, end: usize) -> R<'a, ()> {
+        let (left, n) = (mid - begin, end - begin);
+        self.buf[..n].copy_from_slice(&v[begin..end]);
+        let (mut l, mut r, mut out) = (0, left, begin);
+        while l < left && r < n {
+            if (self.less)(self.buf[r], self.buf[l])? {
+                v[out] = self.buf[r];
+                r += 1;
+            } else {
+                v[out] = self.buf[l];
+                l += 1;
+            }
+            out += 1;
         }
-        k += 1;
+        let rest = if l < left { l..left } else { r..n };
+        v[out..end].copy_from_slice(&self.buf[rest]);
+        Ok(())
     }
-    while i < mid {
-        buf[k] = v[i];
-        i += 1;
-        k += 1;
+
+    /// Sorts `v[begin..end]`, given that `v[begin..left_end]` and
+    /// `v[right_begin..end]` are already sorted.
+    fn sort_range(
+        &mut self,
+        v: &mut [Value<'a>],
+        begin: usize,
+        end: usize,
+        left_end: usize,
+        right_begin: usize,
+    ) -> R<'a, ()> {
+        if left_end == end || right_begin == begin {
+            return Ok(());
+        }
+        let n = end - begin;
+        if n <= 16 {
+            return self.insertion_sort(&mut v[begin..end]);
+        }
+        let mid = begin + n / 2;
+        if mid <= left_end {
+            self.sort_range(v, left_end, end, left_end + 1, right_begin)?;
+            return self.merge(v, begin, left_end, end);
+        }
+        if mid >= right_begin {
+            self.sort_range(v, begin, right_begin, left_end, right_begin - 1)?;
+            return self.merge(v, begin, right_begin, end);
+        }
+        // The run containing `v[mid - 1]`, reversed if decreasing.
+        let decreasing = (self.less)(v[mid], v[mid - 1])?;
+        let i = self.run_start(v, decreasing, left_end, mid)?;
+        let j = self.run_end(v, decreasing, mid - 1, right_begin)?;
+        if decreasing {
+            v[i..j].reverse();
+        }
+        if i == begin && j == end {
+            return Ok(());
+        }
+        if mid - i < j - mid {
+            // When `i == begin` the left part is empty and returns at once.
+            self.sort_range(v, begin, i, left_end, i.wrapping_sub(1))?;
+            self.sort_range(v, i, end, j, right_begin)?;
+            self.merge(v, begin, i, end)
+        } else {
+            self.sort_range(v, begin, j, left_end, i)?;
+            self.sort_range(v, j, end, j + 1, right_begin)?;
+            self.merge(v, begin, j, end)
+        }
     }
-    while j < n {
-        buf[k] = v[j];
-        j += 1;
-        k += 1;
-    }
-    v.copy_from_slice(&buf[..n]);
-    Ok(())
 }
 
 pub fn generic_closure<'a>(ev: &Eval<'a>, args: &[Value<'a>]) -> R<'a> {
