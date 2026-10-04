@@ -550,8 +550,8 @@ fn captures_list<'a>(ev: &Eval<'a>, caps: &regex::bytes::Captures) -> Value<'a> 
 
 pub fn match_<'a>(ev: &Eval<'a>, args: &[Value<'a>]) -> R<'a> {
     let re = ev.force_str_no_ctx(args[0])?;
-    let s = ev.force_str(args[1])?;
     let r = compile_match_regex(ev, re)?;
+    let s = ev.force_str(args[1])?;
     match r.captures(s.s) {
         Some(caps) => Ok(captures_list(ev, &caps)),
         None => Ok(Value::Null),
@@ -612,8 +612,8 @@ fn compile_split_regex<'a>(ev: &Eval<'a>, re: &[u8]) -> R<'a, Rc<SplitRegex>> {
 
 pub fn split<'a>(ev: &Eval<'a>, args: &[Value<'a>]) -> R<'a> {
     let re = ev.force_str_no_ctx(args[0])?;
-    let s = ev.force_str(args[1])?;
     let r = compile_split_regex(ev, re)?;
+    let s = ev.force_str(args[1])?;
     let hay = s.s;
     let mut caps = r.to_end.create_captures();
     let mut out = Vec::new();
