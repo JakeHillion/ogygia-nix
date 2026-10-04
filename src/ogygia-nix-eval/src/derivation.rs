@@ -94,7 +94,10 @@ impl Derivation {
             aterm_str(out, s.as_bytes())
         });
         out.push(b',');
-        aterm_str(&mut out, &self.platform);
+        // Nix writes the platform without escaping it.
+        out.push(b'"');
+        out.extend_from_slice(&self.platform);
+        out.push(b'"');
         out.push(b',');
         aterm_str(&mut out, &self.builder);
         out.push(b',');
