@@ -50,6 +50,8 @@ enum Scope {
 struct Compiler<'a> {
     ctx: &'a Context,
     source: &'a Source<'a>,
+    /// Offsets of the spaces [`separate_division`] inserted.
+    spaces: Vec<u32>,
     /// Directory relative path literals are resolved against.
     base_dir: &'a str,
     pure: bool,
@@ -66,7 +68,13 @@ pub fn compile<'a>(
     pure: bool,
     extra_scope: Option<&[Sym]>,
 ) -> CResult<ExprRef<'a>> {
-    let parse = rnix::Root::parse(&end_comments_at_cr(source.text));
+    let text = end_comments_at_cr(source.text);
+    let (text, spaces) = separate_division(&text);
+    let parse = rnix::Root::parse(&text);
+    let pos = |offset: rnix::TextSize| Pos {
+        source,
+        offset: source_offset(&spaces, u32::from(offset)),
+    };
     if let Some(e) = parse.errors().first() {
         let range = match e {
             rnix::ParseError::Unexpected(r)
@@ -77,15 +85,7 @@ pub fn compile<'a>(
             _ => None,
         };
         let at = range
-            .map(|r| {
-                format!(
-                    " at {}",
-                    Pos {
-                        source,
-                        offset: u32::from(r.start()),
-                    }
-                )
-            })
+            .map(|r| format!(" at {}", pos(r.start())))
             .unwrap_or_default();
         return err(format!("syntax error: {e}{at}"));
     }
@@ -101,10 +101,7 @@ pub fn compile<'a>(
         return err(format!(
             "syntax error: unexpected {}, expecting ')' at {}",
             t.text(),
-            Pos {
-                source,
-                offset: u32::from(t.text_range().start()),
-            }
+            pos(t.text_range().start())
         ));
     }
     // rnix parses a function wherever it parses an operand, but Nix only
@@ -125,10 +122,7 @@ pub fn compile<'a>(
     }) {
         return err(format!(
             "syntax error: unexpected function at {}",
-            Pos {
-                source,
-                offset: u32::from(n.text_range().start()),
-            }
+            pos(n.text_range().start())
         ));
     }
     let root = parse.tree();
@@ -136,6 +130,7 @@ pub fn compile<'a>(
     let mut c = Compiler {
         ctx,
         source,
+        spaces,
         base_dir: ctx.alloc_str(base_dir),
         pure,
         scopes: Vec::new(),
@@ -172,6 +167,48 @@ fn end_comments_at_cr(text: &str) -> Cow<'_, str> {
     }
 }
 
+/// rnix lexes `a/` followed by a character that cannot continue a path, as in
+/// `a/(b)` or `a/"b"`, as a path with a trailing slash, but Nix only lexes a
+/// path when a path character or `${` follows the `/`, so this is `a / ...`.
+/// Inserts a space before each such `/`, retokenising after each as the text
+/// after it changes, and returns the offsets of the spaces in the result.
+fn separate_division(text: &str) -> (Cow<'_, str>, Vec<u32>) {
+    let mut text = Cow::Borrowed(text);
+    let mut spaces = Vec::new();
+    if !text.contains('/') {
+        return (text, spaces);
+    }
+    loop {
+        let mut start = 0;
+        let mut prev = None;
+        let slash = rnix::tokenize(&text).find_map(|(kind, s)| {
+            let at = start;
+            start += s.len();
+            // A path continued after an interpolation, as in `./a${b}c/`,
+            // has a trailing slash in Nix too.
+            let continues_path = prev == Some(rnix::SyntaxKind::TOKEN_INTERPOL_END);
+            prev = Some(kind);
+            (kind == rnix::SyntaxKind::TOKEN_ERROR
+                && !continues_path
+                && !s.starts_with('~')
+                && s.find('/') == Some(s.len() - 1))
+            .then_some(at + s.len() - 1)
+        });
+        match slash {
+            Some(i) => {
+                text.to_mut().insert(i, ' ');
+                spaces.push(i as u32);
+            }
+            None => return (text, spaces),
+        }
+    }
+}
+
+/// Maps an offset in the text [`separate_division`] returned to the source.
+fn source_offset(spaces: &[u32], offset: u32) -> u32 {
+    offset - spaces.partition_point(|&s| s < offset) as u32
+}
+
 /// The parts of an attribute set or `let` before compilation, with nested
 /// attribute paths merged.
 #[derive(Default)]
@@ -204,7 +241,7 @@ impl<'a> Compiler<'a> {
     fn at(&self, offset: u32) -> Pos<'a> {
         Pos {
             source: self.source,
-            offset,
+            offset: source_offset(&self.spaces, offset),
         }
     }
 
