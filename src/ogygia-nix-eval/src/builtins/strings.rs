@@ -660,7 +660,9 @@ fn version_components(v: &[u8]) -> Vec<&[u8]> {
 }
 
 fn component_lt(a: &[u8], b: &[u8]) -> bool {
-    let num = |c: &[u8]| -> Option<u128> {
+    // Nix only treats a component as a number if it fits a C++ `int`; a
+    // longer run of digits compares as a non-numeric component.
+    let num = |c: &[u8]| -> Option<i32> {
         if !c.is_empty() && c.iter().all(u8::is_ascii_digit) {
             std::str::from_utf8(c).ok()?.parse().ok()
         } else {
