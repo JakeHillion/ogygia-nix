@@ -70,11 +70,17 @@ pub fn compile<'a>(
 ) -> CResult<ExprRef<'a>> {
     let text = end_comments_at_cr(source.text);
     let (text, spaces) = separate_division(&text);
-    let parse = rnix::Root::parse(&text);
     let pos = |offset: rnix::TextSize| Pos {
         source,
         offset: source_offset(&spaces, u32::from(offset)),
     };
+    if let Some(at) = invalid_whitespace(&text) {
+        return err(format!(
+            "syntax error: unexpected invalid token at {}",
+            pos(at.into())
+        ));
+    }
+    let parse = rnix::Root::parse(&text);
     if let Some(e) = parse.errors().first() {
         let range = match e {
             rnix::ParseError::Unexpected(r)
@@ -139,6 +145,22 @@ pub fn compile<'a>(
         c.scopes.push(scope_of(names));
     }
     c.expr(&expr)
+}
+
+/// rnix lexes any Unicode whitespace between tokens as whitespace, but Nix
+/// only space, tab, `\r` and `\n`, and any other character there is an invalid
+/// token. Returns the offset of the first other whitespace character.
+fn invalid_whitespace(text: &str) -> Option<u32> {
+    let mut start = 0;
+    rnix::tokenize(text).find_map(|(kind, s)| {
+        let at = start;
+        start += s.len();
+        if kind != rnix::SyntaxKind::TOKEN_WHITESPACE {
+            return None;
+        }
+        s.find(|c| !matches!(c, ' ' | '\t' | '\r' | '\n'))
+            .map(|i| (at + i) as u32)
+    })
 }
 
 /// Nix ends a `#` comment at `\r` as well as `\n`, but rnix only at `\n`.
