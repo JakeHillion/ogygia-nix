@@ -560,6 +560,13 @@ impl<'a> Compiler<'a> {
     fn attr_name(&self, a: &ast::Attr) -> CResult<AttrName> {
         Ok(match a {
             ast::Attr::Ident(i) => AttrName::Static(self.ident(i)?),
+            // Nix's grammar only allows `"` strings as attribute names.
+            ast::Attr::Str(s) if s.syntax().first_token().is_some_and(|t| t.text() == "''") => {
+                return err(format!(
+                    "syntax error: unexpected start of an indented string at {}",
+                    self.pos(s)
+                ));
+            }
             ast::Attr::Str(s) => match static_str(s) {
                 Some(lit) => AttrName::Static(self.ctx.intern(&lit)),
                 None => AttrName::Dynamic(ast::Expr::Str(s.clone())),
