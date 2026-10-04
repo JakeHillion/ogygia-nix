@@ -74,8 +74,6 @@ well_known! {
     operator = "operator",
     right = "right",
     wrong = "wrong",
-    system = "system",
-    builder = "builder",
     args = "args",
     body = "body",
     find_file = "__findFile",
