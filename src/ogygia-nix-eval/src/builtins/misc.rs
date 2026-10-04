@@ -1,5 +1,6 @@
 //! Arithmetic, type predicates, control flow and other small builtins.
 
+use crate::eval::Coerce;
 use crate::eval::Eval;
 use crate::ir::BinOp;
 use crate::ir::Param;
@@ -94,18 +95,18 @@ pub fn deep_seq<'a>(ev: &Eval<'a>, args: &[Value<'a>]) -> R<'a> {
     ev.force(args[1])
 }
 
-fn message<'a>(ev: &Eval<'a>, v: Value<'a>) -> R<'a, String> {
-    let (s, _) = ev.coerce_to_string(v, crate::eval::Coerce::PLAIN)?;
+fn message<'a>(ev: &Eval<'a>, v: Value<'a>, c: Coerce) -> R<'a, String> {
+    let (s, _) = ev.coerce_to_string(v, c)?;
     Ok(String::from_utf8_lossy(&s).into_owned())
 }
 
 pub fn throw<'a>(ev: &Eval<'a>, args: &[Value<'a>]) -> R<'a> {
-    let msg = message(ev, args[0])?;
+    let msg = message(ev, args[0], Coerce::INTERP)?;
     Err(error(ErrorKind::Throw, msg))
 }
 
 pub fn abort<'a>(ev: &Eval<'a>, args: &[Value<'a>]) -> R<'a> {
-    let msg = message(ev, args[0])?;
+    let msg = message(ev, args[0], Coerce::INTERP)?;
     Err(error(
         ErrorKind::Abort,
         format!("evaluation aborted with the following error message: '{msg}'"),
@@ -114,7 +115,7 @@ pub fn abort<'a>(ev: &Eval<'a>, args: &[Value<'a>]) -> R<'a> {
 
 pub fn add_error_context<'a>(ev: &Eval<'a>, args: &[Value<'a>]) -> R<'a> {
     ev.force(args[1]).map_err(|mut e| {
-        if let Ok(msg) = message(ev, args[0]) {
+        if let Ok(msg) = message(ev, args[0], Coerce::PLAIN) {
             e.trace.push(msg);
         }
         e
