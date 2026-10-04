@@ -7,7 +7,7 @@ mod fs;
 mod json;
 mod lists;
 mod misc;
-mod strings;
+pub(crate) mod strings;
 
 use std::cell::Cell;
 use std::collections::HashMap;

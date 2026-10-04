@@ -2215,6 +2215,7 @@ dependencies = [
  "libtest-mimic",
  "md-5",
  "regex",
+ "regex-automata",
  "rnix",
  "rowan",
  "serde_json",

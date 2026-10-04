@@ -11,5 +11,10 @@
   (builtins.split "([[:space:]]+)" " a  b ")
   (builtins.split "x" "abc")
   (builtins.match "a{2}" "aa")
+  (builtins.split "a|ab" "ab")
+  (builtins.split "(a|ab)(c|bcd)?(d*)" "abcd")
+  (builtins.split "(a$)|(a)" "ab")
+  (builtins.split "(a|ab)$" "ab")
+  (builtins.split "a*" "ab")
 
 ]

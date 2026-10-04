@@ -19,9 +19,6 @@ use crate::symbol::Interner;
 use crate::symbol::Sym;
 use crate::symbol::Syms;
 
-/// A regular expression pattern and whether it must match the whole input.
-pub(crate) type RegexKey = (Vec<u8>, bool);
-
 /// Owns everything that outlives a single evaluation: compiled files are
 /// cached here so that later sessions reuse them, and all of it is freed when
 /// the context is dropped.
@@ -35,8 +32,10 @@ pub struct Context {
     /// system: the expressions live in `arena` and are only handed out with
     /// the lifetime of a borrow of `self`.
     files: RefCell<HashMap<String, ExprRef<'static>>>,
-    /// Compiled regular expressions by (pattern, anchored).
-    pub(crate) regex_cache: RefCell<HashMap<RegexKey, Rc<regex::bytes::Regex>>>,
+    /// Compiled `builtins.match` patterns by source.
+    pub(crate) match_regexes: RefCell<HashMap<Vec<u8>, Rc<regex::bytes::Regex>>>,
+    /// Compiled `builtins.split` patterns by source.
+    pub(crate) split_regexes: RefCell<HashMap<Vec<u8>, Rc<builtins::strings::SplitRegex>>>,
 }
 
 impl Context {
@@ -53,7 +52,8 @@ impl Context {
             io,
             globals,
             files: RefCell::new(HashMap::new()),
-            regex_cache: RefCell::new(HashMap::new()),
+            match_regexes: RefCell::new(HashMap::new()),
+            split_regexes: RefCell::new(HashMap::new()),
         }
     }
 
