@@ -216,7 +216,8 @@ fn end_comments_at_cr(text: &str) -> Cow<'_, str> {
 }
 
 /// Inserts text wherever rnix lexes the source differently from Nix: a space
-/// where rnix lexes one token but Nix lexes several, `./` before an ellipsis
+/// where rnix lexes one token but Nix lexes several or rnix parses a token as
+/// part of the path before it but Nix does not, `./` before an ellipsis
 /// Nix lexes as the start of a path, and an empty interpolation between the
 /// slashes of `//` in a path continued after an interpolation. Retokenises after each as the text after
 /// it changes, and returns the offsets of the inserted bytes in the result.
@@ -237,6 +238,7 @@ fn match_nix_tokens(text: &str) -> (Cow<'_, str>, Vec<u32>) {
             split_division(kind, s, after_interpol)
                 .or_else(|| split_number(kind, s))
                 .or_else(|| split_less(kind, s))
+                .or_else(|| split_home_path(kind, after_interpol))
                 .map(|i| (at + i, " "))
                 .or_else(|| ellipsis_path(kind, &text[at..]).then_some((at, "./")))
                 .or_else(|| {
@@ -308,6 +310,14 @@ fn split_division(kind: rnix::SyntaxKind, s: &str, after_interpol: bool) -> Opti
         && !s.starts_with('~')
         && s.find('/') == Some(s.len() - 1))
     .then_some(s.len() - 1)
+}
+
+/// rnix parses a home path directly after an interpolation that ends a path,
+/// as in `./a/${b}~/c`, as the rest of that path, but `~` cannot continue a
+/// path in Nix, so this is `./a/${b}` then `~/c`. Returns the offset of such a
+/// home path, where a space makes rnix parse the same two paths.
+fn split_home_path(kind: rnix::SyntaxKind, after_interpol: bool) -> Option<usize> {
+    (kind == rnix::SyntaxKind::TOKEN_PATH_HOME && after_interpol).then_some(0)
 }
 
 /// Nix lexes `<` as the start of a search path only when path segments
