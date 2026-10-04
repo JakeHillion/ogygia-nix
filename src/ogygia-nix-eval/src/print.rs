@@ -106,7 +106,9 @@ fn print_value<'a>(ev: &Eval<'a>, v: Value<'a>, out: &mut Vec<u8>) -> R<'a, ()> 
         Value::Int(i) => out.extend_from_slice(i.to_string().as_bytes()),
         Value::Float(f) => out.extend_from_slice(float_g(f).as_bytes()),
         Value::Str(s) => escape_string(out, s.s),
-        Value::Path(p) => out.extend_from_slice(crate::path::show(p.0).as_bytes()),
+        Value::Path(p) => {
+            out.extend_from_slice(crate::path::show(p.0, ev.settings.pure).as_bytes())
+        }
         Value::Attrs(a) => {
             out.extend_from_slice(b"{ ");
             for e in a.sorted(ev.ctx) {
@@ -152,7 +154,7 @@ fn short_into<'a>(ev: &Eval<'a>, v: Value<'a>, s: &mut String, depth: usize) {
             escape_string(&mut b, &text[..text.len().min(100)]);
             s.push_str(&String::from_utf8_lossy(&b));
         }
-        Value::Path(p) => s.push_str(&crate::path::show(p.0)),
+        Value::Path(p) => s.push_str(&crate::path::show(p.0, ev.settings.pure)),
         Value::Attrs(a) => {
             if depth == 0 {
                 s.push_str("{ ... }");

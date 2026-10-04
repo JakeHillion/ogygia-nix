@@ -373,6 +373,12 @@ mod tests {
     }
 
     #[test]
+    fn shows_the_store_directory_with_a_trailing_slash() {
+        assert_eq!(outcome("/nix/store/."), "values");
+        assert_eq!(outcome("builtins.toXML [ /nix/store /nix ]"), "values");
+    }
+
+    #[test]
     fn ignores_nul_bytes() {
         assert_eq!(outcome("1\0+"), "ignored");
         assert_eq!(outcome("\"a\0b\""), "ignored");
