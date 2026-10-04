@@ -70,7 +70,11 @@ pub fn run_with_stack<T: Send>(f: impl FnOnce() -> T + Send) -> T {
 /// against `base_dir`.
 pub fn eval_to_string(text: &str, base_dir: &str, settings: Settings) -> Result<String, String> {
     run_with_stack(|| {
-        let ctx = Context::new(Io::default());
+        let ctx = Context::new(if settings.pure {
+            Io::pure()
+        } else {
+            Io::default()
+        });
         let bump = bumpalo::Bump::new();
         let ev = Eval::new(&ctx, &bump, settings);
         let result = ev
