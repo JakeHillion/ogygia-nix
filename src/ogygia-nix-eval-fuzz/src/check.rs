@@ -268,7 +268,7 @@ pub fn check(src: &str) -> Outcome {
 fn check_with(eval: impl Fn(&str) -> Run, src: &str) -> Outcome {
     let ours: Run = run_with_stack(|| {
         Context::new(Io::default())
-            .compile_str(src, "/")
+            .compile_str(src, "/", true)
             .map(|_| String::new())
             .map_err(|e| e.msg)
     });
@@ -328,6 +328,7 @@ mod tests {
     fn both_reject_parse() {
         assert_eq!(outcome("1 +"), "parse-rejected");
         assert_eq!(outcome("undefined"), "parse-rejected");
+        assert_eq!(outcome("~/a"), "parse-rejected");
     }
 
     #[test]

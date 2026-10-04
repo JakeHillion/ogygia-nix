@@ -27,7 +27,10 @@ pub fn scoped_import<'a>(ev: &Eval<'a>, args: &[Value<'a>]) -> R<'a> {
     let path = ev.coerce_to_path(args[1])?;
     let file = ev.ctx.io.resolve_import(&path).map_err(io_err)?;
     let names: Vec<_> = scope.entries.iter().map(|e| e.name).collect();
-    let expr = ev.ctx.compile_file_scoped(&file, &names).map_err(io_err)?;
+    let expr = ev
+        .ctx
+        .compile_file_scoped(&file, ev.settings.pure, &names)
+        .map_err(io_err)?;
     let slots = ev
         .bump
         .alloc_slice_fill_iter(scope.entries.iter().map(|e| Cell::new(e.value)));

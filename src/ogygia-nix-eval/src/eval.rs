@@ -1234,7 +1234,7 @@ impl<'a> Eval<'a> {
         }
         let expr = self
             .ctx
-            .compile_file(&path)
+            .compile_file(&path, self.settings.pure)
             .map_err(|e| error(ErrorKind::Eval, format!("{e:#}")))?;
         let v = self.thunk(ThunkState::Expr(expr, self.root_env()));
         self.import_cache.borrow_mut().insert(path.clone(), v);
@@ -1255,7 +1255,7 @@ impl<'a> Eval<'a> {
     pub fn eval_string(&self, text: &str, base_dir: &str) -> R<'a> {
         let expr = self
             .ctx
-            .compile_str(text, base_dir)
+            .compile_str(text, base_dir, self.settings.pure)
             .map_err(|e| error(ErrorKind::Eval, e.msg))?;
         self.eval(expr, self.root_env())
     }
