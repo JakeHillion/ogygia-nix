@@ -45,33 +45,46 @@ pub struct Recheck {
 /// Run `check` on every finding in `findings` again, keeping only those
 /// that still diverge. Must not run while anything records findings there.
 pub fn recheck(findings: &Path, check: impl Fn(&str) -> Outcome) -> std::io::Result<Recheck> {
+    eprintln!("rechecking findings in {}", findings.display());
     let mut summary = Recheck::default();
     let entries = match std::fs::read_dir(findings) {
         Ok(entries) => entries,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(summary),
         Err(e) => return Err(e),
     };
+    let mut dirs = Vec::new();
     for entry in entries {
         let entry = entry?;
         if entry.file_name().to_string_lossy().starts_with('.') || !entry.file_type()?.is_dir() {
             continue;
         }
-        let dir = entry.path();
-        let Ok(src) = std::fs::read_to_string(dir.join("input.nix")) else {
-            std::fs::remove_dir_all(&dir)?;
-            summary.removed += 1;
-            continue;
-        };
-        match check(&src) {
-            Outcome::Diverged(report) => {
-                write_atomic(&dir, "report", &report)?;
-                summary.kept += 1;
-            }
-            Outcome::Skipped => summary.inconclusive += 1,
-            _ => {
+        dirs.push(entry.path());
+    }
+    let total = dirs.len();
+    for (index, dir) in dirs.into_iter().enumerate() {
+        match std::fs::read_to_string(dir.join("input.nix")) {
+            Ok(src) => match check(&src) {
+                Outcome::Diverged(report) => {
+                    write_atomic(&dir, "report", &report)?;
+                    summary.kept += 1;
+                }
+                Outcome::Skipped => summary.inconclusive += 1,
+                _ => {
+                    std::fs::remove_dir_all(&dir)?;
+                    summary.removed += 1;
+                }
+            },
+            Err(_) => {
                 std::fs::remove_dir_all(&dir)?;
                 summary.removed += 1;
             }
+        }
+        let processed = index + 1;
+        if processed % 1000 == 0 {
+            eprintln!(
+                "rechecked {processed}/{total} findings ({:.1}%)",
+                processed as f64 * 100.0 / total as f64
+            );
         }
     }
     Ok(summary)
