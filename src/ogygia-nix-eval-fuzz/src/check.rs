@@ -211,7 +211,8 @@ fn run_nix(mode: &[&str], expr: &str) -> Option<Run> {
         return None;
     }
     Some(if status.success() {
-        Ok(String::from_utf8_lossy(&stdout).trim_end().to_owned())
+        let stdout = String::from_utf8_lossy(&stdout);
+        Ok(stdout.strip_suffix('\n').unwrap_or(&stdout).to_owned())
     } else {
         Err(stderr)
     })
@@ -332,6 +333,11 @@ mod tests {
     #[test]
     fn equal_values() {
         assert_eq!(outcome("{ a = [ 1 2.5 \"x\" ]; }"), "values");
+    }
+
+    #[test]
+    fn keeps_trailing_whitespace_in_paths() {
+        assert_eq!(outcome("/a + \"b \""), "values");
     }
 
     #[test]
