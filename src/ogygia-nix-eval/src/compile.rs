@@ -403,19 +403,10 @@ impl<'a> Compiler<'a> {
             ast::BinOpKind::MoreOrEq => BinOp::Ge,
             ast::BinOpKind::NotEqual => BinOp::Neq,
             ast::BinOpKind::Or => BinOp::Or,
-            ast::BinOpKind::PipeRight => {
-                return Ok(Expr::Apply {
-                    func: rhs,
-                    args: self.ctx.alloc_slice(vec![lhs]),
-                    pos: op_pos,
-                });
-            }
-            ast::BinOpKind::PipeLeft => {
-                return Ok(Expr::Apply {
-                    func: lhs,
-                    args: self.ctx.alloc_slice(vec![rhs]),
-                    pos: op_pos,
-                });
+            ast::BinOpKind::PipeRight | ast::BinOpKind::PipeLeft => {
+                return err(format!(
+                    "experimental Nix feature 'pipe-operators' is disabled at {op_pos}"
+                ));
             }
         };
         Ok(Expr::Bin(op, lhs, rhs, op_pos))
