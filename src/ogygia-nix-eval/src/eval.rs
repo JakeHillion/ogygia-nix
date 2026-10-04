@@ -1175,11 +1175,13 @@ impl<'a> Eval<'a> {
                 buf.extend_from_slice(crate::print::float_to_string(f).as_bytes())
             }
             Value::List(l) if c.more => {
+                // Nix omits the separator after an element that is an empty list.
                 for (i, item) in l.items.iter().enumerate() {
-                    if i > 0 {
+                    self.coerce_into(*item, c, buf, ctx)?;
+                    let empty = matches!(self.force(*item)?, Value::List(l) if l.items.is_empty());
+                    if i + 1 < l.items.len() && !empty {
                         buf.push(b' ');
                     }
-                    self.coerce_into(*item, c, buf, ctx)?;
                 }
             }
             other => {
