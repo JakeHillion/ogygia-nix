@@ -20,8 +20,6 @@ jobs:
     steps:
     - name: Checkout code
       uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
-      with:
-        fetch-depth: 0
 
     - name: Install Nix
       uses: cachix/install-nix-action@a49548c11d9846ad46ecc0115273879b045f001c # v31
@@ -48,7 +46,16 @@ jobs:
       with:
         arguments: .#ci
 
-    - name: Run tests
-      uses: testquorum/action@668f94d477b166a6dc9b8599f74f9e4d93dfc95f # main
-      with:
-        token: ${{ secrets.TESTQUORUM_TOKEN }}
+    - name: Build all outputs
+      run: nix-fast-build --no-nom --flake '.#checks' -j 2 --eval-workers 4
+
+    - name: Run tests from the Nix-built nextest archive
+      run: |
+        archive="$(nix build --no-link --print-out-paths .#ogygia-nextest-archive)/archive.tar"
+        archive_zst="$RUNNER_TEMP/ogygia-nextest-archive.tar.zst"
+        zstd -T0 "$archive" -o "$archive_zst"
+        cargo nextest run \
+          --archive-file "$archive_zst" \
+          --workspace-remap "$GITHUB_WORKSPACE" \
+          --test-threads num-cpus \
+          --no-fail-fast
