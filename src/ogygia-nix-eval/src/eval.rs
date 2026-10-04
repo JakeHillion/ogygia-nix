@@ -905,8 +905,8 @@ impl<'a> Eval<'a> {
                 Ok(self.update(a, b))
             }
             BinOp::Add => {
-                let (a, b) = operands()?;
-                self.add(a, b, pos)
+                let a = self.eval(l, env)?;
+                self.add(a, || self.eval(r, env), pos)
             }
             BinOp::Sub | BinOp::Mul | BinOp::Div => {
                 let (a, b) = operands()?;
@@ -955,12 +955,14 @@ impl<'a> Eval<'a> {
         self.attrs_sorted(&out)
     }
 
-    pub fn add(&self, a: Value<'a>, b: Value<'a>, pos: Pos<'a>) -> R<'a> {
+    /// `a + b`, where `b` is evaluated only after a string-like `a` is
+    /// coerced, as Nix does.
+    pub fn add(&self, a: Value<'a>, b: impl FnOnce() -> R<'a>, pos: Pos<'a>) -> R<'a> {
         let a = self.force(a)?;
-        let b = self.force(b)?;
         match a {
-            Value::Int(_) | Value::Float(_) => self.arith(BinOp::Add, a, b, pos),
+            Value::Int(_) | Value::Float(_) => self.arith(BinOp::Add, a, b()?, pos),
             Value::Path(p) => {
+                let b = self.force(b()?)?;
                 let mut buf = crate::path::abs(p.0).as_bytes().to_vec();
                 let mut ctx = Vec::new();
                 self.coerce_into(b, Coerce::PLAIN, &mut buf, &mut ctx)?;
@@ -975,6 +977,7 @@ impl<'a> Eval<'a> {
                 let mut buf = Vec::new();
                 let mut ctx = Vec::new();
                 self.coerce_into(a, Coerce::INTERP, &mut buf, &mut ctx)?;
+                let b = self.force(b()?)?;
                 self.coerce_into(b, Coerce::INTERP, &mut buf, &mut ctx)?;
                 Ok(self.str_with_ctx(&buf, ctx))
             }
