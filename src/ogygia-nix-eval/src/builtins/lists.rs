@@ -126,7 +126,7 @@ pub fn gen_list<'a>(ev: &Eval<'a>, args: &[Value<'a>]) -> R<'a> {
     if n < 0 {
         return eval_err(format!("cannot create list of size {n}"));
     }
-    let f = args[0];
+    let f = ev.force_function(args[0])?;
     let out: Vec<Value<'a>> = (0..n).map(|i| ev.lazy_app(f, Value::Int(i))).collect();
     Ok(ev.list(&out))
 }

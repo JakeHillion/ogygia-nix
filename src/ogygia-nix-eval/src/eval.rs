@@ -335,7 +335,8 @@ impl<'a> Eval<'a> {
 
     pub fn force_function(&self, v: Value<'a>) -> R<'a> {
         let v = self.force(v)?;
-        if v.is_function() {
+        if v.is_function() || matches!(v, Value::Attrs(a) if a.get(self.ctx.syms.functor).is_some())
+        {
             Ok(v)
         } else {
             self.type_error("a function", v)
