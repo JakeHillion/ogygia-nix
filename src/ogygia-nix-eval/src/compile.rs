@@ -191,13 +191,13 @@ fn end_comments_at_cr(text: &str) -> Cow<'_, str> {
 }
 
 /// Inserts text wherever rnix lexes the source differently from Nix: a space
-/// where rnix lexes one token but Nix lexes two, and `./` before an ellipsis
+/// where rnix lexes one token but Nix lexes several, and `./` before an ellipsis
 /// Nix lexes as the start of a path. Retokenises after each as the text after
 /// it changes, and returns the offsets of the inserted bytes in the result.
 fn match_nix_tokens(text: &str) -> (Cow<'_, str>, Vec<u32>) {
     let mut text = Cow::Borrowed(text);
     let mut inserted = Vec::new();
-    if !text.contains(['/', '.']) {
+    if !text.contains(['/', '.', '<']) {
         return (text, inserted);
     }
     loop {
@@ -210,6 +210,7 @@ fn match_nix_tokens(text: &str) -> (Cow<'_, str>, Vec<u32>) {
             prev = Some(kind);
             split_division(kind, s, after_interpol)
                 .or_else(|| split_number(kind, s))
+                .or_else(|| split_less(kind, s))
                 .map(|i| (at + i, " "))
                 .or_else(|| ellipsis_path(kind, &text[at..]).then_some((at, "./")))
         });
@@ -248,6 +249,31 @@ fn split_division(kind: rnix::SyntaxKind, s: &str, after_interpol: bool) -> Opti
         && !s.starts_with('~')
         && s.find('/') == Some(s.len() - 1))
     .then_some(s.len() - 1)
+}
+
+/// Nix lexes `<` as the start of a search path only when path segments
+/// separated by single slashes and then `>` follow it, and otherwise as less
+/// than. rnix also lexes a search path with an empty segment, as in `<a//b>`,
+/// and an error token when another `<` follows, as in `<a/b<c>`, which Nix
+/// lexes as `< a/b <c>`. Returns the offset after such a `<`.
+fn split_less(kind: rnix::SyntaxKind, s: &str) -> Option<usize> {
+    let search_path = s
+        .strip_prefix('<')
+        .and_then(|s| s.strip_suffix('>'))
+        .is_some_and(|s| {
+            s.split('/').all(|seg| {
+                !seg.is_empty()
+                    && seg
+                        .bytes()
+                        .all(|c| c.is_ascii_alphanumeric() || b"._-+".contains(&c))
+            })
+        });
+    (matches!(
+        kind,
+        rnix::SyntaxKind::TOKEN_PATH_SEARCH | rnix::SyntaxKind::TOKEN_ERROR
+    ) && s.starts_with('<')
+        && !search_path)
+        .then_some(1)
 }
 
 /// Nix lexes a float as `(([1-9][0-9]*\.[0-9]*)|(0?\.[0-9]+))([Ee][+-]?[0-9]+)?`
