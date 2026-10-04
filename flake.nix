@@ -201,9 +201,18 @@
             '';
           });
 
+          # cargo nextest archive builds with the test profile, so its
+          # dependencies are cached separately from the release ones.
+          testCargoArtifacts = craneLib.buildDepsOnly (commonArgs // {
+            pname = "ogygia-test-deps";
+            version = "git";
+            CARGO_PROFILE = "test";
+          });
+
           ogygia-nextest-archive = craneLib.buildPackage (commonArgs // {
             pname = "ogygia-nextest-archive";
-            inherit version cargoArtifacts;
+            inherit version;
+            cargoArtifacts = testCargoArtifacts;
             doCheck = false;
             doNotPostBuildInstallCargoBinaries = true;
             # Bake nebula-cert's and jj's store paths into the archived test
