@@ -152,8 +152,8 @@ pub fn group_by<'a>(ev: &Eval<'a>, args: &[Value<'a>]) -> R<'a> {
     let f = ev.force_function(args[0])?;
     let mut groups: HashMap<Sym, Vec<Value<'a>>> = HashMap::new();
     for item in ev.force_list(args[1])? {
-        let key = ev.force_str(ev.call(f, *item)?)?;
-        let key = ev.ctx.interner.intern_bytes(key.s);
+        let key = ev.force_str_no_ctx(ev.call(f, *item)?)?;
+        let key = ev.ctx.interner.intern_bytes(key);
         groups.entry(key).or_default().push(*item);
     }
     let out = groups

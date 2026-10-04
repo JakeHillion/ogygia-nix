@@ -600,8 +600,8 @@ impl<'a> Eval<'a> {
             AttrKey::Static(s) => Ok(*s),
             AttrKey::Dynamic(e) => {
                 let v = self.eval(e, env)?;
-                let s = self.force_str(v)?;
-                Ok(self.ctx.interner.intern_bytes(s.s))
+                let s = self.force_str_no_ctx(v)?;
+                Ok(self.ctx.interner.intern_bytes(s))
             }
         }
     }
@@ -658,8 +658,7 @@ impl<'a> Eval<'a> {
         for d in def.dynamics {
             let name = match self.eval(d.name, env2)? {
                 Value::Null => continue,
-                Value::Str(s) => self.ctx.interner.intern_bytes(s.s),
-                other => return self.type_error("a string", other),
+                v => self.ctx.interner.intern_bytes(self.force_str_no_ctx(v)?),
             };
             if entries.iter().any(|e| e.name == name) {
                 return eval_err(format!(
