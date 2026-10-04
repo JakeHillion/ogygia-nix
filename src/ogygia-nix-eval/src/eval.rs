@@ -897,10 +897,12 @@ impl<'a> Eval<'a> {
                 v.extend_from_slice(b);
                 Ok(self.list(&v))
             }
+            // Nix evaluates `b` as a set before `a`.
             BinOp::Update => {
-                let (a, b) = operands()?;
-                let a = self.force_attrs(a)?;
+                let b = self.eval(r, env)?;
                 let b = self.force_attrs(b)?;
+                let a = self.eval(l, env)?;
+                let a = self.force_attrs(a)?;
                 Ok(self.update(a, b))
             }
             BinOp::Add => {
