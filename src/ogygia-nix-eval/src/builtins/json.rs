@@ -114,35 +114,266 @@ pub fn write_json<'a>(
 
 pub fn from_json<'a>(ev: &Eval<'a>, args: &[Value<'a>]) -> R<'a> {
     let s = ev.force_str(args[0])?;
-    let parsed: serde_json::Value = match serde_json::from_slice(s.s) {
-        Ok(v) => v,
-        Err(e) => return eval_err(format!("JSON parse error: {e}")),
+    let Ok(text) = std::str::from_utf8(s.s) else {
+        return eval_err("JSON parse error: invalid UTF-8");
     };
-    Ok(json_to_value(ev, &parsed))
+    JsonParser {
+        s: text.strip_prefix('\u{feff}').unwrap_or(text),
+        i: 0,
+    }
+    .parse(ev)
 }
 
-pub fn json_to_value<'a>(ev: &Eval<'a>, j: &serde_json::Value) -> Value<'a> {
-    match j {
-        serde_json::Value::Null => Value::Null,
-        serde_json::Value::Bool(b) => Value::Bool(*b),
-        serde_json::Value::Number(n) => match n.as_i64() {
-            Some(i) => Value::Int(i),
-            None => Value::Float(n.as_f64().unwrap_or(f64::NAN)),
-        },
-        serde_json::Value::String(s) => ev.string(s),
-        serde_json::Value::Array(items) => {
-            let items: Vec<Value<'a>> = items.iter().map(|i| json_to_value(ev, i)).collect();
-            ev.list(&items)
+enum JsonFrame<'a> {
+    List(Vec<Value<'a>>),
+    Attrs(Vec<Entry<'a>>, crate::symbol::Sym),
+}
+
+/// A JSON parser with the semantics of the nlohmann parser Nix uses: no
+/// nesting limit, `-0` is an integer, and integers that overflow are floats.
+struct JsonParser<'s> {
+    s: &'s str,
+    i: usize,
+}
+
+impl JsonParser<'_> {
+    fn parse<'a>(&mut self, ev: &Eval<'a>) -> R<'a> {
+        let mut stack: Vec<JsonFrame<'a>> = Vec::new();
+        loop {
+            self.ws();
+            let mut v = match self.peek() {
+                Some(b'[') => {
+                    self.i += 1;
+                    self.ws();
+                    if self.peek() == Some(b']') {
+                        self.i += 1;
+                        ev.list(&[])
+                    } else {
+                        stack.push(JsonFrame::List(Vec::new()));
+                        continue;
+                    }
+                }
+                Some(b'{') => {
+                    self.i += 1;
+                    self.ws();
+                    if self.peek() == Some(b'}') {
+                        self.i += 1;
+                        ev.attrs(Vec::new())
+                    } else {
+                        let key = self.key(ev)?;
+                        stack.push(JsonFrame::Attrs(Vec::new(), key));
+                        continue;
+                    }
+                }
+                Some(b'"') => ev.string(&self.string()?),
+                Some(b't') => self.literal("true", Value::Bool(true))?,
+                Some(b'f') => self.literal("false", Value::Bool(false))?,
+                Some(b'n') => self.literal("null", Value::Null)?,
+                Some(b'-' | b'0'..=b'9') => self.number()?,
+                _ => return self.err(),
+            };
+            loop {
+                self.ws();
+                match stack.last_mut() {
+                    None if self.i == self.s.len() => return Ok(v),
+                    None => return self.err(),
+                    Some(JsonFrame::List(items)) => {
+                        items.push(v);
+                        match self.next() {
+                            Some(b',') => break,
+                            Some(b']') => {}
+                            _ => return self.err(),
+                        }
+                    }
+                    Some(JsonFrame::Attrs(entries, key)) => {
+                        entries.push(Entry {
+                            name: *key,
+                            value: v,
+                            pos: None,
+                        });
+                        match self.next() {
+                            Some(b',') => {
+                                *key = self.key(ev)?;
+                                break;
+                            }
+                            Some(b'}') => {}
+                            _ => return self.err(),
+                        }
+                    }
+                }
+                v = match stack.pop() {
+                    Some(JsonFrame::List(items)) => ev.list(&items),
+                    Some(JsonFrame::Attrs(entries, _)) => ev.attrs(entries),
+                    None => unreachable!("a value was just added to the top frame"),
+                };
+            }
         }
-        serde_json::Value::Object(map) => ev.attrs(
-            map.iter()
-                .map(|(k, v)| Entry {
-                    name: ev.sym(k),
-                    value: json_to_value(ev, v),
-                    pos: None,
-                })
-                .collect(),
-        ),
+    }
+
+    fn err<T>(&self) -> R<'static, T> {
+        eval_err(format!("JSON parse error at byte {}", self.i))
+    }
+
+    fn peek(&self) -> Option<u8> {
+        self.s.as_bytes().get(self.i).copied()
+    }
+
+    fn next(&mut self) -> Option<u8> {
+        let c = self.peek();
+        self.i += 1;
+        c
+    }
+
+    fn ws(&mut self) {
+        while let Some(b' ' | b'\t' | b'\n' | b'\r') = self.peek() {
+            self.i += 1;
+        }
+    }
+
+    fn literal<'a>(&mut self, word: &str, v: Value<'a>) -> R<'a> {
+        if !self.s[self.i..].starts_with(word) {
+            return self.err();
+        }
+        self.i += word.len();
+        Ok(v)
+    }
+
+    fn key(&mut self, ev: &Eval<'_>) -> R<'static, crate::symbol::Sym> {
+        self.ws();
+        if self.peek() != Some(b'"') {
+            return self.err();
+        }
+        let key = self.string()?;
+        self.ws();
+        if self.next() != Some(b':') {
+            return self.err();
+        }
+        Ok(ev.sym(&key))
+    }
+
+    fn string(&mut self) -> R<'static, String> {
+        self.i += 1;
+        let mut out = String::new();
+        loop {
+            let rest = &self.s[self.i..];
+            let end = rest
+                .find(|c: char| c == '"' || c == '\\' || c < ' ')
+                .unwrap_or(rest.len());
+            out.push_str(&rest[..end]);
+            self.i += end;
+            match self.next() {
+                Some(b'"') => break,
+                Some(b'\\') => {}
+                _ => return self.err(),
+            }
+            let c = match self.next() {
+                Some(b'"') => '"',
+                Some(b'\\') => '\\',
+                Some(b'/') => '/',
+                Some(b'b') => '\u{8}',
+                Some(b'f') => '\u{c}',
+                Some(b'n') => '\n',
+                Some(b'r') => '\r',
+                Some(b't') => '\t',
+                Some(b'u') => {
+                    let hi = self.hex4()?;
+                    let code = match hi {
+                        0xd800..=0xdbff => {
+                            if !self.s[self.i..].starts_with("\\u") {
+                                return self.err();
+                            }
+                            self.i += 2;
+                            let lo = self.hex4()?;
+                            if !(0xdc00..=0xdfff).contains(&lo) {
+                                return self.err();
+                            }
+                            0x10000 + ((hi - 0xd800) << 10) + (lo - 0xdc00)
+                        }
+                        0xdc00..=0xdfff => return self.err(),
+                        c => c,
+                    };
+                    char::from_u32(code).expect("surrogates were excluded")
+                }
+                _ => return self.err(),
+            };
+            out.push(c);
+        }
+        if out.contains('\0') {
+            return eval_err(format!(
+                "input string '{out}' cannot be represented as Nix string because it contains null bytes"
+            ));
+        }
+        Ok(out)
+    }
+
+    fn hex4(&mut self) -> R<'static, u32> {
+        let digits = self.s.get(self.i..self.i + 4).unwrap_or("");
+        if digits.len() != 4 || !digits.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return self.err();
+        }
+        self.i += 4;
+        Ok(u32::from_str_radix(digits, 16).expect("validated hex digits"))
+    }
+
+    fn digits(&mut self) -> usize {
+        let start = self.i;
+        while let Some(b'0'..=b'9') = self.peek() {
+            self.i += 1;
+        }
+        self.i - start
+    }
+
+    fn number<'a>(&mut self) -> R<'a> {
+        let start = self.i;
+        let negative = self.peek() == Some(b'-');
+        if negative {
+            self.i += 1;
+        }
+        match self.peek() {
+            Some(b'0') => self.i += 1,
+            Some(b'1'..=b'9') => {
+                self.digits();
+            }
+            _ => return self.err(),
+        }
+        let mut float = false;
+        if self.peek() == Some(b'.') {
+            self.i += 1;
+            if self.digits() == 0 {
+                return self.err();
+            }
+            float = true;
+        }
+        if let Some(b'e' | b'E') = self.peek() {
+            self.i += 1;
+            if let Some(b'+' | b'-') = self.peek() {
+                self.i += 1;
+            }
+            if self.digits() == 0 {
+                return self.err();
+            }
+            float = true;
+        }
+        let text = &self.s[start..self.i];
+        if !float {
+            if negative {
+                if let Ok(i) = text.parse::<i64>() {
+                    return Ok(Value::Int(i));
+                }
+            } else if let Ok(u) = text.parse::<u64>() {
+                return match i64::try_from(u) {
+                    Ok(i) => Ok(Value::Int(i)),
+                    Err(_) => eval_err(format!(
+                        "unsigned json number {u} outside of Nix integer range"
+                    )),
+                };
+            }
+        }
+        let f: f64 = text.parse().expect("validated JSON number");
+        if !f.is_finite() {
+            return eval_err(format!("number overflow parsing '{text}'"));
+        }
+        Ok(Value::Float(f))
     }
 }
 

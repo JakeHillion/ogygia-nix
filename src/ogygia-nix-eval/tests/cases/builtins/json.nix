@@ -9,4 +9,8 @@
   (builtins.toJSON { __toString = self: "y"; })
   (builtins.fromJSON ''{"a": [1, 2.5, "x", null, true, {"b": -3}], "c": 1e3}'')
   (builtins.fromJSON "\"\\u00e9\"")
+  (builtins.fromJSON "[-0, -0.0, -0e0]")
+  (builtins.fromJSON "[-9223372036854775808, -9223372036854775809, 18446744073709551616]")
+  (builtins.fromJSON "﻿1")
+  (builtins.length (builtins.fromJSON (builtins.concatStringsSep "" (builtins.genList (_: "[") 200 ++ builtins.genList (_: "]") 200))))
 ]
