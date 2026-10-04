@@ -24,9 +24,12 @@
 
     advisory-db.url = "github:rustsec/advisory-db";
     advisory-db.flake = false;
+
+    nix-fast-build.url = "github:Mic92/nix-fast-build";
+    nix-fast-build.inputs.nixpkgs.follows = "nixpkgs";
   };
 
-  outputs = { self, nixpkgs, flake-utils, treefmt-nix, fenix, crane, advisory-db }:
+  outputs = { self, nixpkgs, flake-utils, treefmt-nix, fenix, crane, advisory-db, nix-fast-build }:
     flake-utils.lib.eachSystem [ "aarch64-linux" "x86_64-linux" ]
       (system:
         let
@@ -206,7 +209,7 @@
             # Bake nebula-cert's and jj's store paths into the archived test
             # binaries the same way the ogygia package does, so the nebula
             # round-trip test and the ogygia-updated change-id tests find them
-            # via the embedded constants when the archive runs — the testquorum
+            # via the embedded constants when the archive runs — the test
             # runner has neither on PATH.
             env.OGYGIA_NEBULA_CERT_BIN = "${pkgs.nebula}/bin/nebula-cert";
             env.OGYGIA_JJ_BIN = "${pkgs.jujutsu}/bin/jj";
@@ -306,6 +309,7 @@
             packages = [
               toolchain
               pkgs.cargo-nextest
+              nix-fast-build.packages.${system}.nix-fast-build
               pkgs.zstd
             ];
             # Doctests are not part of the nextest archive, so they are
@@ -322,8 +326,7 @@
 
           formatter = treefmtEval.config.build.wrapper;
 
-          checks = {
-            inherit ogygia ogygia-irisd ogygia-hostinfod ogygia-dashboard ogygia-updated ogygia-clevis;
+          checks = self.packages.${system} // self.devShells.${system} // {
 
             ogygia-clippy = craneLib.cargoClippy (commonArgs // {
               inherit cargoArtifacts;
@@ -414,11 +417,5 @@
         _module.args.ogygia-updated = self.packages.${pkgs.stdenv.hostPlatform.system}.ogygia-updated;
         _module.args.ogygia-clevis = self.packages.${pkgs.stdenv.hostPlatform.system}.ogygia-clevis;
       };
-
-      ci = nixpkgs.lib.genAttrs [ "aarch64-linux" "x86_64-linux" ] (system:
-        (self.packages.${system} or { })
-        // (self.checks.${system} or { })
-        // (self.devShells.${system} or { })
-      );
     };
 }
