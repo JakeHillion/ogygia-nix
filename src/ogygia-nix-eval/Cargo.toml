@@ -10,6 +10,7 @@ bumpalo = { workspace = true }
 hex = { workspace = true }
 lasso = { workspace = true }
 md-5 = { workspace = true }
+num-bigint = { workspace = true }
 regex = { workspace = true }
 regex-automata = { workspace = true }
 rnix = { workspace = true }

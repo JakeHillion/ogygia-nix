@@ -3,6 +3,7 @@
 use std::borrow::Cow;
 use std::collections::HashMap;
 
+use num_bigint::BigUint;
 use rnix::ast;
 use rnix::ast::AstToken;
 use rnix::ast::HasEntry;
@@ -399,9 +400,11 @@ impl<'a> Compiler<'a> {
                         return err(format!("invalid integer '{}' at {pos}", i.syntax().text()));
                     }
                 },
-                ast::LiteralKind::Float(f) => match f.value() {
-                    Ok(v) => Expr::Float(v),
-                    Err(_) => return err(format!("invalid float at {pos}")),
+                ast::LiteralKind::Float(f) => match parse_float(f.syntax().text()) {
+                    Some(v) => Expr::Float(v),
+                    None => {
+                        return err(format!("invalid float '{}' at {pos}", f.syntax().text()));
+                    }
                 },
                 ast::LiteralKind::Uri(u) => Expr::Str(self.lit_str(u.syntax().text().as_bytes())),
             },
@@ -1060,4 +1063,106 @@ fn child<T>(o: Option<T>) -> CResult<T> {
     o.ok_or_else(|| CompileError {
         msg: "syntax error: incomplete expression".into(),
     })
+}
+
+/// Parses a float literal as Nix does with glibc's `strtod`, rejecting a
+/// literal whose value overflows to infinity or underflows.
+fn parse_float(text: &str) -> Option<f64> {
+    let v: f64 = text.parse().ok()?;
+    if v.is_infinite() || (v <= f64::MIN_POSITIVE && underflows(text)) {
+        return None;
+    }
+    Some(v)
+}
+
+// Whether glibc detects tininess after rounding on this architecture, as
+// its sysdeps/*/tininess.h say; on the others it detects it before.
+const TININESS_AFTER_ROUNDING: bool = cfg!(any(
+    target_arch = "x86",
+    target_arch = "x86_64",
+    target_arch = "riscv32",
+    target_arch = "riscv64",
+    target_arch = "mips",
+    target_arch = "mips32r6",
+    target_arch = "mips64",
+    target_arch = "mips64r6",
+    target_arch = "loongarch64",
+    target_arch = "csky",
+));
+
+/// Whether glibc's `strtod` reports a range error for the literal `text`:
+/// its value is tiny (below the smallest normal double) and not exactly
+/// representable. Where tininess is detected after rounding, a value that
+/// rounds to the smallest normal double at full precision is not tiny.
+fn underflows(text: &str) -> bool {
+    let Some((digits, scale)) = decimal(text) else {
+        return true;
+    };
+    if digits.is_empty() {
+        return false;
+    }
+    // Below 10^-330 the value is under half the smallest subnormal.
+    if digits.len() as i64 + scale < -330 {
+        return true;
+    }
+    if scale >= 0 {
+        return false;
+    }
+    // The value is d / 10^e; compare it against powers of two exactly.
+    let d: BigUint = digits.parse().expect("decimal digits");
+    let ten_e = BigUint::from(10u32).pow((-scale) as u32);
+    if (&d << 1022u32) >= ten_e {
+        return false;
+    }
+    if (&d << 1074u32) % &ten_e == BigUint::ZERO {
+        return false;
+    }
+    // 2^-1022 - 2^-1076 is halfway to the next double below at full
+    // precision, and rounds to even, up to 2^-1022.
+    !(TININESS_AFTER_ROUNDING && (&d << 1076u32) >= BigUint::from((1u64 << 54) - 1) * &ten_e)
+}
+
+/// A decimal literal as significant digits and the power of ten they are
+/// scaled by, `None` for an exponent out of range.
+fn decimal(text: &str) -> Option<(String, i64)> {
+    let (mantissa, exp) = text.split_once(['e', 'E']).unwrap_or((text, "0"));
+    let (int, frac) = mantissa.split_once('.').unwrap_or((mantissa, ""));
+    let digits = format!("{int}{frac}");
+    let digits = digits.trim_start_matches('0');
+    let significant = digits.trim_end_matches('0');
+    if significant.is_empty() {
+        return Some((String::new(), 0));
+    }
+    let scale =
+        exp.parse::<i64>().ok()? - frac.len() as i64 + (digits.len() - significant.len()) as i64;
+    Some((significant.to_owned(), scale))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_float_smallest_normal() {
+        assert_eq!(
+            parse_float("2.2250738585072014e-308"),
+            Some(f64::MIN_POSITIVE)
+        );
+        // Tiny, and rounds to the smallest normal only at subnormal precision.
+        assert_eq!(parse_float("2.2250738585072012e-308"), None);
+        // Tiny before rounding, but rounds to the smallest normal at full
+        // precision; 2^-1022 - 2^-1076 is the boundary.
+        let after = TININESS_AFTER_ROUNDING.then_some(f64::MIN_POSITIVE);
+        assert_eq!(parse_float("2.2250738585072013e-308"), after);
+        assert_eq!(parse_float("2.225073858507201259574e-308"), after);
+        assert_eq!(parse_float("2.225073858507201259573e-308"), None);
+    }
+
+    #[test]
+    fn parse_float_exact_subnormal() {
+        assert_eq!(parse_float("0.0e-999"), Some(0.0));
+        assert_eq!(parse_float("1.0e-320"), None);
+        let min = format!("{:.1100e}", f64::from_bits(1));
+        assert_eq!(parse_float(&min), Some(f64::from_bits(1)));
+    }
 }
