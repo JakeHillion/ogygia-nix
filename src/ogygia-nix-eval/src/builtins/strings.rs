@@ -163,7 +163,7 @@ pub fn replace_strings<'a>(ev: &Eval<'a>, args: &[Value<'a>]) -> R<'a> {
 
 /// Translate a POSIX extended regular expression to `regex` syntax, writing
 /// the end anchor `$` as `end`.
-fn translate_regex(re: &[u8], end: &str) -> String {
+fn translate_regex(re: &[u8], end: &str) -> Result<String, String> {
     let re = String::from_utf8_lossy(re);
     let chars: Vec<char> = re.chars().collect();
     let mut out = String::with_capacity(re.len() + 8);
@@ -172,42 +172,7 @@ fn translate_regex(re: &[u8], end: &str) -> String {
         let c = chars[i];
         match c {
             '[' => {
-                // Copy a bracket expression, where backslash is literal and
-                // `]` first is a member.
-                out.push('[');
-                i += 1;
-                if chars.get(i) == Some(&'^') {
-                    out.push('^');
-                    i += 1;
-                }
-                if chars.get(i) == Some(&']') {
-                    out.push_str("\\]");
-                    i += 1;
-                }
-                while i < chars.len() && chars[i] != ']' {
-                    if chars[i] == '[' && matches!(chars.get(i + 1), Some(':' | '.' | '=')) {
-                        let close = chars.get(i + 1).copied().unwrap();
-                        let start = i;
-                        i += 2;
-                        while i + 1 < chars.len() && !(chars[i] == close && chars[i + 1] == ']') {
-                            i += 1;
-                        }
-                        i += 2;
-                        out.extend(&chars[start..i.min(chars.len())]);
-                        continue;
-                    }
-                    match chars[i] {
-                        '\\' | '[' | '&' | '~' => {
-                            out.push('\\');
-                            out.push(chars[i]);
-                        }
-                        '-' if chars.get(i + 1) == Some(&'-') => out.push_str("\\-"),
-                        ch => out.push(ch),
-                    }
-                    i += 1;
-                }
-                out.push(']');
-                i += 1;
+                i = translate_bracket(&chars, i + 1, &mut out)?;
             }
             '\\' => {
                 if let Some(&n) = chars.get(i + 1) {
@@ -235,7 +200,282 @@ fn translate_regex(re: &[u8], end: &str) -> String {
             }
         }
     }
-    out
+    Ok(out)
+}
+
+/// The names `std::regex_traits<char>::lookup_collatename` accepts in `[.x.]`
+/// and `[=x=]`, indexed by the character each names.
+const COLLATE_NAMES: [&str; 128] = [
+    "NUL",
+    "SOH",
+    "STX",
+    "ETX",
+    "EOT",
+    "ENQ",
+    "ACK",
+    "alert",
+    "backspace",
+    "tab",
+    "newline",
+    "vertical-tab",
+    "form-feed",
+    "carriage-return",
+    "SO",
+    "SI",
+    "DLE",
+    "DC1",
+    "DC2",
+    "DC3",
+    "DC4",
+    "NAK",
+    "SYN",
+    "ETB",
+    "CAN",
+    "EM",
+    "SUB",
+    "ESC",
+    "IS4",
+    "IS3",
+    "IS2",
+    "IS1",
+    "space",
+    "exclamation-mark",
+    "quotation-mark",
+    "number-sign",
+    "dollar-sign",
+    "percent-sign",
+    "ampersand",
+    "apostrophe",
+    "left-parenthesis",
+    "right-parenthesis",
+    "asterisk",
+    "plus-sign",
+    "comma",
+    "hyphen",
+    "period",
+    "slash",
+    "zero",
+    "one",
+    "two",
+    "three",
+    "four",
+    "five",
+    "six",
+    "seven",
+    "eight",
+    "nine",
+    "colon",
+    "semicolon",
+    "less-than-sign",
+    "equals-sign",
+    "greater-than-sign",
+    "question-mark",
+    "commercial-at",
+    "A",
+    "B",
+    "C",
+    "D",
+    "E",
+    "F",
+    "G",
+    "H",
+    "I",
+    "J",
+    "K",
+    "L",
+    "M",
+    "N",
+    "O",
+    "P",
+    "Q",
+    "R",
+    "S",
+    "T",
+    "U",
+    "V",
+    "W",
+    "X",
+    "Y",
+    "Z",
+    "left-square-bracket",
+    "backslash",
+    "right-square-bracket",
+    "circumflex",
+    "underscore",
+    "grave-accent",
+    "a",
+    "b",
+    "c",
+    "d",
+    "e",
+    "f",
+    "g",
+    "h",
+    "i",
+    "j",
+    "k",
+    "l",
+    "m",
+    "n",
+    "o",
+    "p",
+    "q",
+    "r",
+    "s",
+    "t",
+    "u",
+    "v",
+    "w",
+    "x",
+    "y",
+    "z",
+    "left-curly-bracket",
+    "vertical-line",
+    "right-curly-bracket",
+    "tilde",
+    "DEL",
+];
+
+/// A token inside a bracket expression, as libstdc++'s POSIX scanner reads it.
+enum BracketToken {
+    Char(char),
+    Dash,
+    End,
+    Collate(String),
+    Equiv(String),
+    Class(String),
+}
+
+/// Push `c` as a literal member of a `regex` character class.
+fn push_class_char(out: &mut String, c: char) {
+    if c.is_ascii_punctuation() {
+        out.push('\\');
+    }
+    out.push(c);
+}
+
+/// Push `c`, if any, as a literal member of a `regex` character class.
+fn push_pending(out: &mut String, c: Option<char>) {
+    if let Some(c) = c {
+        push_class_char(out, c);
+    }
+}
+
+/// Translate the bracket expression whose body starts at `chars[i]`, returning
+/// the index after its closing `]`. Follows libstdc++'s POSIX bracket
+/// grammar: `]` first is a member, `-` is a member only first or last,
+/// a range starts at a character or `[.x.]` and ends at a character or `-`,
+/// and `[:x:]`, `[.x.]` and `[=x=]` must name a known class or character.
+fn translate_bracket(chars: &[char], mut i: usize, out: &mut String) -> Result<usize, String> {
+    let next = |i: &mut usize, start: bool| -> Result<BracketToken, String> {
+        let c = *chars.get(*i).ok_or("unterminated bracket expression")?;
+        *i += 1;
+        Ok(match c {
+            '-' => BracketToken::Dash,
+            ']' if !start => BracketToken::End,
+            '[' => match chars.get(*i) {
+                None => return Err("unterminated bracket expression".into()),
+                Some(&close @ ('.' | ':' | '=')) => {
+                    *i += 1;
+                    let name_start = *i;
+                    while *i < chars.len() && chars[*i] != close {
+                        *i += 1;
+                    }
+                    let name: String = chars[name_start..*i].iter().collect();
+                    if chars.get(*i + 1) != Some(&']') {
+                        return Err(format!("unterminated [{close}{name}{close}]"));
+                    }
+                    *i += 2;
+                    match close {
+                        '.' => BracketToken::Collate(name),
+                        ':' => BracketToken::Class(name),
+                        _ => BracketToken::Equiv(name),
+                    }
+                }
+                Some(_) => BracketToken::Char('['),
+            },
+            c => BracketToken::Char(c),
+        })
+    };
+    let collate = |name: &str| -> Result<char, String> {
+        COLLATE_NAMES
+            .iter()
+            .position(|n| *n == name)
+            .map(|c| char::from(c as u8))
+            .ok_or_else(|| format!("invalid collating element '{name}'"))
+    };
+
+    out.push('[');
+    if chars.get(i) == Some(&'^') {
+        out.push('^');
+        i += 1;
+    }
+    // The character that may start a range, if the last term was one.
+    let mut last: Option<char> = None;
+    let mut start = true;
+    loop {
+        let tok = next(&mut i, start)?;
+        let first = std::mem::replace(&mut start, false);
+        match tok {
+            BracketToken::End => break,
+            BracketToken::Char(c) => {
+                push_pending(out, last);
+                last = Some(c);
+            }
+            BracketToken::Collate(name) => {
+                push_pending(out, last);
+                last = Some(collate(&name)?);
+            }
+            BracketToken::Equiv(name) => {
+                push_pending(out, last.take());
+                let c = collate(&name)?;
+                push_class_char(out, c.to_ascii_lowercase());
+                if c.is_ascii_alphabetic() {
+                    out.push(c.to_ascii_uppercase());
+                }
+            }
+            BracketToken::Class(name) => {
+                push_pending(out, last.take());
+                let lower = name.to_ascii_lowercase();
+                let class = match lower.as_str() {
+                    "d" => "digit",
+                    "w" => "word",
+                    "s" => "space",
+                    n @ ("alnum" | "alpha" | "blank" | "cntrl" | "digit" | "graph" | "lower"
+                    | "print" | "punct" | "space" | "upper" | "xdigit") => n,
+                    _ => return Err(format!("invalid character class '{name}'")),
+                };
+                out.push_str("[:");
+                out.push_str(class);
+                out.push_str(":]");
+            }
+            BracketToken::Dash if first => last = Some('-'),
+            BracketToken::Dash => {
+                let save = i;
+                if let BracketToken::End = next(&mut i, false)? {
+                    push_pending(out, last);
+                    push_class_char(out, '-');
+                    break;
+                }
+                i = save;
+                let l = last.take().ok_or("invalid '-' in bracket expression")?;
+                let r = match next(&mut i, false)? {
+                    BracketToken::Char(r) => r,
+                    BracketToken::Dash => '-',
+                    _ => return Err("invalid end of range".into()),
+                };
+                if l > r {
+                    return Err(format!("invalid range '{l}-{r}'"));
+                }
+                push_class_char(out, l);
+                out.push('-');
+                push_class_char(out, r);
+            }
+        }
+    }
+    push_pending(out, last);
+    out.push(']');
+    Ok(i)
 }
 
 fn regex_error(re: &[u8], e: impl std::fmt::Display) -> Box<crate::value::EvalError> {
@@ -252,7 +492,10 @@ fn compile_match_regex<'a>(ev: &Eval<'a>, re: &[u8]) -> R<'a, Rc<regex::bytes::R
     if let Some(r) = ev.ctx.match_regexes.borrow().get(re) {
         return Ok(r.clone());
     }
-    let pattern = format!("^(?:{})$", translate_regex(re, "$"));
+    let pattern = format!(
+        "^(?:{})$",
+        translate_regex(re, "$").map_err(|e| regex_error(re, e))?
+    );
     let r = regex::bytes::RegexBuilder::new(&pattern)
         .dot_matches_new_line(true)
         .build()
@@ -312,13 +555,16 @@ fn compile_split_regex<'a>(ev: &Eval<'a>, re: &[u8]) -> R<'a, Rc<SplitRegex>> {
             .build(pattern)
             .map_err(|e| regex_error(re, e))
     };
-    let translated = translate_regex(re, "$");
+    let translated = translate_regex(re, "$").map_err(|e| regex_error(re, e))?;
     let r = Rc::new(SplitRegex {
         start: build(&translated, MatchKind::LeftmostFirst)?,
         longest: build(&translated, MatchKind::All)?,
         to_end: build(&format!("(?:{translated})\\z"), MatchKind::LeftmostFirst)?,
         to_cut: build(
-            &format!("(?:{})\\z", translate_regex(re, "[a&&b]")),
+            &format!(
+                "(?:{})\\z",
+                translate_regex(re, "[a&&b]").map_err(|e| regex_error(re, e))?
+            ),
             MatchKind::LeftmostFirst,
         )?,
     });
