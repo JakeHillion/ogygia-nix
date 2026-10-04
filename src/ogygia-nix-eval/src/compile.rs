@@ -107,6 +107,9 @@ struct PreSet {
     dynamics: Vec<(ast::Expr, u32, PreAttr)>,
     /// `inherit (from) names;` sources.
     froms: Vec<ast::Expr>,
+    /// Whether this is a `rec` set (only possible for a literal that later
+    /// definitions were merged into).
+    rec: bool,
 }
 
 enum PreAttr {
@@ -656,12 +659,14 @@ impl<'a> Compiler<'a> {
                 self.at(off)
             ))
         };
-        // Two definitions merge only when both are plain attribute sets:
-        // `a.b = 1; a.c = 2;` or `a = { b = 1; }; a.c = 2;`.
-        if let PreAttr::Expr(ast::Expr::AttrSet(lit)) = existing
-            && lit.rec_token().is_none()
-        {
-            let mut nested = PreSet::default();
+        // Definitions merge into an earlier attribute set literal, which may
+        // be `rec`: `a.b = 1; a.c = 2;` or `a = rec { b = 1; }; a.c = b;`. A
+        // later literal merges only if it is not `rec`.
+        if let PreAttr::Expr(ast::Expr::AttrSet(lit)) = existing {
+            let mut nested = PreSet {
+                rec: lit.rec_token().is_some(),
+                ..PreSet::default()
+            };
             for entry in lit.entries() {
                 self.merge_entry(&mut nested, entry)?;
             }
@@ -699,7 +704,11 @@ impl<'a> Compiler<'a> {
             }
             PreAttr::Expr(e) => self.expr(&e)?,
             PreAttr::Nested(set) => {
-                let e = self.attrs(set)?;
+                let e = if set.rec {
+                    self.rec_attrs(set)?
+                } else {
+                    self.attrs(set)?
+                };
                 self.leak(e)
             }
             PreAttr::Inherit(n, off) => {

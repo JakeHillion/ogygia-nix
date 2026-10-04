@@ -154,7 +154,12 @@ pub fn hash_size(algo: &str) -> Option<usize> {
 /// algorithm and the digest.
 pub fn parse_hash(s: &str, algo: Option<&str>) -> Result<(String, Vec<u8>)> {
     use base64::Engine;
-    let b64 = base64::engine::general_purpose::STANDARD;
+    // Nix accepts base64 with or without padding.
+    let b64 = base64::engine::GeneralPurpose::new(
+        &base64::alphabet::STANDARD,
+        base64::engine::GeneralPurposeConfig::new()
+            .with_decode_padding_mode(base64::engine::DecodePaddingMode::Indifferent),
+    );
     if let Some((a, rest)) = s.split_once('-')
         && let Some(size) = hash_size(a)
     {
@@ -185,7 +190,7 @@ pub fn parse_hash(s: &str, algo: Option<&str>) -> Result<(String, Vec<u8>)> {
         hex::decode(s).ok()
     } else if s.len() == (size * 8).div_ceil(5) {
         base32_decode(s)
-    } else if s.len() == size.div_ceil(3) * 4 {
+    } else if s.len() == size.div_ceil(3) * 4 || s.len() == (size * 4).div_ceil(3) {
         b64.decode(s).ok()
     } else {
         None

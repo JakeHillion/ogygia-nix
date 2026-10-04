@@ -1,0 +1,1 @@
+{ outputs = { self }: { value = "nested"; }; }

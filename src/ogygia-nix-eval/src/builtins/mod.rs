@@ -5,6 +5,8 @@ mod context;
 mod derivation;
 mod fs;
 mod json;
+
+pub use json::write_json;
 mod lists;
 mod misc;
 mod strings;
@@ -121,6 +123,7 @@ primops! {
     "getAttr" => 2, attrs::get_attr;
     "getContext" => 1, context::get_context;
     "getEnv" => 1, misc::get_env;
+    "getFlake" => 1, crate::flake::get_flake;
     "groupBy" => 2, lists::group_by;
     "hasAttr" => 2, attrs::has_attr;
     "hasContext" => 1, context::has_context;

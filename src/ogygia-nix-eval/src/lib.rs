@@ -14,6 +14,7 @@ mod compile;
 mod context;
 mod derivation;
 mod eval;
+mod flake;
 mod io;
 mod ir;
 mod path;
@@ -81,4 +82,105 @@ pub fn eval_to_string(text: &str, base_dir: &str, settings: Settings) -> Result<
             Err(e) => Err(e.to_string()),
         }
     })
+}
+
+/// A flake opened for evaluation, as `nix eval` sees it: in pure mode, with
+/// its inputs located through its lock file.
+pub struct FlakeSession<'a> {
+    ev: &'a Eval<'a>,
+    flake: Value<'a>,
+}
+
+/// Open the local flake `flake_ref` (a directory, optionally prefixed with
+/// `path:` or `git+file://`) and run `f` against it on an evaluation thread.
+/// Queries made through one session share evaluation work.
+pub fn with_flake<T: Send>(
+    flake_ref: &str,
+    f: impl for<'a> FnOnce(&FlakeSession<'a>) -> T + Send,
+) -> anyhow::Result<T> {
+    run_with_stack(|| {
+        let ctx = Context::new(Io::default());
+        let bump = bumpalo::Bump::new();
+        let settings = Settings {
+            current_system: None,
+            nix_path: Vec::new(),
+            pure: true,
+        };
+        let ev = Eval::new(&ctx, &bump, settings);
+        let (scheme, dir) = flake::parse_local_ref(flake_ref)?;
+        let locked = flake::open_local(&ctx.io, std::path::Path::new(dir), scheme)?;
+        let flake = ev
+            .flake_value(locked)
+            .map_err(|e| anyhow::anyhow!("evaluating flake '{flake_ref}': {e}"))?;
+        Ok(f(&FlakeSession { ev: &ev, flake }))
+    })
+}
+
+impl<'a> FlakeSession<'a> {
+    /// Evaluate `attr_path` of the flake's outputs the way
+    /// `nix eval --json <flake>#<attr_path> [--apply <apply>]` does: the path
+    /// is looked up under `packages.<system>` and `legacyPackages.<system>`
+    /// before the outputs themselves.
+    pub fn eval_json(
+        &self,
+        attr_path: &str,
+        apply: Option<&str>,
+    ) -> anyhow::Result<serde_json::Value> {
+        let ev = self.ev;
+        let path = flake::parse_attr_path(attr_path)?;
+        let result = (|| -> value::R<'a, Option<Vec<u8>>> {
+            let outputs = ev.force_attrs(self.flake)?;
+            let Some(outputs) = outputs.get(ev.sym("outputs")) else {
+                return Ok(None);
+            };
+            let prefixes: [&[&str]; 3] = [
+                &["packages", CURRENT_SYSTEM],
+                &["legacyPackages", CURRENT_SYSTEM],
+                &[],
+            ];
+            for prefix in prefixes {
+                let mut v = outputs;
+                let mut found = true;
+                for name in prefix
+                    .iter()
+                    .copied()
+                    .chain(path.iter().map(String::as_str))
+                {
+                    match ev.force(v)? {
+                        Value::Attrs(a) => match a.get(ev.sym(name)) {
+                            Some(x) => v = x,
+                            None => {
+                                found = false;
+                                break;
+                            }
+                        },
+                        _ => {
+                            found = false;
+                            break;
+                        }
+                    }
+                }
+                if !found {
+                    continue;
+                }
+                if let Some(apply) = apply {
+                    let cwd = std::env::current_dir()
+                        .map(|d| d.to_string_lossy().into_owned())
+                        .unwrap_or_else(|_| "/".to_owned());
+                    let f = ev.eval_string(apply, &cwd)?;
+                    v = ev.call(f, v)?;
+                }
+                let mut out = Vec::new();
+                let mut ctx = Vec::new();
+                builtins::write_json(ev, v, &mut out, &mut ctx)?;
+                return Ok(Some(out));
+            }
+            Ok(None)
+        })();
+        match result {
+            Ok(Some(json)) => Ok(serde_json::from_slice(&json)?),
+            Ok(None) => anyhow::bail!("flake does not provide attribute '{attr_path}'"),
+            Err(e) => anyhow::bail!("{e}"),
+        }
+    }
 }

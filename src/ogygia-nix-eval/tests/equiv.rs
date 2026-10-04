@@ -190,13 +190,14 @@ fn main() {
     let args = Arguments::from_args();
     // The runtime value, not env!: a nextest archive runs away from the tree
     // it was built in.
-    let root = PathBuf::from(std::env::var_os("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR"))
-        .join("tests/cases");
+    let manifest =
+        PathBuf::from(std::env::var_os("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR"));
+    let root = manifest.join("tests/cases");
     let mut files = Vec::new();
     collect(&root, &mut files);
 
     let version = check_nix_version();
-    let trials = files
+    let mut trials: Vec<Trial> = files
         .into_iter()
         .map(|path| {
             let name = path
@@ -215,5 +216,264 @@ fn main() {
             })
         })
         .collect();
+    trials.extend(flake_trials(&manifest.join("tests/flakes"), &version));
     libtest_mimic::run(&args, trials).exit();
+}
+
+/// How a flake fixture is presented to both evaluators.
+#[derive(Clone, Copy, Debug)]
+enum FlakeMode {
+    /// A plain directory, as a `path:` flake.
+    Path,
+    /// A Git repository with everything committed, plus an untracked file.
+    Git,
+    /// A Git repository with an uncommitted change to a tracked file.
+    GitDirty,
+    /// The `Git` repository, as a `path:` flake.
+    PathInGit,
+}
+
+fn git() -> String {
+    std::env::var("OGYGIA_NIX_EVAL_GIT")
+        .ok()
+        .or_else(|| option_env!("OGYGIA_GIT_BIN").map(str::to_owned))
+        .unwrap_or_else(|| "git".to_owned())
+}
+
+fn run_git(dir: &Path, args: &[&str]) -> Result<(), String> {
+    let out = Command::new(git())
+        .current_dir(dir)
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .args([
+            "-c",
+            "user.name=equiv",
+            "-c",
+            "user.email=equiv@example.com",
+        ])
+        .args([
+            "-c",
+            "commit.gpgsign=false",
+            "-c",
+            "init.defaultBranch=main",
+            // Detached auto-maintenance would write to `.git` while a
+            // `path:` fixture's tree is being hashed.
+            "-c",
+            "maintenance.auto=false",
+        ])
+        .args(args)
+        .output()
+        .map_err(|e| format!("running git: {e}"))?;
+    if !out.status.success() {
+        return Err(format!(
+            "git {args:?} failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        ));
+    }
+    Ok(())
+}
+
+fn copy_tree(from: &Path, to: &Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(to)?;
+    for entry in std::fs::read_dir(from)? {
+        let entry = entry?;
+        let target = to.join(entry.file_name());
+        if entry.file_type()?.is_dir() {
+            copy_tree(&entry.path(), &target)?;
+        } else {
+            std::fs::copy(entry.path(), &target)?;
+        }
+    }
+    Ok(())
+}
+
+/// Copy a fixture into a fresh directory set up for `mode`.
+fn stage_flake(fixture: &Path, mode: FlakeMode, dest: &Path) -> Result<(), String> {
+    copy_tree(fixture, dest).map_err(|e| format!("copying fixture: {e}"))?;
+    // Fixture files in the source tree may be read-only (the Nix store).
+    let _ = Command::new("chmod").args(["-R", "u+w"]).arg(dest).status();
+    std::fs::remove_file(dest.join("queries")).map_err(|e| e.to_string())?;
+    match mode {
+        FlakeMode::Path => {}
+        FlakeMode::Git | FlakeMode::GitDirty | FlakeMode::PathInGit => {
+            run_git(dest, &["init", "-q"])?;
+            run_git(dest, &["add", "-A"])?;
+            run_git(dest, &["commit", "-q", "-m", "fixture"])?;
+            std::fs::write(dest.join("untracked.nix"), "untracked\n").map_err(|e| e.to_string())?;
+            if matches!(mode, FlakeMode::GitDirty) {
+                let flake_nix = dest.join("flake.nix");
+                let mut text = std::fs::read_to_string(&flake_nix).map_err(|e| e.to_string())?;
+                text.push_str("# uncommitted\n");
+                std::fs::write(&flake_nix, text).map_err(|e| e.to_string())?;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// A query line: an attribute path and an optional `--apply` function,
+/// prefixed with `!` if evaluating it must fail.
+struct Query {
+    attr: String,
+    apply: Option<String>,
+    fails: bool,
+}
+
+fn parse_query(line: &str) -> Query {
+    let (fails, line) = match line.trim().strip_prefix('!') {
+        Some(rest) => (true, rest),
+        None => (false, line),
+    };
+    let (attr, apply) = match line.split_once(" --apply ") {
+        Some((attr, apply)) => (attr, Some(apply.trim().to_owned())),
+        None => (line, None),
+    };
+    Query {
+        attr: attr.trim().to_owned(),
+        apply,
+        fails,
+    }
+}
+
+fn nix_eval_flake(
+    flake_ref: &str,
+    store: &Path,
+    attr: &str,
+    apply: Option<&str>,
+) -> Result<String, String> {
+    let nix = Path::new(&nix_instantiate()).with_file_name("nix");
+    let mut cmd = Command::new(if nix.is_absolute() {
+        nix.into_os_string()
+    } else {
+        "nix".into()
+    });
+    let s = scratch();
+    cmd.env("HOME", s)
+        .env("NIX_STATE_DIR", s.join("state"))
+        .env("NIX_CONF_DIR", s.join("conf"))
+        .env("NIX_LOG_DIR", s.join("log"))
+        .env("XDG_CACHE_HOME", s.join("cache"))
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .args(["--extra-experimental-features", "nix-command flakes"])
+        .args(["--option", "flake-registry", ""])
+        .args(["--option", "use-registries", "false"])
+        .arg("--store")
+        .arg(format!("local?root={}", store.display()))
+        .args(["eval", "--json", "--no-write-lock-file"])
+        .arg(format!("{flake_ref}#{attr}"));
+    if let Some(apply) = apply {
+        cmd.args(["--apply", apply]);
+    }
+    let out = cmd.output().map_err(|e| format!("running nix: {e}"))?;
+    if out.status.success() {
+        Ok(String::from_utf8_lossy(&out.stdout).trim_end().to_owned())
+    } else {
+        Err(String::from_utf8_lossy(&out.stderr).into_owned())
+    }
+}
+
+fn run_flake(fixture: &Path, mode: FlakeMode) -> Result<(), Failed> {
+    let work = scratch().join(format!(
+        "flake-{}-{mode:?}",
+        fixture.file_name().unwrap().to_string_lossy()
+    ));
+    let _ = std::fs::remove_dir_all(&work);
+    let dir = work.join("src");
+    stage_flake(fixture, mode, &dir)?;
+    let flake_ref = match mode {
+        FlakeMode::Path | FlakeMode::PathInGit => format!("path:{}", dir.display()),
+        FlakeMode::Git | FlakeMode::GitDirty => format!("git+file://{}", dir.display()),
+    };
+    let queries = std::fs::read_to_string(fixture.join("queries")).map_err(|e| e.to_string())?;
+    let queries: Vec<Query> = queries
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .map(parse_query)
+        .collect();
+
+    let ours: Vec<Result<String, String>> = ogygia_nix_eval::with_flake(&flake_ref, |session| {
+        queries
+            .iter()
+            .map(|q| {
+                session
+                    .eval_json(&q.attr, q.apply.as_deref())
+                    .map(|v| v.to_string())
+                    .map_err(|e| format!("{e:#}"))
+            })
+            .collect()
+    })
+    .map_err(|e| format!("opening flake: {e:#}"))?;
+
+    let mut failures = Vec::new();
+    for (q, ours) in queries.iter().zip(ours) {
+        let theirs = nix_eval_flake(&flake_ref, &work.join("store"), &q.attr, q.apply.as_deref())
+            .map(|s| normalise_json(&s));
+        let agree = match (&theirs, &ours) {
+            (Ok(a), Ok(b)) => !q.fails && *a == normalise_json(b),
+            (Err(_), Err(_)) => q.fails,
+            _ => false,
+        };
+        if !agree {
+            failures.push(format!(
+                "query {}{}{}\n--- nix:\n{}\n--- ours:\n{}",
+                if q.fails { "(expected to fail) " } else { "" },
+                q.attr,
+                q.apply
+                    .as_ref()
+                    .map(|a| format!(" --apply {a}"))
+                    .unwrap_or_default(),
+                show(&theirs),
+                show(&ours)
+            ));
+        }
+    }
+    if failures.is_empty() {
+        Ok(())
+    } else {
+        Err(failures.join("\n\n").into())
+    }
+}
+
+/// Re-serialise JSON so that formatting differences do not matter.
+fn normalise_json(s: &str) -> String {
+    serde_json::from_str::<serde_json::Value>(s)
+        .map(|v| v.to_string())
+        .unwrap_or_else(|_| s.to_owned())
+}
+
+fn flake_trials(root: &Path, version: &Result<(), String>) -> Vec<Trial> {
+    let mut fixtures: Vec<PathBuf> = std::fs::read_dir(root)
+        .expect("read flakes dir")
+        .map(|e| e.expect("read flakes dir entry").path())
+        .filter(|p| p.join("queries").exists())
+        .collect();
+    fixtures.sort();
+    let mut trials = Vec::new();
+    for fixture in fixtures {
+        for mode in [
+            FlakeMode::Path,
+            FlakeMode::PathInGit,
+            FlakeMode::Git,
+            FlakeMode::GitDirty,
+        ] {
+            let name = format!(
+                "flakes/{}/{}",
+                fixture.file_name().unwrap().to_string_lossy(),
+                match mode {
+                    FlakeMode::Path => "path",
+                    FlakeMode::PathInGit => "path-in-git",
+                    FlakeMode::Git => "git",
+                    FlakeMode::GitDirty => "git-dirty",
+                }
+            );
+            let version = version.clone();
+            let fixture = fixture.clone();
+            trials.push(Trial::test(name, move || {
+                version?;
+                run_flake(&fixture, mode)
+            }));
+        }
+    }
+    trials
 }
