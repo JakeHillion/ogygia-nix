@@ -228,24 +228,27 @@ fn add_path<'a>(
 
 pub fn path<'a>(ev: &Eval<'a>, args: &[Value<'a>]) -> R<'a> {
     let set = ev.force_attrs(args[0])?;
-    let get = |n: &str| set.get(ev.sym(n));
-    let Some(p) = get("path") else {
+    let (mut path, mut name, mut filter, mut recursive) = (None, None, None, true);
+    for e in set.entries {
+        match ev.ctx.name(e.name) {
+            "path" => path = Some(ev.coerce_to_path(e.value)?),
+            "name" => {
+                name = Some(String::from_utf8_lossy(ev.force_str_no_ctx(e.value)?).into_owned());
+            }
+            "filter" => filter = Some(ev.force_function(e.value)?),
+            "recursive" => recursive = ev.force_bool(e.value)?,
+            "sha256" => {
+                ev.force_str_no_ctx(e.value)?;
+            }
+            n => return eval_err(format!("unsupported argument '{n}' to 'builtins.path'")),
+        }
+    }
+    let Some(path) = path else {
         return eval_err(
             "missing required 'path' attribute in the first argument to builtins.path",
         );
     };
-    let path = ev.coerce_to_path(p)?;
-    let name = match get("name") {
-        Some(n) => Some(String::from_utf8_lossy(ev.force_str_no_ctx(n)?).into_owned()),
-        None => None,
-    };
-    let filter = match get("filter") {
-        Some(f) => Some(ev.force_function(f)?),
-        None => None,
-    };
-    if let Some(r) = get("recursive")
-        && !ev.force_bool(r)?
-    {
+    if !recursive {
         return eval_err("non-recursive builtins.path is not supported");
     }
     add_path(ev, &path, name, filter)
