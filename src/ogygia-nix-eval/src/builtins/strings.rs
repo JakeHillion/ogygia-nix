@@ -367,10 +367,7 @@ enum BracketToken {
 
 /// Push `c` as a literal member of a `regex` character class.
 fn push_class_char(out: &mut String, c: char) {
-    if c.is_ascii_punctuation() {
-        out.push('\\');
-    }
-    out.push(c);
+    out.push_str(&regex::escape(c.encode_utf8(&mut [0; 4])));
 }
 
 /// Push `c`, if any, as a literal member of a `regex` character class.
