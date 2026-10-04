@@ -23,4 +23,7 @@
   (builtins.match "[a&&b]" "&")
   (builtins.match "[~~]" "~")
   (builtins.match "[\\]" "\\")
+  (builtins.match "[<>]+" "<>")
+  (builtins.match "[<-@]" "?")
+  (builtins.match "[[.greater-than-sign.]]" ">")
 ]
