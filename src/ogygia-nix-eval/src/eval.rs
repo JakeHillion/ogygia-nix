@@ -863,12 +863,16 @@ impl<'a> Eval<'a> {
                 let (a, b) = operands()?;
                 Ok(Value::Bool(self.less_than(a, b)?))
             }
+            // Nix desugars `a > b` and `a <= b` to `__lessThan b a`, which
+            // evaluates `b` first.
             BinOp::Gt => {
-                let (a, b) = operands()?;
+                let b = self.eval(r, env)?;
+                let a = self.eval(l, env)?;
                 Ok(Value::Bool(self.less_than(b, a)?))
             }
             BinOp::Le => {
-                let (a, b) = operands()?;
+                let b = self.eval(r, env)?;
+                let a = self.eval(l, env)?;
                 Ok(Value::Bool(!self.less_than(b, a)?))
             }
             BinOp::Ge => {
