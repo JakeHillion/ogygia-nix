@@ -132,6 +132,17 @@ pub fn compile<'a>(
             pos(n.text_range().start())
         ));
     }
+    if let Some(at) = parse
+        .syntax()
+        .descendants()
+        .filter_map(ast::Path::cast)
+        .find_map(|p| path_segments_before_interpolation(&p))
+    {
+        return err(format!(
+            "syntax error: unexpected string, expecting '${{' at {}",
+            pos(at)
+        ));
+    }
     let root = parse.tree();
     let expr = child(root.expr())?;
     let mut c = Compiler {
@@ -226,6 +237,24 @@ fn match_nix_tokens(text: &str) -> (Cow<'_, str>, Vec<u32>) {
             None => return (text, inserted),
         }
     }
+}
+
+/// Nix lexes a path followed by an interpolation as the longest prefix that
+/// is a path without `//`, then the rest before the interpolation as strings
+/// split at each `//`, and only accepts one string there. So `./a//b/${x}` is
+/// `./a/` `/b/` `x`, but `./a///b/${x}` and `./a//b//c/${x}` are syntax
+/// errors, which rnix accepts. Returns where the second such string starts.
+fn path_segments_before_interpolation(path: &ast::Path) -> Option<rnix::TextSize> {
+    let mut parts = path.parts().into_iter();
+    let InterpolPart::Literal(first) = parts.next()? else {
+        return None;
+    };
+    parts.next()?;
+    let text = first.syntax().text();
+    let mut slashes = (0..text.len()).filter(|&i| text[i..].starts_with("//"));
+    slashes.next()?;
+    let second = slashes.next()?;
+    Some(first.syntax().text_range().start() + rnix::TextSize::from(second as u32 + 1))
 }
 
 /// Nix lexes each `/` that ends a segment of a path continued after an
