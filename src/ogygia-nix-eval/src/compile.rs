@@ -106,6 +106,30 @@ pub fn compile<'a>(
             }
         ));
     }
+    // rnix parses a function wherever it parses an operand, but Nix only
+    // allows one unparenthesised outside operators, lists and selects.
+    if let Some(n) = parse.syntax().descendants().find(|n| {
+        n.kind() == rnix::SyntaxKind::NODE_LAMBDA
+            && n.parent().is_some_and(|p| {
+                matches!(
+                    p.kind(),
+                    rnix::SyntaxKind::NODE_LIST
+                        | rnix::SyntaxKind::NODE_BIN_OP
+                        | rnix::SyntaxKind::NODE_UNARY_OP
+                        | rnix::SyntaxKind::NODE_SELECT
+                        | rnix::SyntaxKind::NODE_HAS_ATTR
+                        | rnix::SyntaxKind::NODE_APPLY
+                )
+            })
+    }) {
+        return err(format!(
+            "syntax error: unexpected function at {}",
+            Pos {
+                source,
+                offset: u32::from(n.text_range().start()),
+            }
+        ));
+    }
     let root = parse.tree();
     let expr = child(root.expr())?;
     let mut c = Compiler {
