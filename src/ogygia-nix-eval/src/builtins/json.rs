@@ -380,11 +380,87 @@ impl JsonParser<'_> {
 pub fn from_toml<'a>(ev: &Eval<'a>, args: &[Value<'a>]) -> R<'a> {
     let s = ev.force_str(args[0])?;
     let text = String::from_utf8_lossy(s.s);
-    let table: toml::Table = match text.parse() {
+    let table: toml::Table = match split_headers_after_values(&text).parse() {
         Ok(t) => t,
         Err(e) => return eval_err(format!("while parsing TOML: {e}")),
     };
     toml_to_value(ev, &toml::Value::Table(table))
+}
+
+/// toml11 ends a table's key/value pairs as soon as the next non-whitespace
+/// is a `[`, without requiring the newline TOML does after a value, so a
+/// header may follow a value on the same line (`a = 1 [b]`). Insert that
+/// newline so the `toml` crate sees the same document.
+fn split_headers_after_values(text: &str) -> std::borrow::Cow<'_, str> {
+    use toml_parser::lexer::TokenKind;
+
+    enum Line {
+        Start,
+        Header,
+        Key,
+        Value { depth: usize, done: bool },
+    }
+
+    let mut splits = Vec::new();
+    let mut line = Line::Start;
+    for token in toml_parser::Source::new(text).lex() {
+        let kind = token.kind();
+        line = match (line, kind) {
+            (
+                Line::Value { depth: 0, .. } | Line::Start | Line::Header | Line::Key,
+                TokenKind::Newline,
+            ) => Line::Start,
+            (
+                l,
+                TokenKind::Whitespace | TokenKind::Comment | TokenKind::Newline | TokenKind::Eof,
+            ) => l,
+            (Line::Start, TokenKind::LeftSquareBracket) => Line::Header,
+            (Line::Start, _) => Line::Key,
+            (Line::Header, _) => Line::Header,
+            (Line::Key, TokenKind::Equals) => Line::Value {
+                depth: 0,
+                done: false,
+            },
+            (Line::Key, _) => Line::Key,
+            (
+                Line::Value {
+                    depth: 0,
+                    done: true,
+                },
+                TokenKind::LeftSquareBracket,
+            ) => {
+                splits.push(token.span().start());
+                Line::Header
+            }
+            (
+                Line::Value { depth, .. },
+                TokenKind::LeftSquareBracket | TokenKind::LeftCurlyBracket,
+            ) => Line::Value {
+                depth: depth + 1,
+                done: false,
+            },
+            (
+                Line::Value { depth, .. },
+                TokenKind::RightSquareBracket | TokenKind::RightCurlyBracket,
+            ) => Line::Value {
+                depth: depth.saturating_sub(1),
+                done: true,
+            },
+            (Line::Value { depth, .. }, _) => Line::Value { depth, done: true },
+        };
+    }
+    if splits.is_empty() {
+        return text.into();
+    }
+    let mut out = String::with_capacity(text.len() + splits.len());
+    let mut prev = 0;
+    for at in splits {
+        out.push_str(&text[prev..at]);
+        out.push('\n');
+        prev = at;
+    }
+    out.push_str(&text[prev..]);
+    out.into()
 }
 
 fn toml_to_value<'a>(ev: &Eval<'a>, t: &toml::Value) -> R<'a> {
