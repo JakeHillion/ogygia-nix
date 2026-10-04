@@ -652,7 +652,7 @@ impl<'a> Compiler<'a> {
 
     fn string(&mut self, s: &ast::Str, pos: Pos<'a>) -> CResult<Expr<'a>> {
         let mut out = Vec::new();
-        for part in s.normalized_parts() {
+        for part in str_parts(s) {
             match part {
                 InterpolPart::Literal(l) => {
                     if !l.is_empty() {
@@ -1047,10 +1047,51 @@ fn scope_of(names: &[Sym]) -> Scope {
     )
 }
 
+/// The literal text and interpolations of a string, with escapes resolved.
+/// rnix keeps a raw `\r\n` or `\r` in a `"` string, but Nix reads each as
+/// `\n`; an escaped `\r` is kept, as are both in an indented string.
+fn str_parts(s: &ast::Str) -> Vec<InterpolPart<String>> {
+    let indented = s.syntax().first_token().is_some_and(|t| t.text() == "''");
+    if indented {
+        return s.normalized_parts();
+    }
+    s.parts()
+        .map(|part| match part {
+            InterpolPart::Literal(l) => InterpolPart::Literal(unescape_str(l.syntax().text())),
+            InterpolPart::Interpolation(i) => InterpolPart::Interpolation(i),
+        })
+        .collect()
+}
+
+/// Resolves the escapes in the text of a `"` string literal.
+fn unescape_str(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.chars();
+    while let Some(c) = chars.next() {
+        match c {
+            '\\' => match chars.next() {
+                Some('n') => out.push('\n'),
+                Some('r') => out.push('\r'),
+                Some('t') => out.push('\t'),
+                Some(c) => out.push(c),
+                None => {}
+            },
+            '\r' => {
+                out.push('\n');
+                if chars.as_str().starts_with('\n') {
+                    chars.next();
+                }
+            }
+            c => out.push(c),
+        }
+    }
+    out
+}
+
 /// The text of a string literal with no interpolation.
 fn static_str(s: &ast::Str) -> Option<String> {
     let mut lit = String::new();
-    for part in s.normalized_parts() {
+    for part in str_parts(s) {
         match part {
             InterpolPart::Literal(l) => lit.push_str(&l),
             InterpolPart::Interpolation(_) => return None,
