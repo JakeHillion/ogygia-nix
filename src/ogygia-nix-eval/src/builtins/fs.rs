@@ -129,8 +129,11 @@ pub fn find_file<'a>(ev: &Eval<'a>, args: &[Value<'a>]) -> R<'a> {
             return Ok(ev.path_val(&candidate));
         }
     }
-    eval_err(format!(
-        "file '{name}' was not found in the Nix search path (add it using $NIX_PATH or -I)"
+    Err(error(
+        ErrorKind::Throw,
+        format!(
+            "file '{name}' was not found in the Nix search path (add it using $NIX_PATH or -I)"
+        ),
     ))
 }
 
