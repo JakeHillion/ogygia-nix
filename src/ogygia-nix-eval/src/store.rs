@@ -118,8 +118,8 @@ pub fn check_name(name: &str) -> Result<()> {
     if name.len() > 211 {
         bail!("store path name '{name}' is longer than 211 characters");
     }
-    if name.starts_with('.') {
-        bail!("store path name '{name}' starts with a period");
+    if name == "." || name == ".." {
+        bail!("store path name '{name}' is not valid");
     }
     if let Some(c) = name
         .chars()
@@ -128,6 +128,22 @@ pub fn check_name(name: &str) -> Result<()> {
         bail!("store path name '{name}' contains illegal character '{c}'");
     }
     Ok(())
+}
+
+/// `parseStorePath`: the canonical form of `path` if it names a store
+/// object rather than a path inside one.
+pub fn parse_store_path(path: &str) -> Option<String> {
+    if !path.starts_with('/') {
+        return None;
+    }
+    let path = crate::path::canon_path(path);
+    let base = path.strip_prefix(STORE_DIR)?.strip_prefix('/')?;
+    let (hash, name) = (base.as_bytes().get(..32)?, base.get(33..)?);
+    if base.contains('/') || !hash.iter().all(|c| BASE32_CHARS.contains(c)) {
+        return None;
+    }
+    check_name(name).ok()?;
+    Some(path)
 }
 
 /// Write one NAR string: its length, the bytes, and padding to 8 bytes.
