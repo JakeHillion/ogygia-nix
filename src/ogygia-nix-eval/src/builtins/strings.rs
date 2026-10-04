@@ -187,8 +187,17 @@ fn translate_regex(re: &[u8], end: &str) -> Result<String, String> {
                 }
                 i += 2;
             }
-            '$' => {
-                out.push_str(end);
+            '^' | '$' => {
+                // libstdc++ parses an assertion as a whole term, so a
+                // quantifier cannot follow one.
+                if chars.get(i + 1).is_some_and(|n| "*+?{".contains(*n)) {
+                    return Err("quantifier after an assertion".into());
+                }
+                if c == '$' {
+                    out.push_str(end);
+                } else {
+                    out.push(c);
+                }
                 i += 1;
             }
             '(' => {
