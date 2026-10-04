@@ -67,6 +67,8 @@ pub unsafe fn block_network() {
 
 /// What [`check`] made of an input.
 pub enum Outcome {
+    /// It contains a NUL byte, at which Nix stops reading its input.
+    Ignored,
     /// Both sides reject it.
     ParseRejected,
     /// Nix ran out of time, memory or stack.
@@ -83,7 +85,8 @@ pub enum Outcome {
 }
 
 impl Outcome {
-    pub const NAMES: [&str; 6] = [
+    pub const NAMES: [&str; 7] = [
+        "ignored",
         "parse-rejected",
         "skipped",
         "values",
@@ -95,12 +98,13 @@ impl Outcome {
     /// Index into [`Outcome::NAMES`].
     pub fn index(&self) -> usize {
         match self {
-            Outcome::ParseRejected => 0,
-            Outcome::Skipped => 1,
-            Outcome::Value => 2,
-            Outcome::Caught => 3,
-            Outcome::Uncaught => 4,
-            Outcome::Diverged(_) => 5,
+            Outcome::Ignored => 0,
+            Outcome::ParseRejected => 1,
+            Outcome::Skipped => 2,
+            Outcome::Value => 3,
+            Outcome::Caught => 4,
+            Outcome::Uncaught => 5,
+            Outcome::Diverged(_) => 6,
         }
     }
 }
@@ -257,6 +261,9 @@ fn agree(theirs: &Run, ours: &Run) -> bool {
 ///
 /// Nix runs first at each step, and an input on which it runs out of time,
 /// memory or stack is [skipped](Outcome::Skipped).
+/// An input containing a NUL byte is [ignored](Outcome::Ignored): Nix
+/// stops reading at the first one outside a string, so it evaluates a
+/// prefix of the input rather than the input.
 pub fn check(src: &str) -> Outcome {
     check_with(
         |expr| ogygia_nix_eval::eval_to_string(expr, "/", pure()),
@@ -266,6 +273,9 @@ pub fn check(src: &str) -> Outcome {
 
 /// [`check`], with `eval` standing in for ogygia-nix-eval's evaluation.
 fn check_with(eval: impl Fn(&str) -> Run, src: &str) -> Outcome {
+    if src.contains('\0') {
+        return Outcome::Ignored;
+    }
     let ours: Run = run_with_stack(|| {
         Context::new(Io::default())
             .compile_str(src, "/", true)
@@ -339,6 +349,12 @@ mod tests {
     #[test]
     fn neither_catches() {
         assert_eq!(outcome("abort \"x\""), "uncaught");
+    }
+
+    #[test]
+    fn ignores_nul_bytes() {
+        assert_eq!(outcome("1\0+"), "ignored");
+        assert_eq!(outcome("\"a\0b\""), "ignored");
     }
 
     #[test]
