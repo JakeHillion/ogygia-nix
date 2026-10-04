@@ -76,7 +76,7 @@ pub fn write_json<'a>(
         Value::Attrs(a) => {
             let s = &ev.ctx.syms;
             if a.get(s.to_string).is_some() {
-                let (st, c) = ev.coerce_to_string(v, Coerce::INTERP)?;
+                let (st, c) = ev.coerce_to_string(v, Coerce::PLAIN)?;
                 json_string(out, &st);
                 ctx.extend(c);
                 return Ok(());
