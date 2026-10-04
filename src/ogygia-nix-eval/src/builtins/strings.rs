@@ -1,8 +1,14 @@
 //! String builtins.
 
 use std::cmp::Ordering;
+use std::rc::Rc;
 
 use md5::Md5;
+use regex_automata::Anchored;
+use regex_automata::Input;
+use regex_automata::MatchKind;
+use regex_automata::meta;
+use regex_automata::util::syntax;
 use sha1::Sha1;
 use sha2::Digest;
 use sha2::Sha256;
@@ -155,8 +161,9 @@ pub fn replace_strings<'a>(ev: &Eval<'a>, args: &[Value<'a>]) -> R<'a> {
     Ok(ev.str_with_ctx(&out, ctx))
 }
 
-/// Translate a POSIX extended regular expression to `regex` syntax.
-fn translate_regex(re: &[u8]) -> String {
+/// Translate a POSIX extended regular expression to `regex` syntax, writing
+/// the end anchor `$` as `end`.
+fn translate_regex(re: &[u8], end: &str) -> String {
     let re = String::from_utf8_lossy(re);
     let chars: Vec<char> = re.chars().collect();
     let mut out = String::with_capacity(re.len() + 8);
@@ -218,6 +225,10 @@ fn translate_regex(re: &[u8]) -> String {
                     i += 1;
                 }
             }
+            '$' => {
+                out.push_str(end);
+                i += 1;
+            }
             c => {
                 out.push(c);
                 i += 1;
@@ -227,35 +238,30 @@ fn translate_regex(re: &[u8]) -> String {
     out
 }
 
-fn compile_regex<'a>(
-    ev: &Eval<'a>,
-    re: &[u8],
-    anchored: bool,
-) -> R<'a, std::rc::Rc<regex::bytes::Regex>> {
-    let key = (re.to_vec(), anchored);
-    if let Some(r) = ev.ctx.regex_cache.borrow().get(&key) {
+fn regex_error(re: &[u8], e: impl std::fmt::Display) -> Box<crate::value::EvalError> {
+    crate::value::error(
+        crate::value::ErrorKind::Eval,
+        format!(
+            "invalid regular expression '{}': {e}",
+            String::from_utf8_lossy(re)
+        ),
+    )
+}
+
+fn compile_match_regex<'a>(ev: &Eval<'a>, re: &[u8]) -> R<'a, Rc<regex::bytes::Regex>> {
+    if let Some(r) = ev.ctx.match_regexes.borrow().get(re) {
         return Ok(r.clone());
     }
-    let translated = translate_regex(re);
-    let pattern = if anchored {
-        format!("^(?:{translated})$")
-    } else {
-        translated
-    };
+    let pattern = format!("^(?:{})$", translate_regex(re, "$"));
     let r = regex::bytes::RegexBuilder::new(&pattern)
         .dot_matches_new_line(true)
         .build()
-        .map_err(|e| {
-            crate::value::error(
-                crate::value::ErrorKind::Eval,
-                format!(
-                    "invalid regular expression '{}': {e}",
-                    String::from_utf8_lossy(re)
-                ),
-            )
-        })?;
-    let r = std::rc::Rc::new(r);
-    ev.ctx.regex_cache.borrow_mut().insert(key, r.clone());
+        .map_err(|e| regex_error(re, e))?;
+    let r = Rc::new(r);
+    ev.ctx
+        .match_regexes
+        .borrow_mut()
+        .insert(re.to_vec(), r.clone());
     Ok(r)
 }
 
@@ -272,26 +278,103 @@ fn captures_list<'a>(ev: &Eval<'a>, caps: &regex::bytes::Captures) -> Value<'a> 
 pub fn match_<'a>(ev: &Eval<'a>, args: &[Value<'a>]) -> R<'a> {
     let re = ev.force_str_no_ctx(args[0])?;
     let s = ev.force_str(args[1])?;
-    let r = compile_regex(ev, re, true)?;
+    let r = compile_match_regex(ev, re)?;
     match r.captures(s.s) {
         Some(caps) => Ok(captures_list(ev, &caps)),
         None => Ok(Value::Null),
     }
 }
 
+/// A `builtins.split` pattern, searched for as Nix's POSIX `std::regex` does:
+/// each match starts as early as possible and is then as long as possible,
+/// with the groups of the first such match in order of alternatives and
+/// repetitions.
+pub(crate) struct SplitRegex {
+    /// Finds where the next match starts.
+    start: meta::Regex,
+    /// Finds where the longest match from a start ends.
+    longest: meta::Regex,
+    /// Captures a match that ends at the end of the haystack.
+    to_end: meta::Regex,
+    /// Captures a match that ends at the end of a haystack cut short, where
+    /// `$` cannot match.
+    to_cut: meta::Regex,
+}
+
+fn compile_split_regex<'a>(ev: &Eval<'a>, re: &[u8]) -> R<'a, Rc<SplitRegex>> {
+    if let Some(r) = ev.ctx.split_regexes.borrow().get(re) {
+        return Ok(r.clone());
+    }
+    let build = |pattern: &str, kind| {
+        meta::Builder::new()
+            .configure(meta::Config::new().match_kind(kind).utf8_empty(false))
+            .syntax(syntax::Config::new().utf8(false).dot_matches_new_line(true))
+            .build(pattern)
+            .map_err(|e| regex_error(re, e))
+    };
+    let translated = translate_regex(re, "$");
+    let r = Rc::new(SplitRegex {
+        start: build(&translated, MatchKind::LeftmostFirst)?,
+        longest: build(&translated, MatchKind::All)?,
+        to_end: build(&format!("(?:{translated})\\z"), MatchKind::LeftmostFirst)?,
+        to_cut: build(
+            &format!("(?:{})\\z", translate_regex(re, "[a&&b]")),
+            MatchKind::LeftmostFirst,
+        )?,
+    });
+    ev.ctx
+        .split_regexes
+        .borrow_mut()
+        .insert(re.to_vec(), r.clone());
+    Ok(r)
+}
+
 pub fn split<'a>(ev: &Eval<'a>, args: &[Value<'a>]) -> R<'a> {
     let re = ev.force_str_no_ctx(args[0])?;
     let s = ev.force_str(args[1])?;
-    let r = compile_regex(ev, re, false)?;
+    let r = compile_split_regex(ev, re)?;
+    let hay = s.s;
+    let mut caps = r.to_end.create_captures();
     let mut out = Vec::new();
     let mut last = 0;
-    for caps in r.captures_iter(s.s) {
-        let m = caps.get(0).expect("group 0 always matches");
-        out.push(ev.str_val(&s.s[last..m.start()], &[]));
-        out.push(captures_list(ev, &caps));
-        last = m.end();
+    let mut at = 0;
+    while at <= hay.len() {
+        let Some(m) = r.start.find(Input::new(hay).range(at..)) else {
+            break;
+        };
+        let start = m.start();
+        let end = r
+            .longest
+            .find(Input::new(hay).range(start..).anchored(Anchored::Yes))
+            .expect("a match starts here")
+            .end();
+        // Cutting the haystack at the end of the match makes `\z` find the
+        // groups of a match that ends there, but would let `$` match early.
+        let to = if end == hay.len() {
+            &r.to_end
+        } else {
+            &r.to_cut
+        };
+        to.captures(
+            Input::new(&hay[..end])
+                .range(start..)
+                .anchored(Anchored::Yes),
+            &mut caps,
+        );
+        let groups: Vec<Value<'a>> = (1..caps.group_len())
+            .map(|i| match caps.get_group(i) {
+                Some(g) => ev.str_val(&hay[g.range()], &[]),
+                None => Value::Null,
+            })
+            .collect();
+        out.push(ev.str_val(&hay[last..start], &[]));
+        out.push(ev.list(&groups));
+        last = end;
+        // As with `std::regex_iterator`, an empty match may directly follow
+        // another match, but the next search after one starts a byte later.
+        at = if start == end { end + 1 } else { end };
     }
-    out.push(ev.str_val(&s.s[last..], &[]));
+    out.push(ev.str_val(&hay[last..], &[]));
     Ok(ev.list(&out))
 }
 

@@ -99,6 +99,7 @@ lasso = { version = "0.7", features = ["multi-threaded"] }
 md-5 = "0.10"
 sha1 = "0.10"
 regex = "1"
+regex-automata = "0.4"
 rnix = "0.14"
 rowan = "0.16"
 
