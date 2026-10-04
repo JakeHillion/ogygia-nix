@@ -51,8 +51,8 @@ enum Scope {
 struct Compiler<'a> {
     ctx: &'a Context,
     source: &'a Source<'a>,
-    /// Offsets of the spaces [`separate_tokens`] inserted.
-    spaces: Vec<u32>,
+    /// Offsets of the bytes [`match_nix_tokens`] inserted.
+    inserted: Vec<u32>,
     /// Directory relative path literals are resolved against.
     base_dir: &'a str,
     pure: bool,
@@ -70,10 +70,10 @@ pub fn compile<'a>(
     extra_scope: Option<&[Sym]>,
 ) -> CResult<ExprRef<'a>> {
     let text = end_comments_at_cr(source.text);
-    let (text, spaces) = separate_tokens(&text);
+    let (text, inserted) = match_nix_tokens(&text);
     let pos = |offset: rnix::TextSize| Pos {
         source,
-        offset: source_offset(&spaces, u32::from(offset)),
+        offset: source_offset(&inserted, u32::from(offset)),
     };
     if let Some(at) = invalid_whitespace(&text) {
         return err(format!(
@@ -137,7 +137,7 @@ pub fn compile<'a>(
     let mut c = Compiler {
         ctx,
         source,
-        spaces,
+        inserted,
         base_dir: ctx.alloc_str(base_dir),
         pure,
         scopes: Vec::new(),
@@ -190,35 +190,50 @@ fn end_comments_at_cr(text: &str) -> Cow<'_, str> {
     }
 }
 
-/// Inserts a space wherever rnix lexes one token but Nix lexes two,
-/// retokenising after each as the text after it changes, and returns the
-/// offsets of the spaces in the result.
-fn separate_tokens(text: &str) -> (Cow<'_, str>, Vec<u32>) {
+/// Inserts text wherever rnix lexes the source differently from Nix: a space
+/// where rnix lexes one token but Nix lexes two, and `./` before an ellipsis
+/// Nix lexes as the start of a path. Retokenises after each as the text after
+/// it changes, and returns the offsets of the inserted bytes in the result.
+fn match_nix_tokens(text: &str) -> (Cow<'_, str>, Vec<u32>) {
     let mut text = Cow::Borrowed(text);
-    let mut spaces = Vec::new();
+    let mut inserted = Vec::new();
     if !text.contains(['/', '.']) {
-        return (text, spaces);
+        return (text, inserted);
     }
     loop {
         let mut start = 0;
         let mut prev = None;
-        let split = rnix::tokenize(&text).find_map(|(kind, s)| {
+        let insert = rnix::tokenize(&text).find_map(|(kind, s)| {
             let at = start;
             start += s.len();
             let after_interpol = prev == Some(rnix::SyntaxKind::TOKEN_INTERPOL_END);
             prev = Some(kind);
             split_division(kind, s, after_interpol)
                 .or_else(|| split_number(kind, s))
-                .map(|i| at + i)
+                .map(|i| (at + i, " "))
+                .or_else(|| ellipsis_path(kind, &text[at..]).then_some((at, "./")))
         });
-        match split {
-            Some(i) => {
-                text.to_mut().insert(i, ' ');
-                spaces.push(i as u32);
+        match insert {
+            Some((i, s)) => {
+                text.to_mut().insert_str(i, s);
+                inserted.extend((i..i + s.len()).map(|i| i as u32));
             }
-            None => return (text, spaces),
+            None => return (text, inserted),
         }
     }
+}
+
+/// Nix lexes `...` followed by path characters and a `/` that continues the
+/// path, as in `.../a`, as a relative path, but rnix lexes `...` as an
+/// ellipsis. Returns whether `rest` starts with such an ellipsis token, which
+/// `./` before it makes rnix lex as the same relative path.
+fn ellipsis_path(kind: rnix::SyntaxKind, rest: &str) -> bool {
+    let path_char = |c: &u8| c.is_ascii_alphanumeric() || b"._-+".contains(c);
+    let b = rest.as_bytes();
+    kind == rnix::SyntaxKind::TOKEN_ELLIPSIS
+        && b.iter().position(|c| !path_char(c)).is_some_and(|i| {
+            b[i] == b'/' && (b.get(i + 1).is_some_and(path_char) || b[i + 1..].starts_with(b"${"))
+        })
 }
 
 /// rnix lexes `a/` followed by a character that cannot continue a path, as in
@@ -277,9 +292,9 @@ fn split_number(kind: rnix::SyntaxKind, s: &str) -> Option<usize> {
     (0 < len && len < s.len()).then_some(len)
 }
 
-/// Maps an offset in the text [`separate_tokens`] returned to the source.
-fn source_offset(spaces: &[u32], offset: u32) -> u32 {
-    offset - spaces.partition_point(|&s| s < offset) as u32
+/// Maps an offset in the text [`match_nix_tokens`] returned to the source.
+fn source_offset(inserted: &[u32], offset: u32) -> u32 {
+    offset - inserted.partition_point(|&s| s < offset) as u32
 }
 
 /// The parts of an attribute set or `let` before compilation, with nested
@@ -314,7 +329,7 @@ impl<'a> Compiler<'a> {
     fn at(&self, offset: u32) -> Pos<'a> {
         Pos {
             source: self.source,
-            offset: source_offset(&self.spaces, offset),
+            offset: source_offset(&self.inserted, offset),
         }
     }
 
