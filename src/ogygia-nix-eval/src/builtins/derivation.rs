@@ -205,10 +205,10 @@ pub fn derivation_strict<'a>(ev: &Eval<'a>, args: &[Value<'a>]) -> R<'a> {
         json.push(b'}');
         drv.env.insert("__json".to_owned(), json);
     }
-    if !attrs.get(syms.builder).is_some() {
+    if drv.builder.is_empty() {
         return eval_err("required attribute 'builder' missing");
     }
-    if !attrs.get(syms.system).is_some() {
+    if drv.platform.is_empty() {
         return eval_err("required attribute 'system' missing");
     }
 
