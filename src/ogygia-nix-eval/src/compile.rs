@@ -111,6 +111,20 @@ pub fn compile<'a>(
             pos(t.text_range().start())
         ));
     }
+    // rnix parses expressions in `${ ... }` in an attribute name until `}`,
+    // without reporting an error when there is more than one.
+    if let Some(n) = parse
+        .syntax()
+        .descendants()
+        .filter(|n| n.kind() == rnix::SyntaxKind::NODE_DYNAMIC)
+        .find_map(|n| n.children().nth(1))
+    {
+        let t = n.first_token().map(|t| t.to_string()).unwrap_or_default();
+        return err(format!(
+            "syntax error: unexpected {t}, expecting '}}' at {}",
+            pos(n.text_range().start())
+        ));
+    }
     // rnix parses a function wherever it parses an operand, but Nix only
     // allows one unparenthesised outside operators, lists and selects.
     if let Some(n) = parse.syntax().descendants().find(|n| {
