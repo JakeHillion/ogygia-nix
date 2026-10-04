@@ -167,6 +167,7 @@ fn translate_regex(re: &[u8], end: &str) -> Result<String, String> {
     let re = String::from_utf8_lossy(re);
     let chars: Vec<char> = re.chars().collect();
     let mut out = String::with_capacity(re.len() + 8);
+    let mut depth = 0usize;
     let mut i = 0;
     while i < chars.len() {
         let c = chars[i];
@@ -194,11 +195,24 @@ fn translate_regex(re: &[u8], end: &str) -> Result<String, String> {
                 out.push_str(end);
                 i += 1;
             }
+            '(' => {
+                depth += 1;
+                out.push('(');
+                i += 1;
+            }
+            ')' => {
+                depth = depth.checked_sub(1).ok_or("unmatched ')'")?;
+                out.push(')');
+                i += 1;
+            }
             c => {
                 out.push(c);
                 i += 1;
             }
         }
+    }
+    if depth > 0 {
+        return Err("unmatched '('".into());
     }
     Ok(out)
 }
