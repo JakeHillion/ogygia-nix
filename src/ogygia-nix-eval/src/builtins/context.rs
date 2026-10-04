@@ -95,10 +95,11 @@ pub fn append_context<'a>(ev: &Eval<'a>, args: &[Value<'a>]) -> R<'a> {
     let mut ctx = s.ctx.to_vec();
     let syms = &ev.ctx.syms;
     for e in set.entries {
-        let path: &'a str = ev.bump.alloc_str(ev.name(e.name));
-        if !path.starts_with(crate::store::STORE_DIR) {
-            return eval_err(format!("context key '{path}' is not a store path"));
-        }
+        let key = ev.name(e.name);
+        let Some(path) = crate::store::parse_store_path(key) else {
+            return eval_err(format!("context key '{key}' is not a store path"));
+        };
+        let path: &'a str = ev.bump.alloc_str(&path);
         let info = ev.force_attrs(e.value)?;
         if let Some(p) = info.get(syms.path)
             && ev.force_bool(p)?
