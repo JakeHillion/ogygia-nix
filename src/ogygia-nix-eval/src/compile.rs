@@ -1094,7 +1094,7 @@ fn scope_of(names: &[Sym]) -> Scope {
 fn str_parts(s: &ast::Str) -> Vec<InterpolPart<String>> {
     let indented = s.syntax().first_token().is_some_and(|t| t.text() == "''");
     if indented {
-        return s.normalized_parts();
+        return indented_parts(s);
     }
     s.parts()
         .map(|part| match part {
@@ -1102,6 +1102,160 @@ fn str_parts(s: &ast::Str) -> Vec<InterpolPart<String>> {
             InterpolPart::Interpolation(i) => InterpolPart::Interpolation(i),
         })
         .collect()
+}
+
+/// A piece of an indented string as Nix's lexer splits it.
+enum IndPart {
+    /// Literal text, and whether it is plain text rather than an escape,
+    /// `$` or `'`.
+    Str(String, bool),
+    Interpolation(ast::Interpol),
+}
+
+/// The parts of an indented string with escapes resolved and indentation
+/// stripped as Nix's parser does: lines are found by the newlines in plain
+/// text when measuring indentation, but by every newline, escaped or not,
+/// when stripping it, and escaped text is stripped like any other.
+fn indented_parts(s: &ast::Str) -> Vec<InterpolPart<String>> {
+    let mut parts = Vec::new();
+    for (i, part) in s.parts().enumerate() {
+        match part {
+            InterpolPart::Literal(l) => {
+                let mut text = l.syntax().text();
+                // The opening `''` takes spaces and a newline after it.
+                if i == 0
+                    && let Some((first, rest)) = text.split_once('\n')
+                    && first.bytes().all(|b| b == b' ')
+                {
+                    text = rest;
+                }
+                ind_str_tokens(text, &mut parts);
+            }
+            InterpolPart::Interpolation(i) => parts.push(IndPart::Interpolation(i)),
+        }
+    }
+
+    let mut at_start_of_line = true;
+    let mut min_indent = usize::MAX;
+    let mut cur_indent = 0;
+    for part in &parts {
+        let IndPart::Str(text, true) = part else {
+            if at_start_of_line {
+                at_start_of_line = false;
+                min_indent = min_indent.min(cur_indent);
+            }
+            continue;
+        };
+        for b in text.bytes() {
+            if at_start_of_line {
+                match b {
+                    b' ' => cur_indent += 1,
+                    b'\n' => cur_indent = 0,
+                    _ => {
+                        at_start_of_line = false;
+                        min_indent = min_indent.min(cur_indent);
+                    }
+                }
+            } else if b == b'\n' {
+                at_start_of_line = true;
+                cur_indent = 0;
+            }
+        }
+    }
+
+    let mut out: Vec<InterpolPart<String>> = Vec::new();
+    let mut at_start_of_line = true;
+    let mut cur_dropped = 0;
+    let n = parts.len();
+    for (i, part) in parts.into_iter().enumerate() {
+        let text = match part {
+            IndPart::Interpolation(e) => {
+                at_start_of_line = false;
+                cur_dropped = 0;
+                out.push(InterpolPart::Interpolation(e));
+                continue;
+            }
+            IndPart::Str(text, _) => text,
+        };
+        let mut s = String::with_capacity(text.len());
+        for c in text.chars() {
+            if at_start_of_line {
+                match c {
+                    ' ' => {
+                        if cur_dropped >= min_indent {
+                            s.push(c);
+                        }
+                        cur_dropped += 1;
+                    }
+                    '\n' => {
+                        cur_dropped = 0;
+                        s.push(c);
+                    }
+                    _ => {
+                        at_start_of_line = false;
+                        cur_dropped = 0;
+                        s.push(c);
+                    }
+                }
+            } else {
+                s.push(c);
+                if c == '\n' {
+                    at_start_of_line = true;
+                }
+            }
+        }
+        // A final line of only spaces is dropped.
+        if i + 1 == n
+            && let Some(p) = s.rfind('\n')
+            && s[p + 1..].bytes().all(|b| b == b' ')
+        {
+            s.truncate(p + 1);
+        }
+        match out.last_mut() {
+            Some(InterpolPart::Literal(prev)) => prev.push_str(&s),
+            _ => out.push(InterpolPart::Literal(s)),
+        }
+    }
+    out
+}
+
+/// Splits the raw text of an indented string literal into the tokens Nix's
+/// lexer reads it as, resolving escapes.
+fn ind_str_tokens(text: &str, out: &mut Vec<IndPart>) {
+    let mut plain = String::new();
+    let mut rest = text;
+    while let Some(c) = rest.chars().next() {
+        let next = rest[c.len_utf8()..].chars().next();
+        let (token, len) = match (c, next) {
+            ('\'', Some('\'')) => {
+                let after = &rest[2..];
+                match after.chars().next() {
+                    Some('\'') => ("''".to_owned(), 3),
+                    Some('$') => ("$".to_owned(), 3),
+                    Some('\\') => match after[1..].chars().next() {
+                        Some(e) => (unescape_str(&format!("\\{e}")), 3 + e.len_utf8()),
+                        None => break,
+                    },
+                    _ => break,
+                }
+            }
+            ('\'', None | Some('$')) => ("'".to_owned(), 1),
+            ('$', None | Some('{' | '\'')) => ("$".to_owned(), 1),
+            _ => {
+                plain.push(c);
+                rest = &rest[c.len_utf8()..];
+                continue;
+            }
+        };
+        if !plain.is_empty() {
+            out.push(IndPart::Str(std::mem::take(&mut plain), true));
+        }
+        out.push(IndPart::Str(token, false));
+        rest = &rest[len..];
+    }
+    if !plain.is_empty() {
+        out.push(IndPart::Str(plain, true));
+    }
 }
 
 /// Resolves the escapes in the text of a `"` string literal.
