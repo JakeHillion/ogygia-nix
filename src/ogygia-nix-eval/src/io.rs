@@ -69,6 +69,11 @@ struct Mount {
     filter: Option<Rc<HashSet<String>>>,
 }
 
+// The directory holding the files Nix ships with itself, which `<nix/…>`
+// paths resolve within, as `nix/…`. Set at build time; without it they do
+// not exist.
+const DEFAULT_INCLUDE_PATH: Option<&str> = option_env!("OGYGIA_NIX_EVAL_DEFAULT_INCLUDE_PATH");
+
 /// A `builtins.path` filter: whether to keep a path of the given type.
 pub type KeepFn<'f> = &'f dyn Fn(&str, FileType) -> Result<bool>;
 
@@ -102,6 +107,7 @@ impl Io {
     /// Fail if `logical` may not be accessed at all.
     pub fn check_access(&self, logical: &str) -> Result<()> {
         if self.pure
+            && !logical.starts_with(crate::path::COREPKGS)
             && !self
                 .mounts
                 .borrow()
@@ -145,6 +151,14 @@ impl Io {
     }
 
     fn resolve(&self, logical: &str) -> Result<PathBuf> {
+        if let Some(rest) = logical.strip_prefix(crate::path::COREPKGS) {
+            let Some(include) = DEFAULT_INCLUDE_PATH else {
+                bail!("path '{}' does not exist", crate::path::show(logical));
+            };
+            return Ok(Path::new(include)
+                .join("nix")
+                .join(rest.trim_start_matches('/')));
+        }
         let next = {
             let mounts = self.mounts.borrow();
             let found = mounts
@@ -239,8 +253,7 @@ impl Io {
         if let Some(p) = self.store_paths.borrow().get(logical) {
             return Ok(p.clone());
         }
-        let name = crate::path::base_name_of(logical.as_bytes());
-        let name = String::from_utf8_lossy(name).into_owned();
+        let name = crate::path::store_name(logical);
         let sp = self.add_filtered_to_store(logical, &name, None)?;
         self.store_paths
             .borrow_mut()

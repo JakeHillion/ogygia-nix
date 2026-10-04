@@ -133,6 +133,10 @@ pub fn find_file<'a>(ev: &Eval<'a>, args: &[Value<'a>]) -> R<'a> {
             return Ok(ev.path_val(&candidate));
         }
     }
+    if let Some(rest) = name.strip_prefix("nix/") {
+        let path = format!("{}/{rest}", crate::path::COREPKGS);
+        return Ok(ev.path_val(&crate::path::canon_path(&path)));
+    }
     Err(error(
         ErrorKind::Throw,
         format!(
@@ -164,7 +168,7 @@ pub fn to_file<'a>(ev: &Eval<'a>, args: &[Value<'a>]) -> R<'a> {
 
 pub fn to_path<'a>(ev: &Eval<'a>, args: &[Value<'a>]) -> R<'a> {
     let path = ev.coerce_to_path(args[0])?;
-    Ok(ev.string(&path))
+    Ok(ev.string(crate::path::abs(&path)))
 }
 
 pub fn store_path<'a>(ev: &Eval<'a>, args: &[Value<'a>]) -> R<'a> {
@@ -190,7 +194,7 @@ fn add_path<'a>(
 ) -> R<'a> {
     let name = match name {
         Some(n) => n,
-        None => String::from_utf8_lossy(crate::path::base_name_of(path.as_bytes())).into_owned(),
+        None => crate::path::store_name(path),
     };
     let io = &ev.ctx.io;
     let sp = match filter {
@@ -201,7 +205,7 @@ fn add_path<'a>(
             let err: Cell<Option<Box<crate::value::EvalError>>> = Cell::new(None);
             let keep = |p: &str, ty: crate::io::FileType| -> anyhow::Result<bool> {
                 let r = (|| {
-                    let g = ev.call(f, ev.string(p))?;
+                    let g = ev.call(f, ev.string(crate::path::abs(p)))?;
                     ev.force_bool(ev.call(g, ev.string(ty.name()))?)
                 })();
                 match r {

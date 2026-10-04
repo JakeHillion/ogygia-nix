@@ -545,7 +545,9 @@ impl<'a> Eval<'a> {
                 for (i, p) in parts.iter().enumerate() {
                     let v = self.eval(p, env)?;
                     match (i, v) {
-                        (0, Value::Path(p)) => buf.extend_from_slice(p.0.as_bytes()),
+                        (0, Value::Path(p)) => {
+                            buf.extend_from_slice(crate::path::abs(p.0).as_bytes())
+                        }
                         _ => self.coerce_into(v, Coerce::PLAIN, &mut buf, &mut ctx)?,
                     }
                 }
@@ -957,7 +959,7 @@ impl<'a> Eval<'a> {
         match a {
             Value::Int(_) | Value::Float(_) => self.arith(BinOp::Add, a, b, pos),
             Value::Path(p) => {
-                let mut buf = p.0.as_bytes().to_vec();
+                let mut buf = crate::path::abs(p.0).as_bytes().to_vec();
                 let mut ctx = Vec::new();
                 self.coerce_into(b, Coerce::PLAIN, &mut buf, &mut ctx)?;
                 if !ctx.is_empty() {
@@ -1110,7 +1112,7 @@ impl<'a> Eval<'a> {
                 Ok(as_f64(a) < as_f64(b))
             }
             (Value::Str(x), Value::Str(y)) => Ok(x.s < y.s),
-            (Value::Path(x), Value::Path(y)) => Ok(x.0 < y.0),
+            (Value::Path(x), Value::Path(y)) => Ok(crate::path::abs(x.0) < crate::path::abs(y.0)),
             (Value::List(x), Value::List(y)) => {
                 for (p, q) in x.items.iter().zip(y.items) {
                     if !self.eq(*p, *q)? {
@@ -1148,7 +1150,7 @@ impl<'a> Eval<'a> {
                     buf.extend_from_slice(sp.as_bytes());
                     ctx.push(Ctx::Opaque(sp));
                 } else {
-                    buf.extend_from_slice(p.0.as_bytes());
+                    buf.extend_from_slice(crate::path::abs(p.0).as_bytes());
                 }
             }
             Value::Attrs(a) => {
