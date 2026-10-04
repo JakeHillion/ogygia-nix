@@ -84,7 +84,7 @@ pub fn derivation_strict<'a>(ev: &Eval<'a>, args: &[Value<'a>]) -> R<'a> {
     let Some(name_v) = attrs.get(syms.name) else {
         return eval_err("required attribute 'name' missing");
     };
-    let name = to_str(&ev.coerce_to_string(name_v, Coerce::PLAIN)?.0);
+    let name = to_str(ev.force_str_no_ctx(name_v)?);
     if let Err(e) = crate::store::check_name(&name) {
         return eval_err(format!("invalid derivation name: {e:#}"));
     }
