@@ -338,7 +338,7 @@ pub fn generic_closure<'a>(ev: &Eval<'a>, args: &[Value<'a>]) -> R<'a> {
         return eval_err("attribute 'operator' required");
     };
     let mut queue: std::collections::VecDeque<Value<'a>> = start.iter().copied().collect();
-    let mut seen: Vec<Value<'a>> = Vec::new();
+    let mut seen = KeySet::default();
     let mut out = Vec::new();
     while let Some(item) = queue.pop_front() {
         let attrs = ev.force_attrs(item)?;
@@ -346,20 +346,190 @@ pub fn generic_closure<'a>(ev: &Eval<'a>, args: &[Value<'a>]) -> R<'a> {
             return eval_err("attribute 'key' required");
         };
         let key = ev.force(key)?;
-        let mut dup = false;
-        for k in &seen {
-            if ev.eq(*k, key)? {
-                dup = true;
-                break;
-            }
-        }
-        if dup {
+        if !seen.insert(ev, key)? {
             continue;
         }
-        seen.push(key);
         out.push(item);
         let next = ev.call(op, item)?;
         queue.extend(ev.force_list(next)?.iter().copied());
     }
     Ok(ev.list(&out))
+}
+
+/// The keys `genericClosure` has seen, kept as Nix keeps them: a libstdc++
+/// `std::set` ordered by `<`. Mirroring its red-black tree node for node makes
+/// the same pairs get compared, which decides both which keys fail to compare
+/// and which count as equivalent (NaN is equivalent to every number).
+#[derive(Default)]
+struct KeySet<'a> {
+    nodes: Vec<KeyNode<'a>>,
+    root: Option<usize>,
+    leftmost: usize,
+}
+
+struct KeyNode<'a> {
+    key: Value<'a>,
+    parent: Option<usize>,
+    left: Option<usize>,
+    right: Option<usize>,
+    red: bool,
+}
+
+impl<'a> KeySet<'a> {
+    /// Inserts `key` unless an equivalent key is present; returns whether it
+    /// was inserted.
+    fn insert(&mut self, ev: &Eval<'a>, key: Value<'a>) -> R<'a, bool> {
+        // `_M_get_insert_unique_pos`.
+        let mut x = self.root;
+        let mut y = None;
+        let mut comp = true;
+        while let Some(n) = x {
+            y = Some(n);
+            comp = ev.less_than(key, self.nodes[n].key)?;
+            x = if comp {
+                self.nodes[n].left
+            } else {
+                self.nodes[n].right
+            };
+        }
+        if let Some(p) = y {
+            let j = if comp {
+                (p != self.leftmost).then(|| self.predecessor(p))
+            } else {
+                Some(p)
+            };
+            if let Some(j) = j
+                && !ev.less_than(self.nodes[j].key, key)?
+            {
+                return Ok(false);
+            }
+        }
+        // `_M_insert_` compares `key` with `y` again to choose the side; the
+        // comparison is pure, so `comp` already holds its result.
+        let z = self.nodes.len();
+        self.nodes.push(KeyNode {
+            key,
+            parent: y,
+            left: None,
+            right: None,
+            red: true,
+        });
+        match y {
+            None => {
+                self.root = Some(z);
+                self.leftmost = z;
+            }
+            Some(p) if comp => {
+                self.nodes[p].left = Some(z);
+                if p == self.leftmost {
+                    self.leftmost = z;
+                }
+            }
+            Some(p) => self.nodes[p].right = Some(z),
+        }
+        self.rebalance(z);
+        Ok(true)
+    }
+
+    fn predecessor(&self, mut n: usize) -> usize {
+        if let Some(mut l) = self.nodes[n].left {
+            while let Some(r) = self.nodes[l].right {
+                l = r;
+            }
+            return l;
+        }
+        while let Some(p) = self.nodes[n].parent {
+            if self.nodes[p].left != Some(n) {
+                return p;
+            }
+            n = p;
+        }
+        unreachable!("the leftmost node has no predecessor")
+    }
+
+    fn is_red(&self, n: Option<usize>) -> bool {
+        n.is_some_and(|n| self.nodes[n].red)
+    }
+
+    /// `_Rb_tree_insert_and_rebalance` after linking `x`.
+    fn rebalance(&mut self, mut x: usize) {
+        while let Some(xp) = self.nodes[x].parent
+            && self.nodes[xp].red
+        {
+            let xpp = self.nodes[xp].parent.expect("a red node is not the root");
+            let parent_is_left = self.nodes[xpp].left == Some(xp);
+            let uncle = if parent_is_left {
+                self.nodes[xpp].right
+            } else {
+                self.nodes[xpp].left
+            };
+            if let Some(u) = uncle
+                && self.is_red(uncle)
+            {
+                self.nodes[xp].red = false;
+                self.nodes[u].red = false;
+                self.nodes[xpp].red = true;
+                x = xpp;
+                continue;
+            }
+            if parent_is_left {
+                if self.nodes[xp].right == Some(x) {
+                    x = xp;
+                    self.rotate_left(x);
+                }
+            } else if self.nodes[xp].left == Some(x) {
+                x = xp;
+                self.rotate_right(x);
+            }
+            let xp = self.nodes[x].parent.expect("x has a parent");
+            self.nodes[xp].red = false;
+            self.nodes[xpp].red = true;
+            if parent_is_left {
+                self.rotate_right(xpp);
+            } else {
+                self.rotate_left(xpp);
+            }
+        }
+        if let Some(root) = self.root {
+            self.nodes[root].red = false;
+        }
+    }
+
+    fn replace_child(&mut self, parent: Option<usize>, old: usize, new: usize) {
+        match parent {
+            None => self.root = Some(new),
+            Some(p) if self.nodes[p].left == Some(old) => self.nodes[p].left = Some(new),
+            Some(p) => self.nodes[p].right = Some(new),
+        }
+    }
+
+    fn rotate_left(&mut self, x: usize) {
+        let y = self.nodes[x]
+            .right
+            .expect("rotating left needs a right child");
+        self.nodes[x].right = self.nodes[y].left;
+        if let Some(c) = self.nodes[y].left {
+            self.nodes[c].parent = Some(x);
+        }
+        let xp = self.nodes[x].parent;
+        self.nodes[y].parent = xp;
+        self.replace_child(xp, x, y);
+        self.nodes[y].left = Some(x);
+        self.nodes[x].parent = Some(y);
+    }
+
+    fn rotate_right(&mut self, x: usize) {
+        let y = self.nodes[x]
+            .left
+            .expect("rotating right needs a left child");
+        self.nodes[x].left = self.nodes[y].right;
+        if let Some(c) = self.nodes[y].right {
+            self.nodes[c].parent = Some(x);
+        }
+        let xp = self.nodes[x].parent;
+        self.nodes[y].parent = xp;
+        self.replace_child(xp, x, y);
+        self.nodes[y].right = Some(x);
+        self.nodes[x].parent = Some(y);
+    }
 }
