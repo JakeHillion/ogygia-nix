@@ -351,7 +351,10 @@ pub fn generic_closure<'a>(ev: &Eval<'a>, args: &[Value<'a>]) -> R<'a> {
         }
         out.push(item);
         let next = ev.call(op, item)?;
-        queue.extend(ev.force_list(next)?.iter().copied());
+        for &elem in ev.force_list(next)? {
+            ev.force(elem)?;
+            queue.push_back(elem);
+        }
     }
     Ok(ev.list(&out))
 }
