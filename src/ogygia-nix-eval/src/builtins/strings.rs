@@ -167,11 +167,32 @@ pub fn replace_strings<'a>(ev: &Eval<'a>, args: &[Value<'a>]) -> R<'a> {
 fn translate_regex(re: &[u8], end: &str) -> Result<String, String> {
     let chars: Vec<char> = re.iter().map(|&b| char::from(b)).collect();
     let mut out = String::with_capacity(re.len() + 8);
-    let mut depth = 0usize;
+    // Where each open group starts in `out`.
+    let mut groups = Vec::new();
+    // Where the last atom, with any quantifiers, starts in `out`.
+    let mut atom = None;
+    let mut quantified = false;
     let mut i = 0;
     while i < chars.len() {
         let c = chars[i];
+        let start = out.len();
+        let mut quantifier = false;
         match c {
+            '?' if quantified => {
+                // A POSIX quantifier is never lazy: `x??` is `(x?)?`.
+                if let Some(s) = atom {
+                    out.insert_str(s, "(?:");
+                    out.push(')');
+                }
+                out.push('?');
+                quantifier = true;
+                i += 1;
+            }
+            '*' | '+' | '?' => {
+                out.push(c);
+                quantifier = true;
+                i += 1;
+            }
             '[' => {
                 i = translate_bracket(&chars, i + 1, &mut out)?;
             }
@@ -204,25 +225,33 @@ fn translate_regex(re: &[u8], end: &str) -> Result<String, String> {
                 // `regex` allows whitespace in an interval; libstdc++ does not.
                 let end = interval_end(&chars, i + 1).ok_or("invalid interval")?;
                 out.extend(&chars[i..end]);
+                quantifier = true;
                 i = end;
             }
             '(' => {
-                depth += 1;
+                groups.push(start);
                 out.push('(');
                 i += 1;
             }
             ')' => {
-                depth = depth.checked_sub(1).ok_or("unmatched ')'")?;
+                let open = groups.pop().ok_or("unmatched ')'")?;
                 out.push(')');
                 i += 1;
+                atom = Some(open);
+                quantified = false;
+                continue;
             }
             c => {
                 push_byte(&mut out, c);
                 i += 1;
             }
         }
+        if !quantifier {
+            atom = (!matches!(c, '(' | '|' | '^' | '$')).then_some(start);
+        }
+        quantified = quantifier;
     }
-    if depth > 0 {
+    if !groups.is_empty() {
         return Err("unmatched '('".into());
     }
     Ok(out)
