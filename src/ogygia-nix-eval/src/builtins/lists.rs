@@ -168,9 +168,12 @@ pub fn group_by<'a>(ev: &Eval<'a>, args: &[Value<'a>]) -> R<'a> {
 
 /// A stable merge sort whose comparator may fail.
 pub fn sort<'a>(ev: &Eval<'a>, args: &[Value<'a>]) -> R<'a> {
-    let cmp = ev.force_function(args[0])?;
     let mut items = ev.force_list(args[1])?.to_vec();
-    if items.len() <= 1 {
+    if items.is_empty() {
+        return Ok(ev.list(&items));
+    }
+    let cmp = ev.force_function(args[0])?;
+    if items.len() == 1 {
         return Ok(ev.list(&items));
     }
     let less = |a: Value<'a>, b: Value<'a>| -> R<'a, bool> {
