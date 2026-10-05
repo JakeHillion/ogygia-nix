@@ -507,6 +507,338 @@ fn translate_bracket(chars: &[char], mut i: usize, out: &mut String) -> Result<u
     Ok(i)
 }
 
+/// libstdc++'s `_GLIBCXX_REGEX_STATE_LIMIT`: the most NFA states a
+/// `std::regex` may compile to.
+const REGEX_STATE_LIMIT: usize = 100_000;
+
+const NO_STATE: usize = usize::MAX;
+
+#[derive(Clone, Copy)]
+struct NfaState {
+    next: usize,
+    alt: usize,
+    has_alt: bool,
+}
+
+/// A fragment of an [`Nfa`] from `start` to `end`.
+#[derive(Clone, Copy)]
+struct NfaSeq {
+    start: usize,
+    end: usize,
+}
+
+struct TooManyStates;
+
+/// The shape of the NFA libstdc++ compiles a regex to, kept to count its
+/// states as libstdc++ does.
+#[derive(Default)]
+struct Nfa {
+    states: Vec<NfaState>,
+}
+
+impl Nfa {
+    fn insert(&mut self, next: usize, alt: usize, has_alt: bool) -> Result<usize, TooManyStates> {
+        self.states.push(NfaState { next, alt, has_alt });
+        if self.states.len() > REGEX_STATE_LIMIT {
+            return Err(TooManyStates);
+        }
+        Ok(self.states.len() - 1)
+    }
+
+    fn dummy(&mut self) -> Result<usize, TooManyStates> {
+        self.insert(NO_STATE, NO_STATE, false)
+    }
+
+    fn single(&mut self) -> Result<NfaSeq, TooManyStates> {
+        let s = self.dummy()?;
+        Ok(NfaSeq { start: s, end: s })
+    }
+
+    fn repeat(&mut self, next: usize, alt: usize) -> Result<usize, TooManyStates> {
+        self.insert(next, alt, true)
+    }
+
+    fn append(&mut self, seq: &mut NfaSeq, other: NfaSeq) {
+        self.states[seq.end].next = other.start;
+        seq.end = other.end;
+    }
+
+    fn append_state(&mut self, seq: &mut NfaSeq, id: usize) {
+        self.append(seq, NfaSeq { start: id, end: id });
+    }
+
+    /// Copy `seq` as `_StateSeq::_M_clone` does, including its copying a
+    /// state once for each time it is reached before being copied.
+    fn clone_seq(&mut self, seq: NfaSeq) -> Result<NfaSeq, TooManyStates> {
+        let mut map = std::collections::BTreeMap::new();
+        let mut stack = vec![seq.start];
+        while let Some(u) = stack.pop() {
+            let dup = self.states[u];
+            let id = self.insert(dup.next, dup.alt, dup.has_alt)?;
+            map.insert(u, id);
+            if dup.has_alt && dup.alt != NO_STATE && !map.contains_key(&dup.alt) {
+                stack.push(dup.alt);
+            }
+            if u != seq.end && dup.next != NO_STATE && !map.contains_key(&dup.next) {
+                stack.push(dup.next);
+            }
+        }
+        for &v in map.values() {
+            let s = &mut self.states[v];
+            if let Some(&n) = map.get(&s.next) {
+                s.next = n;
+            }
+            if s.has_alt
+                && let Some(&a) = map.get(&s.alt)
+            {
+                s.alt = a;
+            }
+        }
+        Ok(NfaSeq {
+            start: map[&seq.start],
+            end: map[&seq.end],
+        })
+    }
+
+    /// Apply `q` to `e` as `_Compiler::_M_quantifier` does.
+    fn quantify(&mut self, mut e: NfaSeq, q: Quantifier) -> Result<NfaSeq, TooManyStates> {
+        Ok(match q {
+            Quantifier::Star => {
+                let r = self.repeat(NO_STATE, e.start)?;
+                self.append_state(&mut e, r);
+                NfaSeq { start: r, end: r }
+            }
+            Quantifier::Plus => {
+                let r = self.repeat(NO_STATE, e.start)?;
+                self.append_state(&mut e, r);
+                e
+            }
+            Quantifier::Opt => {
+                let end = self.dummy()?;
+                let r = self.repeat(NO_STATE, e.start)?;
+                self.append_state(&mut e, end);
+                let mut r = NfaSeq { start: r, end: r };
+                self.append_state(&mut r, end);
+                r
+            }
+            Quantifier::Interval(min, max) => {
+                let mut out = self.single()?;
+                for _ in 0..min {
+                    let c = self.clone_seq(e)?;
+                    self.append(&mut out, c);
+                }
+                match max {
+                    None => {
+                        let mut tmp = self.clone_seq(e)?;
+                        let s = self.repeat(NO_STATE, tmp.start)?;
+                        self.append_state(&mut tmp, s);
+                        self.append_state(&mut out, s);
+                    }
+                    Some(max) => {
+                        let end = self.dummy()?;
+                        let mut alts = Vec::new();
+                        for _ in min..max {
+                            let tmp = self.clone_seq(e)?;
+                            let alt = self.repeat(tmp.start, end)?;
+                            alts.push(alt);
+                            self.append(
+                                &mut out,
+                                NfaSeq {
+                                    start: alt,
+                                    end: tmp.end,
+                                },
+                            );
+                        }
+                        self.append_state(&mut out, end);
+                        for alt in alts {
+                            let s = &mut self.states[alt];
+                            std::mem::swap(&mut s.next, &mut s.alt);
+                        }
+                    }
+                }
+                out
+            }
+        })
+    }
+}
+
+#[derive(Clone, Copy)]
+enum Quantifier {
+    Star,
+    Plus,
+    Opt,
+    /// `{min}`, `{min,}` or `{min,max}`.
+    Interval(u64, Option<u64>),
+}
+
+/// One level of nesting while counting a regex's states: the alternatives
+/// finished so far, the terms of the current one, and its last term, which a
+/// quantifier may still apply to.
+#[derive(Default)]
+struct NfaFrame {
+    disjunction: Option<NfaSeq>,
+    alternative: Option<NfaSeq>,
+    term: Option<NfaSeq>,
+}
+
+impl NfaFrame {
+    fn push_term(&mut self, nfa: &mut Nfa, term: NfaSeq) {
+        if let Some(t) = self.term.replace(term) {
+            match &mut self.alternative {
+                Some(a) => nfa.append(a, t),
+                None => self.alternative = Some(t),
+            }
+        }
+    }
+
+    /// End the current alternative, returning the disjunction so far.
+    fn end_alternative(&mut self, nfa: &mut Nfa) -> Result<NfaSeq, TooManyStates> {
+        let end = nfa.single()?;
+        self.push_term(nfa, end);
+        self.term = None;
+        let mut alt2 = match self.alternative.take() {
+            Some(mut a) => {
+                nfa.append(&mut a, end);
+                a
+            }
+            None => end,
+        };
+        let disjunction = match self.disjunction.take() {
+            None => alt2,
+            Some(mut alt1) => {
+                let end = nfa.dummy()?;
+                nfa.append_state(&mut alt1, end);
+                nfa.append_state(&mut alt2, end);
+                NfaSeq {
+                    start: nfa.insert(alt2.start, alt1.start, true)?,
+                    end,
+                }
+            }
+        };
+        self.disjunction = Some(disjunction);
+        Ok(disjunction)
+    }
+}
+
+/// Read the `min}`, `min,}` or `min,max}` of an interval from `chars[i..]`,
+/// returning it and the index after its `}`.
+fn read_interval(chars: &[char], mut i: usize) -> Option<(Quantifier, usize)> {
+    let int = |i: &mut usize| -> Option<u64> {
+        let start = *i;
+        let mut v: u64 = 0;
+        while let Some(d) = chars.get(*i).and_then(|c| c.to_digit(10)) {
+            v = v.saturating_mul(10).saturating_add(u64::from(d));
+            *i += 1;
+        }
+        (*i > start).then_some(v)
+    };
+    let min = int(&mut i)?;
+    let max = if chars.get(i) == Some(&',') {
+        i += 1;
+        int(&mut i)
+    } else {
+        Some(min)
+    };
+    if chars.get(i) != Some(&'}') || max.is_some_and(|m| m < min) {
+        return None;
+    }
+    Some((Quantifier::Interval(min, max), i + 1))
+}
+
+/// Build the NFA libstdc++ compiles `chars` to, stopping early if it is not
+/// a valid regex.
+fn build_nfa(chars: &[char], nfa: &mut Nfa) -> Result<(), TooManyStates> {
+    let mut top = nfa.single()?;
+    let mut frames = vec![NfaFrame::default()];
+    let mut i = 0;
+    while i < chars.len() {
+        let Some(frame) = frames.last_mut() else {
+            return Ok(());
+        };
+        let atom = match chars[i] {
+            '(' => {
+                frames.push(NfaFrame::default());
+                i += 1;
+                continue;
+            }
+            ')' => {
+                let disjunction = frame.end_alternative(nfa)?;
+                frames.pop();
+                let mut r = nfa.single()?;
+                nfa.append(&mut r, disjunction);
+                let end = nfa.single()?;
+                nfa.append(&mut r, end);
+                i += 1;
+                r
+            }
+            '|' => {
+                frame.end_alternative(nfa)?;
+                i += 1;
+                continue;
+            }
+            c @ ('*' | '+' | '?' | '{') => {
+                let Some(e) = frame.term else {
+                    return Ok(());
+                };
+                let q = match c {
+                    '*' => Quantifier::Star,
+                    '+' => Quantifier::Plus,
+                    '?' => Quantifier::Opt,
+                    _ => {
+                        let Some((q, next)) = read_interval(chars, i + 1) else {
+                            return Ok(());
+                        };
+                        i = next - 1;
+                        q
+                    }
+                };
+                i += 1;
+                frame.term = Some(nfa.quantify(e, q)?);
+                continue;
+            }
+            '[' => {
+                let Ok(next) = translate_bracket(chars, i + 1, &mut String::new()) else {
+                    return Ok(());
+                };
+                i = next;
+                nfa.single()?
+            }
+            '\\' => {
+                i += 2;
+                nfa.single()?
+            }
+            _ => {
+                i += 1;
+                nfa.single()?
+            }
+        };
+        let Some(frame) = frames.last_mut() else {
+            return Ok(());
+        };
+        frame.push_term(nfa, atom);
+    }
+    let Some(mut frame) = frames.pop() else {
+        return Ok(());
+    };
+    if !frames.is_empty() {
+        return Ok(());
+    }
+    let disjunction = frame.end_alternative(nfa)?;
+    nfa.append(&mut top, disjunction);
+    for _ in 0..2 {
+        let s = nfa.single()?;
+        nfa.append(&mut top, s);
+    }
+    Ok(())
+}
+
+/// Whether libstdc++ refuses `re` for compiling to more than
+/// `_GLIBCXX_REGEX_STATE_LIMIT` NFA states.
+fn regex_too_complex(re: &[u8]) -> bool {
+    let chars: Vec<char> = re.iter().map(|&b| char::from(b)).collect();
+    matches!(build_nfa(&chars, &mut Nfa::default()), Err(TooManyStates))
+}
+
 fn regex_error(re: &[u8], e: impl std::fmt::Display) -> Box<crate::value::EvalError> {
     crate::value::error(
         crate::value::ErrorKind::Eval,
@@ -517,14 +849,27 @@ fn regex_error(re: &[u8], e: impl std::fmt::Display) -> Box<crate::value::EvalEr
     )
 }
 
+/// Translate `re` as [`translate_regex`] does, also failing as Nix does where
+/// libstdc++ refuses it for its size.
+fn translate_checked(re: &[u8]) -> Result<String, Box<crate::value::EvalError>> {
+    let translated = translate_regex(re, "$").map_err(|e| regex_error(re, e))?;
+    if regex_too_complex(re) {
+        return Err(crate::value::error(
+            crate::value::ErrorKind::Eval,
+            format!(
+                "memory limit exceeded by regular expression '{}'",
+                String::from_utf8_lossy(re)
+            ),
+        ));
+    }
+    Ok(translated)
+}
+
 fn compile_match_regex<'a>(ev: &Eval<'a>, re: &[u8]) -> R<'a, Rc<regex::bytes::Regex>> {
     if let Some(r) = ev.ctx.match_regexes.borrow().get(re) {
         return Ok(r.clone());
     }
-    let pattern = format!(
-        "^(?:{})$",
-        translate_regex(re, "$").map_err(|e| regex_error(re, e))?
-    );
+    let pattern = format!("^(?:{})$", translate_checked(re)?);
     let r = regex::bytes::RegexBuilder::new(&pattern)
         .unicode(false)
         .dot_matches_new_line(true)
@@ -590,7 +935,7 @@ fn compile_split_regex<'a>(ev: &Eval<'a>, re: &[u8]) -> R<'a, Rc<SplitRegex>> {
             .build(pattern)
             .map_err(|e| regex_error(re, e))
     };
-    let translated = translate_regex(re, "$").map_err(|e| regex_error(re, e))?;
+    let translated = translate_checked(re)?;
     let r = Rc::new(SplitRegex {
         start: build(&translated, MatchKind::LeftmostFirst)?,
         longest: build(&translated, MatchKind::All)?,
