@@ -266,18 +266,85 @@ fn unsupported<'a>(name: &str) -> R<'a> {
     ))
 }
 
-pub fn fetch_git<'a>(_ev: &Eval<'a>, _args: &[Value<'a>]) -> R<'a> {
+pub fn fetch_git<'a>(ev: &Eval<'a>, args: &[Value<'a>]) -> R<'a> {
+    match ev.force(args[0])? {
+        Value::Attrs(set) => {
+            if set.get(ev.ctx.syms.type_).is_some() {
+                return eval_err("unexpected argument 'type'");
+            }
+            for e in set.entries {
+                let name = ev.ctx.name(e.name);
+                match ev.force(e.value)? {
+                    Value::Str(_) | Value::Path(_) | Value::Bool(_) => {}
+                    Value::Int(i) if i >= 0 => {}
+                    Value::Int(i) => {
+                        return eval_err(format!(
+                            "negative value given for 'fetchGit' argument '{name}': {i}"
+                        ));
+                    }
+                    other => {
+                        return eval_err(format!(
+                            "argument '{name}' to 'fetchGit' is {} while a string, Boolean or integer is expected",
+                            other.show_type()
+                        ));
+                    }
+                }
+            }
+        }
+        v => {
+            ev.coerce_to_string(v, Coerce::PLAIN)?;
+        }
+    }
     unsupported("fetchGit")
 }
 
-pub fn fetch_mercurial<'a>(_ev: &Eval<'a>, _args: &[Value<'a>]) -> R<'a> {
+pub fn fetch_mercurial<'a>(ev: &Eval<'a>, args: &[Value<'a>]) -> R<'a> {
+    match ev.force(args[0])? {
+        Value::Attrs(set) => {
+            for e in set.entries {
+                match ev.ctx.name(e.name) {
+                    "url" => {
+                        ev.coerce_to_string(e.value, Coerce::PLAIN)?;
+                    }
+                    "rev" | "name" => {
+                        ev.force_str_no_ctx(e.value)?;
+                    }
+                    n => {
+                        return eval_err(format!("unsupported argument '{n}' to 'fetchMercurial'"));
+                    }
+                }
+            }
+        }
+        v => {
+            ev.coerce_to_string(v, Coerce::PLAIN)?;
+        }
+    }
     unsupported("fetchMercurial")
 }
 
-pub fn fetch_tarball<'a>(_ev: &Eval<'a>, _args: &[Value<'a>]) -> R<'a> {
-    unsupported("fetchTarball")
+pub fn fetch_tarball<'a>(ev: &Eval<'a>, args: &[Value<'a>]) -> R<'a> {
+    fetch(ev, args[0], "fetchTarball")
 }
 
-pub fn fetchurl<'a>(_ev: &Eval<'a>, _args: &[Value<'a>]) -> R<'a> {
-    unsupported("fetchurl")
+pub fn fetchurl<'a>(ev: &Eval<'a>, args: &[Value<'a>]) -> R<'a> {
+    fetch(ev, args[0], "fetchurl")
+}
+
+fn fetch<'a>(ev: &Eval<'a>, arg: Value<'a>, who: &str) -> R<'a> {
+    match ev.force(arg)? {
+        Value::Attrs(set) => {
+            for e in set.entries {
+                match ev.ctx.name(e.name) {
+                    "url" | "sha256" | "name" => {
+                        ev.force_str_no_ctx(e.value)?;
+                    }
+                    n => return eval_err(format!("unsupported argument '{n}' to '{who}'")),
+                }
+            }
+        }
+        v => {
+            ev.force_str_no_ctx(v)?;
+        }
+    }
+    unsupported(who)
 }
