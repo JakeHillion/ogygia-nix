@@ -55,8 +55,11 @@ pub fn map<'a>(ev: &Eval<'a>, args: &[Value<'a>]) -> R<'a> {
 }
 
 pub fn filter<'a>(ev: &Eval<'a>, args: &[Value<'a>]) -> R<'a> {
-    let f = ev.force_function(args[0])?;
     let list = ev.force_list(args[1])?;
+    if list.is_empty() {
+        return ev.force(args[1]);
+    }
+    let f = ev.force_function(args[0])?;
     let mut out = Vec::with_capacity(list.len());
     for item in list {
         if ev.force_bool(ev.call(f, *item)?)? {
