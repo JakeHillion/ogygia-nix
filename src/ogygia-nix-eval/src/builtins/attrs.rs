@@ -135,7 +135,7 @@ pub fn map_attrs<'a>(ev: &Eval<'a>, args: &[Value<'a>]) -> R<'a> {
 }
 
 pub fn zip_attrs_with<'a>(ev: &Eval<'a>, args: &[Value<'a>]) -> R<'a> {
-    let f = args[0];
+    let f = ev.force_function(args[0])?;
     let list = ev.force_list(args[1])?;
     let mut groups: HashMap<Sym, Vec<Value<'a>>> = HashMap::new();
     let mut order = Vec::new();
