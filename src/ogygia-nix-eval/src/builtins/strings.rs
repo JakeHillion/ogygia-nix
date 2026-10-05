@@ -688,6 +688,11 @@ pub fn split<'a>(ev: &Eval<'a>, args: &[Value<'a>]) -> R<'a> {
         // another match, but the next search after one starts a byte later.
         at = if start == end { end + 1 } else { end };
     }
+    if out.is_empty() {
+        // Nix returns the string itself, context included, when nothing
+        // matches; pieces around a match carry no context.
+        return Ok(ev.list(&[Value::Str(s)]));
+    }
     out.push(ev.str_val(&hay[last..], &[]));
     Ok(ev.list(&out))
 }
