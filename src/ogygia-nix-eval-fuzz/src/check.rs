@@ -201,13 +201,7 @@ fn run_nix(mode: &[&str], expr: &str) -> Option<Run> {
     let stdout = stdout.join().unwrap();
     let stderr = String::from_utf8_lossy(&stderr.join().unwrap()).into_owned();
     let status = status?;
-    let exhausted = [
-        "out of memory",
-        "bad_alloc",
-        "stack overflow",
-        "max-call-depth",
-    ];
-    if exhausted.iter().any(|e| stderr.contains(e)) {
+    if exhausted(&stderr) {
         return None;
     }
     Some(if status.success() {
@@ -216,6 +210,19 @@ fn run_nix(mode: &[&str], expr: &str) -> Option<Run> {
     } else {
         Err(stderr)
     })
+}
+
+/// Whether Nix's standard error says it ran out of memory or stack.
+fn exhausted(stderr: &str) -> bool {
+    let stderr = stderr.to_lowercase();
+    [
+        "out of memory",
+        "bad_alloc",
+        "stack overflow",
+        "max-call-depth",
+    ]
+    .iter()
+    .any(|e| stderr.contains(e))
 }
 
 fn pure() -> Settings {
@@ -328,6 +335,14 @@ mod tests {
 
     fn outcome(src: &str) -> &'static str {
         Outcome::NAMES[check(src).index()]
+    }
+
+    #[test]
+    fn gc_out_of_memory_is_exhaustion() {
+        assert!(exhausted(
+            "GC Warning: Out of Memory! Heap size: 434 MiB. Returning NULL!\n\
+             Insufficient space for initial table allocation\n"
+        ));
     }
 
     #[test]
