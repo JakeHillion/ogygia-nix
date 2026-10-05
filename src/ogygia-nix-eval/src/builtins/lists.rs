@@ -28,8 +28,8 @@ pub fn length<'a>(ev: &Eval<'a>, args: &[Value<'a>]) -> R<'a> {
 }
 
 pub fn elem_at<'a>(ev: &Eval<'a>, args: &[Value<'a>]) -> R<'a> {
-    let list = ev.force_list(args[0])?;
     let n = ev.force_int(args[1])?;
+    let list = ev.force_list(args[0])?;
     match usize::try_from(n).ok().and_then(|i| list.get(i)) {
         Some(v) => ev.force(*v),
         None => eval_err(format!(
