@@ -200,6 +200,12 @@ fn translate_regex(re: &[u8], end: &str) -> Result<String, String> {
                 }
                 i += 1;
             }
+            '{' => {
+                // `regex` allows whitespace in an interval; libstdc++ does not.
+                let end = interval_end(&chars, i + 1).ok_or("invalid interval")?;
+                out.extend(&chars[i..end]);
+                i = end;
+            }
             '(' => {
                 depth += 1;
                 out.push('(');
@@ -388,6 +394,26 @@ fn push_pending(out: &mut String, c: Option<char>) {
     if let Some(c) = c {
         push_class_char(out, c);
     }
+}
+
+/// The index after the `}` of the `min}`, `min,}` or `min,max}` interval body
+/// starting at `chars[i]`, if it is one with `min <= max`.
+fn interval_end(chars: &[char], i: usize) -> Option<usize> {
+    let number = |i: usize| -> (Option<u64>, usize) {
+        let len = chars[i..].iter().take_while(|c| c.is_ascii_digit()).count();
+        let v = chars[i..i + len].iter().fold(0u64, |v, c| {
+            v.saturating_mul(10)
+                .saturating_add(u64::from(c.to_digit(10).unwrap_or(0)))
+        });
+        ((len > 0).then_some(v), i + len)
+    };
+    let (min, i) = number(i);
+    let min = min?;
+    let (max, i) = match chars.get(i) {
+        Some(',') => number(i + 1),
+        _ => (Some(min), i),
+    };
+    (chars.get(i) == Some(&'}') && max.is_none_or(|max| min <= max)).then_some(i + 1)
 }
 
 /// Translate the bracket expression whose body starts at `chars[i]`, returning
