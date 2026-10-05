@@ -1086,16 +1086,18 @@ impl<'a> Eval<'a> {
         })
     }
 
-    /// Equality of values stored in a list or set: a stored value equals
-    /// itself without being forced, even if it is a function.
+    /// Equality of values stored in a list or set: both are forced, then a
+    /// stored value equals itself, even if it is a function.
     fn eq_elem(&self, a: Value<'a>, b: Value<'a>) -> R<'a, bool> {
+        let forced_a = self.force(a)?;
+        let forced_b = self.force(b)?;
         if let (Some(p), Some(q)) = (a.ptr(), b.ptr())
             && p == q
             && std::mem::discriminant(&a) == std::mem::discriminant(&b)
         {
             return Ok(true);
         }
-        self.eq(a, b)
+        self.eq(forced_a, forced_b)
     }
 
     pub fn is_derivation(&self, a: &'a Attrs<'a>) -> R<'a, bool> {
