@@ -1120,7 +1120,7 @@ impl<'a> Eval<'a> {
             (Value::Path(x), Value::Path(y)) => Ok(crate::path::abs(x.0) < crate::path::abs(y.0)),
             (Value::List(x), Value::List(y)) => {
                 for (p, q) in x.items.iter().zip(y.items) {
-                    if !self.eq(*p, *q)? {
+                    if !self.eq_elem(*p, *q)? {
                         return self.less_than(*p, *q);
                     }
                 }
