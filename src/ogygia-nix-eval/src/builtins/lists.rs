@@ -107,13 +107,12 @@ pub fn concat_map<'a>(ev: &Eval<'a>, args: &[Value<'a>]) -> R<'a> {
 }
 
 pub fn foldl<'a>(ev: &Eval<'a>, args: &[Value<'a>]) -> R<'a> {
-    let f = args[0];
+    let f = ev.force_function(args[0])?;
     let mut acc = args[1];
     let list = ev.force_list(args[2])?;
     if list.is_empty() {
         return ev.force(acc);
     }
-    let f = ev.force_function(f)?;
     for item in list {
         let g = ev.call(f, acc)?;
         acc = ev.call(g, *item)?;
