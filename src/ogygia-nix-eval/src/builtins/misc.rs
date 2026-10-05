@@ -138,10 +138,7 @@ pub fn trace<'a>(ev: &Eval<'a>, args: &[Value<'a>]) -> R<'a> {
     let v = ev.force(args[0])?;
     let text = match v {
         Value::Str(s) => s.as_str_lossy().into_owned(),
-        other => {
-            let p = crate::print::print_strict(ev, other)?;
-            String::from_utf8_lossy(&p).into_owned()
-        }
+        other => crate::print::print_lazy(ev, other),
     };
     eprintln!("trace: {text}");
     ev.force(args[1])

@@ -1,5 +1,6 @@
 //! Rendering values the way `nix-instantiate --eval --strict` does.
 
+use std::collections::HashSet;
 use std::fmt::Write;
 
 use crate::eval::Eval;
@@ -133,6 +134,56 @@ fn print_value<'a>(ev: &Eval<'a>, v: Value<'a>, out: &mut Vec<u8>) -> R<'a, ()> 
         Value::Thunk(_) => unreachable!("forced above"),
     }
     Ok(())
+}
+
+/// Print `v` as `builtins.trace` does: without forcing anything, showing
+/// unevaluated values as `«thunk»`.
+pub fn print_lazy<'a>(ev: &Eval<'a>, v: Value<'a>) -> String {
+    let mut s = String::new();
+    lazy_into(ev, v, &mut s, &mut HashSet::new());
+    s
+}
+
+fn lazy_into<'a>(ev: &Eval<'a>, v: Value<'a>, s: &mut String, seen: &mut HashSet<*const ()>) {
+    if matches!(v, Value::Attrs(_) | Value::List(_))
+        && let Some(p) = v.ptr()
+        && !seen.insert(p)
+    {
+        s.push_str("«repeated»");
+        return;
+    }
+    match v {
+        Value::Attrs(a) => {
+            s.push_str("{ ");
+            for e in a.sorted(ev.ctx) {
+                let mut name = Vec::new();
+                attr_name(&mut name, ev.name(e.name));
+                s.push_str(&String::from_utf8_lossy(&name));
+                s.push_str(" = ");
+                lazy_into(ev, e.value, s, seen);
+                s.push_str("; ");
+            }
+            s.push('}');
+        }
+        Value::List(l) => {
+            s.push_str("[ ");
+            for item in l.items {
+                lazy_into(ev, *item, s, seen);
+                s.push(' ');
+            }
+            s.push(']');
+        }
+        Value::Str(st) => {
+            let mut b = Vec::new();
+            escape_string(&mut b, st.s);
+            s.push_str(&String::from_utf8_lossy(&b));
+        }
+        Value::Thunk(t) => match t.0.get() {
+            crate::value::ThunkState::Done(v) => lazy_into(ev, v, s, seen),
+            _ => s.push_str("«thunk»"),
+        },
+        other => short_into(ev, other, s, 0),
+    }
 }
 
 /// A short rendering for error messages; never forces anything.
