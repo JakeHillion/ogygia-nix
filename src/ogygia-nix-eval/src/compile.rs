@@ -157,6 +157,7 @@ pub fn compile<'a>(
             pos(at)
         ));
     }
+    intern_names(ctx, &parse.syntax());
     let root = parse.tree();
     let expr = child(root.expr())?;
     let mut c = Compiler {
@@ -171,6 +172,58 @@ pub fn compile<'a>(
         c.scopes.push(scope_of(names));
     }
     c.expr(&expr)
+}
+
+/// Attribute sets are ordered by symbol, so names are interned in the order
+/// Nix's parser interns them: in source order, except that a function's
+/// parameter name follows its body and a formal's name follows its default.
+fn intern_names(ctx: &Context, node: &rnix::SyntaxNode) {
+    use rnix::SyntaxKind::*;
+    let intern_ident = |n: &rnix::SyntaxNode| {
+        if let Some(tok) = n.first_token() {
+            ctx.intern(tok.text());
+        }
+    };
+    match node.kind() {
+        NODE_IDENT => intern_ident(node),
+        NODE_STRING
+            if node
+                .parent()
+                .is_some_and(|p| matches!(p.kind(), NODE_ATTRPATH | NODE_INHERIT)) =>
+        {
+            match ast::Str::cast(node.clone()).and_then(|s| static_str(&s)) {
+                Some(lit) => {
+                    ctx.intern(&lit);
+                }
+                None => node.children().for_each(|c| intern_names(ctx, &c)),
+            }
+        }
+        NODE_LAMBDA => {
+            let mut params = Vec::new();
+            for c in node.children() {
+                match c.kind() {
+                    NODE_IDENT_PARAM => params.extend(c.children()),
+                    NODE_PATTERN => {
+                        for p in c.children() {
+                            match p.kind() {
+                                NODE_PAT_BIND => params.extend(p.children()),
+                                _ => intern_names(ctx, &p),
+                            }
+                        }
+                    }
+                    _ => intern_names(ctx, &c),
+                }
+            }
+            params.iter().for_each(intern_ident);
+        }
+        NODE_PAT_ENTRY => {
+            let mut children = node.children();
+            let name = children.next();
+            children.for_each(|c| intern_names(ctx, &c));
+            name.iter().for_each(intern_ident);
+        }
+        _ => node.children().for_each(|c| intern_names(ctx, &c)),
+    }
 }
 
 /// rnix lexes any Unicode whitespace between tokens as whitespace, but Nix
