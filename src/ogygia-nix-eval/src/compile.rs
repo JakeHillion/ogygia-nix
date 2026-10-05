@@ -286,12 +286,12 @@ fn match_nix_tokens(text: &str) -> (Cow<'_, str>, Vec<u32>) {
         let insert = rnix::tokenize(&text).find_map(|(kind, s)| {
             let at = start;
             start += s.len();
-            let after_interpol = prev == Some(rnix::SyntaxKind::TOKEN_INTERPOL_END);
-            prev = Some(kind);
+            let before = prev.replace(kind);
+            let after_interpol = before == Some(rnix::SyntaxKind::TOKEN_INTERPOL_END);
             split_division(kind, s, after_interpol)
                 .or_else(|| split_number(kind, s))
                 .or_else(|| split_less(kind, s))
-                .or_else(|| split_home_path(kind, after_interpol))
+                .or_else(|| split_home_path(kind, s, before))
                 .map(|i| (at + i, " "))
                 .or_else(|| ellipsis_path(kind, &text[at..]).then_some((at, "./")))
                 .or_else(|| {
@@ -365,12 +365,24 @@ fn split_division(kind: rnix::SyntaxKind, s: &str, after_interpol: bool) -> Opti
     .then_some(s.len() - 1)
 }
 
-/// rnix parses a home path directly after an interpolation that ends a path,
-/// as in `./a/${b}~/c`, as the rest of that path, but `~` cannot continue a
-/// path in Nix, so this is `./a/${b}` then `~/c`. Returns the offset of such a
-/// home path, where a space makes rnix parse the same two paths.
-fn split_home_path(kind: rnix::SyntaxKind, after_interpol: bool) -> Option<usize> {
-    (kind == rnix::SyntaxKind::TOKEN_PATH_HOME && after_interpol).then_some(0)
+/// rnix parses a home path directly after a path continued after an
+/// interpolation, as in `./a/${b}~/c` or `./a/${b}.~/c`, as the rest of that
+/// path, but `~` cannot continue a path in Nix, so this is `./a/${b}` (or
+/// `./a/${b}.`) then `~/c`. Returns the offset of such a home path, where a
+/// space makes rnix parse the same two paths.
+fn split_home_path(
+    kind: rnix::SyntaxKind,
+    s: &str,
+    prev: Option<rnix::SyntaxKind>,
+) -> Option<usize> {
+    use rnix::SyntaxKind::*;
+    (kind == TOKEN_PATH_HOME
+        && s.starts_with('~')
+        && matches!(
+            prev,
+            Some(TOKEN_INTERPOL_END | TOKEN_PATH_ABS | TOKEN_PATH_REL | TOKEN_PATH_HOME)
+        ))
+    .then_some(0)
 }
 
 /// Nix lexes `<` as the start of a search path only when path segments
