@@ -23,8 +23,8 @@ pub fn import<'a>(ev: &Eval<'a>, args: &[Value<'a>]) -> R<'a> {
 }
 
 pub fn scoped_import<'a>(ev: &Eval<'a>, args: &[Value<'a>]) -> R<'a> {
-    let scope = ev.force_attrs(args[0])?;
     let path = ev.coerce_to_path(args[1])?;
+    let scope = ev.force_attrs(args[0])?;
     let file = ev.ctx.io.resolve_import(&path).map_err(io_err)?;
     let names: Vec<_> = scope.entries.iter().map(|e| e.name).collect();
     let expr = ev
