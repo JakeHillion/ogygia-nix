@@ -493,10 +493,17 @@ fn translate_bracket(chars: &[char], mut i: usize, out: &mut String) -> Result<u
                     BracketToken::Dash => '-',
                     _ => return Err("invalid end of range".into()),
                 };
-                if l > r {
+                // libstdc++ orders a range's ends as `char`, which is signed
+                // on some platforms, so a range may run from a non-ASCII byte
+                // round to an ASCII one.
+                let as_c_char = |c: char| std::ffi::c_char::from_ne_bytes([c as u8]);
+                if as_c_char(l) > as_c_char(r) {
                     return Err(format!("invalid range '{l}-{r}'"));
                 }
                 push_class_char(out, l);
+                if l > r {
+                    out.push_str("-\\xFF\\x00");
+                }
                 out.push('-');
                 push_class_char(out, r);
             }
