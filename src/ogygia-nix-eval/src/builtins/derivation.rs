@@ -8,6 +8,7 @@ use sha2::Sha256;
 use crate::derivation::Derivation;
 use crate::derivation::Output;
 use crate::derivation::input_addressed_path;
+use crate::derivation::output_path_name;
 use crate::eval::Coerce;
 use crate::eval::Eval;
 use crate::value::Ctx;
@@ -278,6 +279,9 @@ pub fn derivation_strict<'a>(ev: &Eval<'a>, args: &[Value<'a>]) -> R<'a> {
             .hash_modulo(&modulo_of)
             .map_err(|e| error(ErrorKind::Eval, format!("{e:#}")))?;
         for o in &outputs {
+            if let Err(e) = crate::store::check_name(&output_path_name(&name, o)) {
+                return eval_err(format!("{e:#}"));
+            }
             let path = input_addressed_path(&modulo, &name, o);
             drv.env.insert(o.clone(), path.clone().into_bytes());
             drv.outputs.get_mut(o).expect("inserted above").path = path;
