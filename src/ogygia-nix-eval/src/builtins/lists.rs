@@ -173,6 +173,9 @@ pub fn sort<'a>(ev: &Eval<'a>, args: &[Value<'a>]) -> R<'a> {
         return Ok(ev.list(&items));
     }
     let cmp = ev.force_function(args[0])?;
+    for item in &mut items {
+        *item = ev.force(*item)?;
+    }
     if items.len() == 1 {
         return Ok(ev.list(&items));
     }
