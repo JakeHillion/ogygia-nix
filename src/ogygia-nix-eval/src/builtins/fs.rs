@@ -255,8 +255,8 @@ pub fn path<'a>(ev: &Eval<'a>, args: &[Value<'a>]) -> R<'a> {
 }
 
 pub fn filter_source<'a>(ev: &Eval<'a>, args: &[Value<'a>]) -> R<'a> {
-    let filter = ev.force_function(args[0])?;
     let path = ev.coerce_to_path(args[1])?;
+    let filter = ev.force_function(args[0])?;
     add_path(ev, &path, None, Some(filter))
 }
 
