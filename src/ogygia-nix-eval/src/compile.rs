@@ -72,6 +72,7 @@ pub fn compile<'a>(
     let text = end_comments_at_cr(source.text);
     let (text, inserted) = match_nix_tokens(&text);
     let (text, inserted) = parenthesise_legacy_lets(text, inserted);
+    let (text, inserted) = parenthesise_inverts(text, inserted);
     let pos = |offset: rnix::TextSize| Pos {
         source,
         offset: source_offset(&inserted, u32::from(offset)),
@@ -313,29 +314,19 @@ fn match_nix_tokens(text: &str) -> (Cow<'_, str>, Vec<u32>) {
 /// applied or used with an operator unparenthesised, but rnix only parses it
 /// where it parses a function. Wraps each in parentheses, and returns the
 /// result with `inserted` updated to also hold the offsets of the parentheses.
-fn parenthesise_legacy_lets(
-    text: Cow<'_, str>,
-    mut inserted: Vec<u32>,
-) -> (Cow<'_, str>, Vec<u32>) {
-    let mut tokens = Vec::new();
-    let mut start = 0;
-    for (kind, s) in rnix::tokenize(&text) {
-        if !kind.is_trivia() {
-            tokens.push((kind, start));
-        }
-        start += s.len();
-    }
+fn parenthesise_legacy_lets(text: Cow<'_, str>, inserted: Vec<u32>) -> (Cow<'_, str>, Vec<u32>) {
+    let tokens = significant_tokens(&text);
     let mut parens = Vec::new();
     for (i, w) in tokens.windows(2).enumerate() {
         let [
-            (rnix::SyntaxKind::TOKEN_LET, at),
-            (rnix::SyntaxKind::TOKEN_L_BRACE, _),
+            (rnix::SyntaxKind::TOKEN_LET, at, _),
+            (rnix::SyntaxKind::TOKEN_L_BRACE, _, _),
         ] = *w
         else {
             continue;
         };
         let mut depth = 0usize;
-        let close = tokens[i + 1..].iter().find_map(|&(kind, end)| {
+        let close = tokens[i + 1..].iter().find_map(|&(kind, _, end)| {
             match kind {
                 rnix::SyntaxKind::TOKEN_L_BRACE | rnix::SyntaxKind::TOKEN_INTERPOL_START => {
                     depth += 1
@@ -345,12 +336,80 @@ fn parenthesise_legacy_lets(
                 }
                 _ => {}
             }
-            (depth == 0).then_some(end + 1)
+            (depth == 0).then_some(end)
         });
         if let Some(close) = close {
             parens.extend([(at, "("), (close, ")")]);
         }
     }
+    insert_parens(text, inserted, parens)
+}
+
+/// Nix parses `!` as the operand of an operator that binds tighter than it
+/// (`+`, `-`, `*`, `/` and `++`, and unary `-`), with the operand of `!`
+/// extending over every operator that also binds tighter, so `a + !b + c` is
+/// `a + !(b + c)`, but rnix rejects `!` there. Wraps each such `!` and its
+/// operand in parentheses, and returns the result with `inserted` updated to
+/// also hold the offsets of the parentheses.
+fn parenthesise_inverts(text: Cow<'_, str>, inserted: Vec<u32>) -> (Cow<'_, str>, Vec<u32>) {
+    use rnix::SyntaxKind::*;
+    let tokens = significant_tokens(&text);
+    let mut parens = Vec::new();
+    for (i, w) in tokens.windows(2).enumerate() {
+        let [
+            (TOKEN_ADD | TOKEN_SUB | TOKEN_MUL | TOKEN_DIV | TOKEN_CONCAT, _, _),
+            (TOKEN_INVERT, at, _),
+        ] = *w
+        else {
+            continue;
+        };
+        let mut depth = 0usize;
+        let operand = tokens[i + 2..]
+            .iter()
+            .take_while(|&&(kind, _, _)| match kind {
+                TOKEN_L_PAREN | TOKEN_L_BRACK | TOKEN_L_BRACE | TOKEN_INTERPOL_START
+                | TOKEN_STRING_START => {
+                    depth += 1;
+                    true
+                }
+                TOKEN_R_PAREN | TOKEN_R_BRACK | TOKEN_R_BRACE | TOKEN_INTERPOL_END
+                | TOKEN_STRING_END => depth.checked_sub(1).map(|d| depth = d).is_some(),
+                _ if depth > 0 => true,
+                TOKEN_IDENT | TOKEN_INTEGER | TOKEN_FLOAT | TOKEN_URI | TOKEN_CUR_POS
+                | TOKEN_PATH_ABS | TOKEN_PATH_HOME | TOKEN_PATH_REL | TOKEN_PATH_SEARCH
+                | TOKEN_REC | TOKEN_DOT | TOKEN_OR | TOKEN_QUESTION | TOKEN_CONCAT | TOKEN_MUL
+                | TOKEN_DIV | TOKEN_ADD | TOKEN_SUB | TOKEN_INVERT => true,
+                _ => false,
+            })
+            .last();
+        if let Some(&(_, _, close)) = operand {
+            parens.extend([(at, "("), (close, ")")]);
+        }
+    }
+    insert_parens(text, inserted, parens)
+}
+
+/// The kind and start and end offsets of each token of `text` that is not
+/// trivia.
+fn significant_tokens(text: &str) -> Vec<(rnix::SyntaxKind, usize, usize)> {
+    let mut tokens = Vec::new();
+    let mut start = 0;
+    for (kind, s) in rnix::tokenize(text) {
+        if !kind.is_trivia() {
+            tokens.push((kind, start, start + s.len()));
+        }
+        start += s.len();
+    }
+    tokens
+}
+
+/// Inserts each of `parens` into `text` at its offset, and returns the result
+/// with `inserted` updated to also hold their offsets.
+fn insert_parens<'a>(
+    text: Cow<'a, str>,
+    mut inserted: Vec<u32>,
+    mut parens: Vec<(usize, &str)>,
+) -> (Cow<'a, str>, Vec<u32>) {
     if parens.is_empty() {
         return (text, inserted);
     }
