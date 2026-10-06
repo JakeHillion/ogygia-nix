@@ -36,7 +36,8 @@ pub fn record(findings: &Path, src: &str, report: &str) -> std::io::Result<()> {
 pub struct Recheck {
     /// Still diverging; their reports are refreshed.
     pub kept: usize,
-    /// No longer diverging, or missing their input, so deleted.
+    /// No longer diverging, hitting a fixed limit of Nix, or missing their
+    /// input, so deleted.
     pub removed: usize,
     /// Nix ran out of time, memory or stack, so left as they were.
     pub inconclusive: usize,
@@ -125,7 +126,7 @@ mod tests {
     fn recheck_keeps_only_what_still_diverges() {
         let tmp = tempfile::tempdir().unwrap();
         let findings = tmp.path();
-        for src in ["diverges", "fixed", "too slow"] {
+        for src in ["diverges", "fixed", "too slow", "too big"] {
             record(findings, src, "old report").unwrap();
         }
         std::fs::create_dir(findings.join("no-input")).unwrap();
@@ -135,6 +136,7 @@ mod tests {
             "diverges" => Outcome::Diverged("new report".to_owned()),
             "fixed" => Outcome::Value,
             "too slow" => Outcome::Skipped,
+            "too big" => Outcome::Limited,
             other => panic!("unexpected input {other}"),
         })
         .unwrap();
@@ -143,13 +145,14 @@ mod tests {
             summary,
             Recheck {
                 kept: 1,
-                removed: 2,
+                removed: 3,
                 inconclusive: 1
             }
         );
         let report = |src| std::fs::read_to_string(finding(findings, src).join("report"));
         assert_eq!(report("diverges").unwrap(), "new report");
         assert!(!finding(findings, "fixed").exists());
+        assert!(!finding(findings, "too big").exists());
         assert_eq!(report("too slow").unwrap(), "old report");
         assert!(!findings.join("no-input").exists());
         assert!(findings.join(".hidden").exists());
