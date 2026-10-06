@@ -144,7 +144,7 @@ pub fn derivation_strict<'a>(ev: &Eval<'a>, args: &[Value<'a>]) -> R<'a> {
         if ignore_nulls && matches!(ev.force(e.value)?, Value::Null) {
             continue;
         }
-        if key == "__structuredAttrs" {
+        if structured && key == "__structuredAttrs" {
             continue;
         }
         if key == "args" {
