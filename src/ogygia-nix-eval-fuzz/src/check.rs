@@ -73,6 +73,9 @@ pub enum Outcome {
     ParseRejected,
     /// Nix ran out of time, memory or stack.
     Skipped,
+    /// Nix hit a fixed limit of its implementation, which it hits on every
+    /// run, such as the size of a compiled regular expression.
+    Limited,
     /// Both sides evaluate it to the same value.
     Value,
     /// Both sides fail, and `builtins.tryEval` catches it on both.
@@ -85,10 +88,11 @@ pub enum Outcome {
 }
 
 impl Outcome {
-    pub const NAMES: [&str; 7] = [
+    pub const NAMES: [&str; 8] = [
         "ignored",
         "parse-rejected",
         "skipped",
+        "limited",
         "values",
         "caught",
         "uncaught",
@@ -101,10 +105,11 @@ impl Outcome {
             Outcome::Ignored => 0,
             Outcome::ParseRejected => 1,
             Outcome::Skipped => 2,
-            Outcome::Value => 3,
-            Outcome::Caught => 4,
-            Outcome::Uncaught => 5,
-            Outcome::Diverged(_) => 6,
+            Outcome::Limited => 3,
+            Outcome::Value => 4,
+            Outcome::Caught => 5,
+            Outcome::Uncaught => 6,
+            Outcome::Diverged(_) => 7,
         }
     }
 }
@@ -137,9 +142,9 @@ fn read_all(mut r: impl Read + Send + 'static) -> std::thread::JoinHandle<Vec<u8
     })
 }
 
-/// `None` when Nix ran out of time, memory or stack, which says nothing
-/// about equivalence.
-fn run_nix(mode: &[&str], expr: &str) -> Option<Run> {
+/// Fails with [`Outcome::Skipped`] or [`Outcome::Limited`] when what Nix
+/// did says nothing about equivalence.
+fn run_nix(mode: &[&str], expr: &str) -> Result<Run, Outcome> {
     let s = scratch();
     let mut cmd = Command::new(nix_instantiate());
     cmd.args(mode)
@@ -188,12 +193,12 @@ fn run_nix(mode: &[&str], expr: &str) -> Option<Run> {
     let deadline = Instant::now() + NIX_TIMEOUT;
     let status = loop {
         if let Some(status) = child.try_wait().expect("waiting for nix-instantiate") {
-            break Some(status);
+            break Ok(status);
         }
         if Instant::now() > deadline {
             child.kill().expect("killing nix-instantiate");
             child.wait().expect("waiting for nix-instantiate");
-            break None;
+            break Err(Outcome::Skipped);
         }
         std::thread::sleep(Duration::from_millis(5));
     };
@@ -202,9 +207,12 @@ fn run_nix(mode: &[&str], expr: &str) -> Option<Run> {
     let stderr = String::from_utf8_lossy(&stderr.join().unwrap()).into_owned();
     let status = status?;
     if exhausted(&stderr) {
-        return None;
+        return Err(Outcome::Skipped);
     }
-    Some(if status.success() {
+    if limited(&stderr) {
+        return Err(Outcome::Limited);
+    }
+    Ok(if status.success() {
         let stdout = String::from_utf8_lossy(&stdout);
         Ok(stdout.strip_suffix('\n').unwrap_or(&stdout).to_owned())
     } else {
@@ -223,6 +231,12 @@ fn exhausted(stderr: &str) -> bool {
     ]
     .iter()
     .any(|e| stderr.contains(e))
+}
+
+/// Whether Nix's standard error says it hit a fixed limit of its
+/// implementation.
+fn limited(stderr: &str) -> bool {
+    stderr.contains("memory limit exceeded by regular expression")
 }
 
 fn pure() -> Settings {
@@ -267,8 +281,9 @@ fn agree(theirs: &Run, ours: &Run) -> bool {
 /// 3. When both fail, `builtins.tryEval` must catch the failure on both
 ///    sides or on neither. Error messages are not compared.
 ///
-/// Nix runs first at each step, and an input on which it runs out of time,
-/// memory or stack is [skipped](Outcome::Skipped).
+/// Nix runs first at each step. An input on which it runs out of time,
+/// memory or stack is [skipped](Outcome::Skipped), and one on which it hits
+/// a fixed limit of its implementation is [limited](Outcome::Limited).
 /// An input containing a NUL byte is [ignored](Outcome::Ignored): Nix
 /// stops reading at the first one outside a string, so it evaluates a
 /// prefix of the input rather than the input.
@@ -290,8 +305,9 @@ fn check_with(eval: impl Fn(&str) -> Run, src: &str) -> Outcome {
             .map(|_| String::new())
             .map_err(|e| e.msg)
     });
-    let Some(theirs) = run_nix(&["--parse"], src) else {
-        return Outcome::Skipped;
+    let theirs = match run_nix(&["--parse"], src) {
+        Ok(theirs) => theirs,
+        Err(outcome) => return outcome,
     };
     if theirs.is_ok() != ours.is_ok() {
         return diverged("parse", src, src, &theirs, &ours);
@@ -303,8 +319,9 @@ fn check_with(eval: impl Fn(&str) -> Run, src: &str) -> Outcome {
     // The input parses on its own, so parenthesised on lines of its own it
     // is the same expression.
     let expr = format!("{DEEP_COPY} (\n{src}\n)");
-    let Some(theirs) = run_nix(&["--eval", "--strict"], &expr) else {
-        return Outcome::Skipped;
+    let theirs = match run_nix(&["--eval", "--strict"], &expr) {
+        Ok(theirs) => theirs,
+        Err(outcome) => return outcome,
     };
     let ours = eval(&expr);
     if !agree(&theirs, &ours) {
@@ -315,8 +332,9 @@ fn check_with(eval: impl Fn(&str) -> Run, src: &str) -> Outcome {
     }
 
     let expr = format!("builtins.tryEval (builtins.deepSeq (\n{src}\n) null)");
-    let Some(theirs) = run_nix(&["--eval", "--strict"], &expr) else {
-        return Outcome::Skipped;
+    let theirs = match run_nix(&["--eval", "--strict"], &expr) {
+        Ok(theirs) => theirs,
+        Err(outcome) => return outcome,
     };
     let ours = eval(&expr);
     if !agree(&theirs, &ours) {
@@ -343,6 +361,17 @@ mod tests {
             "GC Warning: Out of Memory! Heap size: 434 MiB. Returning NULL!\n\
              Insufficient space for initial table allocation\n"
         ));
+    }
+
+    #[test]
+    fn limits_what_nix_never_finishes() {
+        assert_eq!(
+            outcome(
+                "builtins.match (\"(a{2}b){2}\" + \
+                 builtins.concatStringsSep \"\" (builtins.genList (_: \"a\") 99970)) \"\""
+            ),
+            "limited"
+        );
     }
 
     #[test]

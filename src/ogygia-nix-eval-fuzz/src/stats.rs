@@ -56,8 +56,8 @@ mod tests {
     #[test]
     fn line_pairs_names_with_counts() {
         assert_eq!(
-            line(1700000000, &[1, 2, 3, 4, 5, 6, 7]),
-            "1700000000 ignored 1 parse-rejected 2 skipped 3 values 4 caught 5 uncaught 6 diverged 7\n"
+            line(1700000000, &[1, 2, 3, 4, 5, 6, 7, 8]),
+            "1700000000 ignored 1 parse-rejected 2 skipped 3 limited 4 values 5 caught 6 uncaught 7 diverged 8\n"
         );
     }
 }
