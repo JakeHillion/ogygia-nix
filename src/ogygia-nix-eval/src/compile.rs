@@ -71,6 +71,7 @@ pub fn compile<'a>(
 ) -> CResult<ExprRef<'a>> {
     let text = end_comments_at_cr(source.text);
     let (text, inserted) = match_nix_tokens(&text);
+    let (text, inserted) = parenthesise_legacy_lets(text, inserted);
     let pos = |offset: rnix::TextSize| Pos {
         source,
         offset: source_offset(&inserted, u32::from(offset)),
@@ -306,6 +307,68 @@ fn match_nix_tokens(text: &str) -> (Cow<'_, str>, Vec<u32>) {
             None => return (text, inserted),
         }
     }
+}
+
+/// Nix parses `let { ... }` as an operand, so it can be selected from,
+/// applied or used with an operator unparenthesised, but rnix only parses it
+/// where it parses a function. Wraps each in parentheses, and returns the
+/// result with `inserted` updated to also hold the offsets of the parentheses.
+fn parenthesise_legacy_lets(
+    text: Cow<'_, str>,
+    mut inserted: Vec<u32>,
+) -> (Cow<'_, str>, Vec<u32>) {
+    let mut tokens = Vec::new();
+    let mut start = 0;
+    for (kind, s) in rnix::tokenize(&text) {
+        if !kind.is_trivia() {
+            tokens.push((kind, start));
+        }
+        start += s.len();
+    }
+    let mut parens = Vec::new();
+    for (i, w) in tokens.windows(2).enumerate() {
+        let [
+            (rnix::SyntaxKind::TOKEN_LET, at),
+            (rnix::SyntaxKind::TOKEN_L_BRACE, _),
+        ] = *w
+        else {
+            continue;
+        };
+        let mut depth = 0usize;
+        let close = tokens[i + 1..].iter().find_map(|&(kind, end)| {
+            match kind {
+                rnix::SyntaxKind::TOKEN_L_BRACE | rnix::SyntaxKind::TOKEN_INTERPOL_START => {
+                    depth += 1
+                }
+                rnix::SyntaxKind::TOKEN_R_BRACE | rnix::SyntaxKind::TOKEN_INTERPOL_END => {
+                    depth -= 1
+                }
+                _ => {}
+            }
+            (depth == 0).then_some(end + 1)
+        });
+        if let Some(close) = close {
+            parens.extend([(at, "("), (close, ")")]);
+        }
+    }
+    if parens.is_empty() {
+        return (text, inserted);
+    }
+    // Inserting from the end keeps the offsets still to insert at valid, and
+    // `(` before `)` at the same offset leaves `)(` there.
+    parens.sort_by_key(|&(i, s)| (std::cmp::Reverse(i), s));
+    let mut text = text.into_owned();
+    for (i, s) in parens {
+        text.insert_str(i, s);
+        let i = i as u32;
+        inserted
+            .iter_mut()
+            .filter(|o| **o >= i)
+            .for_each(|o| *o += 1);
+        inserted.push(i);
+    }
+    inserted.sort_unstable();
+    (Cow::Owned(text), inserted)
 }
 
 /// Nix lexes a path followed by an interpolation as the longest prefix that
