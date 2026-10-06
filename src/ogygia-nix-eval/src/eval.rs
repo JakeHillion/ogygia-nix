@@ -973,12 +973,18 @@ impl<'a> Eval<'a> {
                 }
                 Ok(self.path_val(&canon_path(&String::from_utf8_lossy(&buf))))
             }
+            // Only a string on the left copies paths to the store; a set
+            // that coerces to a string concatenates without copying.
             _ => {
+                let how = match a {
+                    Value::Str(_) => Coerce::INTERP,
+                    _ => Coerce::PLAIN,
+                };
                 let mut buf = Vec::new();
                 let mut ctx = Vec::new();
-                self.coerce_into(a, Coerce::INTERP, &mut buf, &mut ctx)?;
+                self.coerce_into(a, how, &mut buf, &mut ctx)?;
                 let b = self.force(b()?)?;
-                self.coerce_into(b, Coerce::INTERP, &mut buf, &mut ctx)?;
+                self.coerce_into(b, how, &mut buf, &mut ctx)?;
                 Ok(self.str_with_ctx(&buf, ctx))
             }
         }
