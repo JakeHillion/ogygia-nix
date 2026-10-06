@@ -94,6 +94,7 @@ fn attr_name(out: &mut Vec<u8>, name: &str) {
 
 /// Deeply force and print `v`.
 pub fn print_strict<'a>(ev: &Eval<'a>, v: Value<'a>) -> R<'a, Vec<u8>> {
+    let v = ev.deep_force(v)?;
     let mut out = Vec::new();
     print_value(ev, v, &mut out)?;
     Ok(out)
@@ -262,5 +263,16 @@ mod tests {
         assert_eq!(float_g(0.0001), "0.0001");
         assert_eq!(float_g(1234567.0), "1.23457e+06");
         assert_eq!(float_g(2.5), "2.5");
+    }
+
+    #[test]
+    fn forces_in_attribute_order_before_printing() {
+        let err = crate::eval_to_string(
+            "{ b = throw \"first\"; a = throw \"second\"; }",
+            "/",
+            crate::Settings::default(),
+        )
+        .unwrap_err();
+        assert!(err.contains("first"), "{err}");
     }
 }
