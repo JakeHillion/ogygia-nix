@@ -11,8 +11,8 @@ hex = { workspace = true }
 lasso = { workspace = true }
 md-5 = { workspace = true }
 num-bigint = { workspace = true }
-regex = { workspace = true }
 regex-automata = { workspace = true }
+regex-syntax = { workspace = true }
 rnix = { workspace = true }
 rowan = { workspace = true }
 toml = { workspace = true }
