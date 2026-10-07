@@ -12,6 +12,7 @@ use clap::Parser;
 use libfuzzer_sys::fuzz_crossover;
 use libfuzzer_sys::fuzz_mutator;
 use libfuzzer_sys::fuzz_target;
+use ogygia_nix_eval_fuzz::Budget;
 use ogygia_nix_eval_fuzz::Outcome;
 
 /// Differential fuzzing of ogygia-nix-eval against Nix. Arguments that are
@@ -50,7 +51,7 @@ fuzz_target!(|data: &[u8]| {
         return;
     };
     let options = OPTIONS.get().expect("options are set before fuzzing");
-    let outcome = ogygia_nix_eval_fuzz::check(src);
+    let outcome = ogygia_nix_eval_fuzz::check(src, Budget::Fuzzing);
     if let Outcome::Diverged(report) = &outcome {
         match &options.findings {
             Some(dir) => {
@@ -107,7 +108,9 @@ fn fuzz(args: Vec<String>) -> ExitCode {
 }
 
 fn recheck(findings: &Path) -> bool {
-    match ogygia_nix_eval_fuzz::recheck(findings, ogygia_nix_eval_fuzz::check) {
+    match ogygia_nix_eval_fuzz::recheck(findings, |src| {
+        ogygia_nix_eval_fuzz::check(src, Budget::Unlimited)
+    }) {
         Ok(r) => {
             eprintln!(
                 "rechecked findings: {} kept, {} removed, {} inconclusive",
@@ -179,7 +182,7 @@ fn check(file: &Path) -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    match ogygia_nix_eval_fuzz::check(&src) {
+    match ogygia_nix_eval_fuzz::check(&src, Budget::Unlimited) {
         Outcome::Diverged(report) => {
             print!("{report}");
             ExitCode::FAILURE
