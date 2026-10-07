@@ -34,7 +34,7 @@ pub struct Context {
     /// the lifetime of a borrow of `self`.
     files: RefCell<HashMap<(String, bool), ExprRef<'static>>>,
     /// Compiled `builtins.match` patterns by source.
-    pub(crate) match_regexes: RefCell<HashMap<Vec<u8>, Rc<regex::bytes::Regex>>>,
+    pub(crate) match_regexes: RefCell<HashMap<Vec<u8>, Rc<regex_automata::meta::Regex>>>,
     /// Compiled `builtins.split` patterns by source.
     pub(crate) split_regexes: RefCell<HashMap<Vec<u8>, Rc<builtins::strings::SplitRegex>>>,
 }

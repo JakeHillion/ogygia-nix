@@ -222,7 +222,7 @@
             # runner has neither on PATH.
             env.OGYGIA_NEBULA_CERT_BIN = "${pkgs.nebula}/bin/nebula-cert";
             env.OGYGIA_JJ_BIN = "${pkgs.jujutsu}/bin/jj";
-            env.OGYGIA_NIX_INSTANTIATE_BIN = "${pkgs.nix}/bin/nix-instantiate";
+            env.OGYGIA_NIX_INSTANTIATE_BIN = "${referenceNix}/bin/nix-instantiate";
             env.OGYGIA_NIX_EVAL_DEFAULT_INCLUDE_PATH = "${nixIncludePath}";
             nativeBuildInputs = commonArgs.nativeBuildInputs ++ [
               pkgs.cargo-nextest
@@ -252,7 +252,7 @@
             cargoArtifacts = null;
             doInstallCargoArtifacts = false;
             env = {
-              OGYGIA_NIX_INSTANTIATE_BIN = "${pkgs.nix}/bin/nix-instantiate";
+              OGYGIA_NIX_INSTANTIATE_BIN = "${referenceNix}/bin/nix-instantiate";
               OGYGIA_NIX_EVAL_DEFAULT_INCLUDE_PATH = "${nixIncludePath}";
               OGYGIA_NIX_EVAL_FUZZ_SEEDS = "${fuzzSeeds}";
               OGYGIA_NIX_EVAL_FUZZ_REV = self.rev or self.dirtyRev or "unknown";
@@ -269,6 +269,8 @@
             meta.mainProgram = "ogygia-nix-eval-fuzz";
           });
 
+          referenceNix = pkgs.nixVersions.latest;
+
           # The files Nix ships with itself, which `<nix/...>` paths find under
           # nix/. They are Nix's own (LGPL-2.1), so ogygia-nix-eval refers to
           # them by path rather than including them.
@@ -277,8 +279,8 @@
             # Nix embeds the file as a raw string literal opened on the line
             # before it (nix-meson-build-support/generate-header), so what it
             # serves starts with a newline.
-            { echo; cat ${pkgs.nix.src}/src/libexpr/fetchurl.nix; } > $out/nix/fetchurl.nix
-            cp ${pkgs.nix.src}/COPYING $out/
+            { echo; cat ${referenceNix.src}/src/libexpr/fetchurl.nix; } > $out/nix/fetchurl.nix
+            cp ${referenceNix.src}/COPYING $out/
           '';
 
           # Real Nix code for the fuzzer to start from: our equivalence cases,
@@ -291,7 +293,7 @@
                 (lib.findFirst (p: p.name == "rnix") null lock.package);
             in
             pkgs.runCommand "ogygia-nix-eval-fuzz-seeds"
-              { nativeBuildInputs = [ pkgs.nix pkgs.jq ]; }
+              { nativeBuildInputs = [ referenceNix pkgs.jq ]; }
               ''
                 mkdir -p $out/seeds
                 find ${./src/ogygia-nix-eval/tests/cases} ${nixpkgs}/lib \
@@ -318,6 +320,7 @@
 
           devShells.default = craneLib.devShell {
             inputsFrom = [ cargoArtifacts ];
+            OGYGIA_NIX_INSTANTIATE_BIN = "${referenceNix}/bin/nix-instantiate";
             OGYGIA_NIX_EVAL_DEFAULT_INCLUDE_PATH = "${nixIncludePath}";
             packages = with pkgs; [
               etcd # for etcdctl
@@ -378,7 +381,7 @@
             ogygia-nix-eval-equiv = craneLib.cargoTest (commonArgs // {
               inherit cargoArtifacts;
               cargoTestExtraArgs = "-p ogygia-nix-eval -p ogygia-nix-eval-fuzz";
-              env.OGYGIA_NIX_INSTANTIATE_BIN = "${pkgs.nix}/bin/nix-instantiate";
+              env.OGYGIA_NIX_INSTANTIATE_BIN = "${referenceNix}/bin/nix-instantiate";
               env.OGYGIA_NIX_EVAL_DEFAULT_INCLUDE_PATH = "${nixIncludePath}";
               env.OGYGIA_NIX_EVAL_NIXPKGS = "${nixpkgs}";
             });

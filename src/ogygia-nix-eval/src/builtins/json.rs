@@ -380,11 +380,59 @@ impl JsonParser<'_> {
 pub fn from_toml<'a>(ev: &Eval<'a>, args: &[Value<'a>]) -> R<'a> {
     let s = ev.force_str(args[0])?;
     let text = String::from_utf8_lossy(s.s);
+    if let Some(e) = toml_1_1_syntax(&text) {
+        return eval_err(format!("while parsing TOML: {e}"));
+    }
     let table: toml::Table = match split_headers_after_values(&text).parse() {
         Ok(t) => t,
         Err(e) => return eval_err(format!("while parsing TOML: {e}")),
     };
     toml_to_value(ev, &toml::Value::Table(table))
+}
+
+/// Nix parses TOML 1.0, but the `toml` crate accepts TOML 1.1, which adds
+/// newlines and a trailing comma inside inline tables and the `\e` and
+/// `\xHH` escapes in basic strings. Report the first of these, if any.
+fn toml_1_1_syntax(text: &str) -> Option<&'static str> {
+    use toml_parser::lexer::TokenKind;
+
+    let mut open = Vec::new();
+    let mut after_comma = false;
+    for token in toml_parser::Source::new(text).lex() {
+        let kind = token.kind();
+        let in_inline_table = open.last() == Some(&TokenKind::LeftCurlyBracket);
+        match kind {
+            TokenKind::LeftSquareBracket | TokenKind::LeftCurlyBracket => open.push(kind),
+            TokenKind::RightSquareBracket => {
+                open.pop();
+            }
+            TokenKind::RightCurlyBracket => {
+                if in_inline_table && after_comma {
+                    return Some("trailing comma in inline table");
+                }
+                open.pop();
+            }
+            TokenKind::Newline if in_inline_table => {
+                return Some("newline in inline table");
+            }
+            TokenKind::BasicString | TokenKind::MlBasicString => {
+                let span = token.span();
+                let mut bytes = text.as_bytes()[span.start()..span.end()].iter();
+                while let Some(b) = bytes.next() {
+                    if *b == b'\\' && matches!(bytes.next(), Some(b'e' | b'x')) {
+                        return Some("unknown escape sequence");
+                    }
+                }
+            }
+            _ => {}
+        }
+        match kind {
+            TokenKind::Comma => after_comma = true,
+            TokenKind::Whitespace => {}
+            _ => after_comma = false,
+        }
+    }
+    None
 }
 
 /// toml11 ends a table's key/value pairs as soon as the next non-whitespace

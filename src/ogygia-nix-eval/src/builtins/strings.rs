@@ -8,7 +8,13 @@ use regex_automata::Anchored;
 use regex_automata::Input;
 use regex_automata::MatchKind;
 use regex_automata::meta;
+use regex_automata::util::captures::Captures;
 use regex_automata::util::syntax;
+use regex_syntax::hir::Capture;
+use regex_syntax::hir::Hir;
+use regex_syntax::hir::HirKind;
+use regex_syntax::hir::Literal;
+use regex_syntax::hir::Repetition;
 use sha1::Sha1;
 use sha2::Digest;
 use sha2::Sha256;
@@ -412,7 +418,7 @@ fn push_byte(out: &mut String, c: char) {
 /// Push the byte `c` as a literal member of a `regex` character class.
 fn push_class_char(out: &mut String, c: char) {
     if c.is_ascii() {
-        out.push_str(&regex::escape(c.encode_utf8(&mut [0; 4])));
+        out.push_str(&regex_syntax::escape(c.encode_utf8(&mut [0; 4])));
     } else {
         push_byte(out, c);
     }
@@ -579,7 +585,121 @@ fn regex_error(re: &[u8], e: impl std::fmt::Display) -> Box<crate::value::EvalEr
     )
 }
 
-fn compile_match_regex<'a>(ev: &Eval<'a>, re: &[u8]) -> R<'a, Rc<regex::bytes::Regex>> {
+/// The largest expression `empty_iterations` copies.
+const MAX_COPIED_HIR: usize = 100_000;
+
+/// Rewrite the unbounded repetitions in `hir` so that their groups are set as
+/// by `std::regex`, which lets an iteration match empty where `regex` does
+/// not.
+fn empty_iterations(hir: Hir) -> Hir {
+    match hir.into_kind() {
+        HirKind::Empty => Hir::empty(),
+        HirKind::Literal(Literal(bytes)) => Hir::literal(bytes),
+        HirKind::Class(class) => Hir::class(class),
+        HirKind::Look(look) => Hir::look(look),
+        HirKind::Repetition(rep) => {
+            let empty = only_empty(&rep.sub)
+                .filter(|_| rep.max.is_none() && rep.sub.properties().explicit_captures_len() > 0);
+            let sub = empty_iterations(*rep.sub);
+            let repeat = |min, max, sub| {
+                Hir::repetition(Repetition {
+                    min,
+                    max,
+                    greedy: rep.greedy,
+                    sub: Box::new(sub),
+                })
+            };
+            // The copies double the size of each nested repetition, so leave
+            // one that is already large as it is rather than exceed the limit
+            // on the size of the compiled regex.
+            let Some(empty) = empty.filter(|_| hir_size(&sub) <= MAX_COPIED_HIR) else {
+                return repeat(rep.min, rep.max, sub);
+            };
+            // After an iteration, libstdc++ tries another, which may match
+            // empty and set the groups again; only an iteration after an
+            // empty one must match something. `regex` drops a path that comes
+            // back to a state at the same position, so a loop of `x` never
+            // ends with an empty iteration. `x{n,}` becomes
+            // `x{n}(?:xx?)*(?:x')?`, where `x'` is the paths through `x` that
+            // match empty: the copies of `x` are separate states, so the
+            // second can match empty after the first, or match something
+            // after an empty first, and `x'` takes a final empty iteration.
+            Hir::concat(vec![
+                repeat(rep.min, Some(rep.min), sub.clone()),
+                repeat(
+                    0,
+                    None,
+                    Hir::concat(vec![sub.clone(), repeat(0, Some(1), sub)]),
+                ),
+                repeat(0, Some(1), empty),
+            ])
+        }
+        HirKind::Capture(cap) => Hir::capture(Capture {
+            sub: Box::new(empty_iterations(*cap.sub)),
+            ..cap
+        }),
+        HirKind::Concat(subs) => Hir::concat(subs.into_iter().map(empty_iterations).collect()),
+        HirKind::Alternation(subs) => {
+            Hir::alternation(subs.into_iter().map(empty_iterations).collect())
+        }
+    }
+}
+
+/// The number of nodes in `hir`.
+fn hir_size(hir: &Hir) -> usize {
+    1 + match hir.kind() {
+        HirKind::Empty | HirKind::Literal(_) | HirKind::Class(_) | HirKind::Look(_) => 0,
+        HirKind::Repetition(rep) => hir_size(&rep.sub),
+        HirKind::Capture(cap) => hir_size(&cap.sub),
+        HirKind::Concat(subs) | HirKind::Alternation(subs) => subs.iter().map(hir_size).sum(),
+    }
+}
+
+/// The paths through `hir` that match the empty string, in the same order, if
+/// there are any.
+fn only_empty(hir: &Hir) -> Option<Hir> {
+    match hir.kind() {
+        HirKind::Empty => Some(Hir::empty()),
+        HirKind::Literal(_) | HirKind::Class(_) => None,
+        HirKind::Look(look) => Some(Hir::look(*look)),
+        HirKind::Repetition(rep) => match only_empty(&rep.sub) {
+            Some(sub) => Some(Hir::repetition(Repetition {
+                sub: Box::new(sub),
+                ..rep.clone()
+            })),
+            None => (rep.min == 0).then(Hir::empty),
+        },
+        HirKind::Capture(cap) => Some(Hir::capture(Capture {
+            sub: Box::new(only_empty(&cap.sub)?),
+            ..cap.clone()
+        })),
+        HirKind::Concat(subs) => Some(Hir::concat(
+            subs.iter().map(only_empty).collect::<Option<_>>()?,
+        )),
+        HirKind::Alternation(subs) => {
+            let subs: Vec<Hir> = subs.iter().filter_map(only_empty).collect();
+            (!subs.is_empty()).then(|| Hir::alternation(subs))
+        }
+    }
+}
+
+/// Compile `pattern`, translated from `re`, to search for with `kind`.
+fn build_regex<'a>(re: &[u8], pattern: &str, kind: MatchKind) -> R<'a, meta::Regex> {
+    let hir = syntax::parse_with(
+        pattern,
+        &syntax::Config::new()
+            .unicode(false)
+            .utf8(false)
+            .dot_matches_new_line(true),
+    )
+    .map_err(|e| regex_error(re, e))?;
+    meta::Builder::new()
+        .configure(meta::Config::new().match_kind(kind).utf8_empty(false))
+        .build_from_hir(&empty_iterations(hir))
+        .map_err(|e| regex_error(re, e))
+}
+
+fn compile_match_regex<'a>(ev: &Eval<'a>, re: &[u8]) -> R<'a, Rc<meta::Regex>> {
     if let Some(r) = ev.ctx.match_regexes.borrow().get(re) {
         return Ok(r.clone());
     }
@@ -587,12 +707,7 @@ fn compile_match_regex<'a>(ev: &Eval<'a>, re: &[u8]) -> R<'a, Rc<regex::bytes::R
         "^(?:{})$",
         translate_regex(re, "$").map_err(|e| regex_error(re, e))?
     );
-    let r = regex::bytes::RegexBuilder::new(&pattern)
-        .unicode(false)
-        .dot_matches_new_line(true)
-        .build()
-        .map_err(|e| regex_error(re, e))?;
-    let r = Rc::new(r);
+    let r = Rc::new(build_regex(re, &pattern, MatchKind::LeftmostFirst)?);
     ev.ctx
         .match_regexes
         .borrow_mut()
@@ -600,10 +715,10 @@ fn compile_match_regex<'a>(ev: &Eval<'a>, re: &[u8]) -> R<'a, Rc<regex::bytes::R
     Ok(r)
 }
 
-fn captures_list<'a>(ev: &Eval<'a>, caps: &regex::bytes::Captures) -> Value<'a> {
-    let groups: Vec<Value<'a>> = (1..caps.len())
-        .map(|i| match caps.get(i) {
-            Some(m) => ev.str_val(m.as_bytes(), &[]),
+fn captures_list<'a>(ev: &Eval<'a>, hay: &[u8], caps: &Captures) -> Value<'a> {
+    let groups: Vec<Value<'a>> = (1..caps.group_len())
+        .map(|i| match caps.get_group(i) {
+            Some(g) => ev.str_val(&hay[g.range()], &[]),
             None => Value::Null,
         })
         .collect();
@@ -614,9 +729,12 @@ pub fn match_<'a>(ev: &Eval<'a>, args: &[Value<'a>]) -> R<'a> {
     let re = ev.force_str_no_ctx(args[0])?;
     let r = compile_match_regex(ev, re)?;
     let s = ev.force_str(args[1])?;
-    match r.captures(s.s) {
-        Some(caps) => Ok(captures_list(ev, &caps)),
-        None => Ok(Value::Null),
+    let mut caps = r.create_captures();
+    r.captures(s.s, &mut caps);
+    if caps.is_match() {
+        Ok(captures_list(ev, s.s, &caps))
+    } else {
+        Ok(Value::Null)
     }
 }
 
@@ -640,18 +758,7 @@ fn compile_split_regex<'a>(ev: &Eval<'a>, re: &[u8]) -> R<'a, Rc<SplitRegex>> {
     if let Some(r) = ev.ctx.split_regexes.borrow().get(re) {
         return Ok(r.clone());
     }
-    let build = |pattern: &str, kind| {
-        meta::Builder::new()
-            .configure(meta::Config::new().match_kind(kind).utf8_empty(false))
-            .syntax(
-                syntax::Config::new()
-                    .unicode(false)
-                    .utf8(false)
-                    .dot_matches_new_line(true),
-            )
-            .build(pattern)
-            .map_err(|e| regex_error(re, e))
-    };
+    let build = |pattern: &str, kind| build_regex(re, pattern, kind);
     let translated = translate_regex(re, "$").map_err(|e| regex_error(re, e))?;
     let r = Rc::new(SplitRegex {
         start: build(&translated, MatchKind::LeftmostFirst)?,
@@ -704,14 +811,8 @@ pub fn split<'a>(ev: &Eval<'a>, args: &[Value<'a>]) -> R<'a> {
                 .anchored(Anchored::Yes),
             &mut caps,
         );
-        let groups: Vec<Value<'a>> = (1..caps.group_len())
-            .map(|i| match caps.get_group(i) {
-                Some(g) => ev.str_val(&hay[g.range()], &[]),
-                None => Value::Null,
-            })
-            .collect();
         out.push(ev.str_val(&hay[last..start], &[]));
-        out.push(ev.list(&groups));
+        out.push(captures_list(ev, hay, &caps));
         last = end;
         // As with `std::regex_iterator`, an empty match may directly follow
         // another match, but the next search after one starts a byte later.

@@ -3,6 +3,7 @@
 use std::io::Read;
 use std::io::Write;
 use std::os::unix::process::CommandExt;
+use std::os::unix::process::ExitStatusExt;
 use std::path::PathBuf;
 use std::process::Command;
 use std::process::Stdio;
@@ -18,13 +19,23 @@ use ogygia_nix_eval::run_with_stack;
 const DEEP_COPY: &str = "let dc = v: if builtins.isAttrs v then builtins.mapAttrs (_: dc) v \
                          else if builtins.isList v then map dc v else v; in dc";
 
-/// How long Nix may spend on one expression before the input is discarded.
+/// How long Nix may spend on one expression of a new input.
 const NIX_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// Address space Nix may use before the input is discarded. It is half of
-/// libFuzzer's default RSS limit, so ogygia-nix-eval running out of memory
-/// on an input means it needed several times what Nix did.
+/// Address space Nix may use on a new input.
 const NIX_MEMORY: libc::rlim_t = 1 << 30;
+
+/// What Nix may use on an input before [`check`] skips it.
+#[derive(Clone, Copy)]
+pub enum Budget {
+    /// 10 seconds per expression and 1 GiB of address space, for new inputs
+    /// while fuzzing.
+    Fuzzing,
+    /// No limit, for findings: each already finished within
+    /// [`Budget::Fuzzing`] once, so a limit would only make the result
+    /// depend on how busy the machine is.
+    Unlimited,
+}
 
 const DEAD_PROXY: &str = "http://127.0.0.1:9";
 
@@ -71,7 +82,7 @@ pub enum Outcome {
     Ignored,
     /// Both sides reject it.
     ParseRejected,
-    /// Nix ran out of time, memory or stack.
+    /// Nix ran out of time, memory or stack, or was killed.
     Skipped,
     /// Nix hit a fixed limit of its implementation, which it hits on every
     /// run, such as the size of a compiled regular expression.
@@ -144,7 +155,7 @@ fn read_all(mut r: impl Read + Send + 'static) -> std::thread::JoinHandle<Vec<u8
 
 /// Fails with [`Outcome::Skipped`] or [`Outcome::Limited`] when what Nix
 /// did says nothing about equivalence.
-fn run_nix(mode: &[&str], expr: &str) -> Result<Run, Outcome> {
+fn run_nix(mode: &[&str], expr: &str, budget: Budget) -> Result<Run, Outcome> {
     let s = scratch();
     let mut cmd = Command::new(nix_instantiate());
     cmd.args(mode)
@@ -163,19 +174,21 @@ fn run_nix(mode: &[&str], expr: &str) -> Result<Run, Outcome> {
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    let limit = libc::rlimit {
-        rlim_cur: NIX_MEMORY,
-        rlim_max: NIX_MEMORY,
-    };
-    // SAFETY: setrlimit is async-signal-safe and touches no memory of ours.
-    unsafe {
-        cmd.pre_exec(move || {
-            if libc::setrlimit(libc::RLIMIT_AS, &limit) == 0 {
-                Ok(())
-            } else {
-                Err(std::io::Error::last_os_error())
-            }
-        });
+    if let Budget::Fuzzing = budget {
+        let limit = libc::rlimit {
+            rlim_cur: NIX_MEMORY,
+            rlim_max: NIX_MEMORY,
+        };
+        // SAFETY: setrlimit is async-signal-safe and touches no memory of ours.
+        unsafe {
+            cmd.pre_exec(move || {
+                if libc::setrlimit(libc::RLIMIT_AS, &limit) == 0 {
+                    Ok(())
+                } else {
+                    Err(std::io::Error::last_os_error())
+                }
+            });
+        }
     }
     let mut child = cmd.spawn().expect("running nix-instantiate");
     let stdout = read_all(child.stdout.take().unwrap());
@@ -190,12 +203,15 @@ fn run_nix(mode: &[&str], expr: &str) -> Result<Run, Outcome> {
             panic!("writing nix-instantiate input: {e}");
         }
     });
-    let deadline = Instant::now() + NIX_TIMEOUT;
+    let deadline = match budget {
+        Budget::Fuzzing => Some(Instant::now() + NIX_TIMEOUT),
+        Budget::Unlimited => None,
+    };
     let status = loop {
         if let Some(status) = child.try_wait().expect("waiting for nix-instantiate") {
             break Ok(status);
         }
-        if Instant::now() > deadline {
+        if deadline.is_some_and(|d| Instant::now() > d) {
             child.kill().expect("killing nix-instantiate");
             child.wait().expect("waiting for nix-instantiate");
             break Err(Outcome::Skipped);
@@ -206,7 +222,8 @@ fn run_nix(mode: &[&str], expr: &str) -> Result<Run, Outcome> {
     let stdout = stdout.join().unwrap();
     let stderr = String::from_utf8_lossy(&stderr.join().unwrap()).into_owned();
     let status = status?;
-    if exhausted(&stderr) {
+    // A SIGKILL not sent above is the kernel's OOM killer.
+    if exhausted(&stderr) || status.signal() == Some(libc::SIGKILL) {
         return Err(Outcome::Skipped);
     }
     if limited(&stderr) {
@@ -281,21 +298,22 @@ fn agree(theirs: &Run, ours: &Run) -> bool {
 /// 3. When both fail, `builtins.tryEval` must catch the failure on both
 ///    sides or on neither. Error messages are not compared.
 ///
-/// Nix runs first at each step. An input on which it runs out of time,
-/// memory or stack is [skipped](Outcome::Skipped), and one on which it hits
+/// Nix runs first at each step, within `budget`. An input on which it runs
+/// out of time, memory or stack is [skipped](Outcome::Skipped), and one on which it hits
 /// a fixed limit of its implementation is [limited](Outcome::Limited).
 /// An input containing a NUL byte is [ignored](Outcome::Ignored): Nix
 /// stops reading at the first one outside a string, so it evaluates a
 /// prefix of the input rather than the input.
-pub fn check(src: &str) -> Outcome {
+pub fn check(src: &str, budget: Budget) -> Outcome {
     check_with(
         |expr| ogygia_nix_eval::eval_to_string(expr, "/", pure()),
         src,
+        budget,
     )
 }
 
 /// [`check`], with `eval` standing in for ogygia-nix-eval's evaluation.
-fn check_with(eval: impl Fn(&str) -> Run, src: &str) -> Outcome {
+fn check_with(eval: impl Fn(&str) -> Run, src: &str, budget: Budget) -> Outcome {
     if src.contains('\0') {
         return Outcome::Ignored;
     }
@@ -305,7 +323,7 @@ fn check_with(eval: impl Fn(&str) -> Run, src: &str) -> Outcome {
             .map(|_| String::new())
             .map_err(|e| e.msg)
     });
-    let theirs = match run_nix(&["--parse"], src) {
+    let theirs = match run_nix(&["--parse"], src, budget) {
         Ok(theirs) => theirs,
         Err(outcome) => return outcome,
     };
@@ -319,7 +337,7 @@ fn check_with(eval: impl Fn(&str) -> Run, src: &str) -> Outcome {
     // The input parses on its own, so parenthesised on lines of its own it
     // is the same expression.
     let expr = format!("{DEEP_COPY} (\n{src}\n)");
-    let theirs = match run_nix(&["--eval", "--strict"], &expr) {
+    let theirs = match run_nix(&["--eval", "--strict"], &expr, budget) {
         Ok(theirs) => theirs,
         Err(outcome) => return outcome,
     };
@@ -332,7 +350,7 @@ fn check_with(eval: impl Fn(&str) -> Run, src: &str) -> Outcome {
     }
 
     let expr = format!("builtins.tryEval (builtins.deepSeq (\n{src}\n) null)");
-    let theirs = match run_nix(&["--eval", "--strict"], &expr) {
+    let theirs = match run_nix(&["--eval", "--strict"], &expr, budget) {
         Ok(theirs) => theirs,
         Err(outcome) => return outcome,
     };
@@ -352,7 +370,7 @@ mod tests {
     use super::*;
 
     fn outcome(src: &str) -> &'static str {
-        Outcome::NAMES[check(src).index()]
+        Outcome::NAMES[check(src, Budget::Fuzzing).index()]
     }
 
     #[test]
@@ -435,7 +453,8 @@ mod tests {
 
     #[test]
     fn reports_a_divergence() {
-        let Outcome::Diverged(report) = check_with(|_| Ok("2".to_owned()), "1") else {
+        let Outcome::Diverged(report) = check_with(|_| Ok("2".to_owned()), "1", Budget::Fuzzing)
+        else {
             panic!("expected a divergence");
         };
         assert!(report.starts_with("step: eval\n"), "{report}");

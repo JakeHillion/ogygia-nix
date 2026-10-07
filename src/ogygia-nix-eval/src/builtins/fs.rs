@@ -275,6 +275,7 @@ pub fn fetch_git<'a>(ev: &Eval<'a>, args: &[Value<'a>]) -> R<'a> {
             for e in set.entries {
                 let name = ev.ctx.name(e.name);
                 match ev.force(e.value)? {
+                    Value::Str(s) if name == "url" => check_git_url(s.s)?,
                     Value::Str(_) | Value::Path(_) | Value::Bool(_) => {}
                     Value::Int(i) if i >= 0 => {}
                     Value::Int(i) => {
@@ -296,6 +297,25 @@ pub fn fetch_git<'a>(ev: &Eval<'a>, args: &[Value<'a>]) -> R<'a> {
         }
     }
     unsupported("fetchGit")
+}
+
+/// Rejects a `fetchGit` URL that is neither an absolute path nor has a
+/// scheme, and an SCP-style `host:` with nothing after the colon.
+fn check_git_url<'a>(url: &[u8]) -> R<'a, ()> {
+    const SCHEMES: &[&[u8]] = &[b"file", b"git", b"ssh", b"http", b"https", b"ftp", b"ftps"];
+    if url.first() == Some(&b'/') {
+        return Ok(());
+    }
+    let shown = String::from_utf8_lossy(url);
+    let colon = url.iter().position(|&c| c == b':');
+    let Some(scheme) = colon.map(|i| &url[..i]).filter(|s| !s.contains(&b'/')) else {
+        return eval_err(format!("'{shown}' doesn't have a scheme"));
+    };
+    let known = SCHEMES.contains(&scheme.strip_prefix(b"git+").unwrap_or(scheme));
+    if scheme.len() + 1 == url.len() && !known {
+        return eval_err(format!("SCP-style Git URL '{shown}' has an empty path"));
+    }
+    Ok(())
 }
 
 pub fn fetch_mercurial<'a>(ev: &Eval<'a>, args: &[Value<'a>]) -> R<'a> {

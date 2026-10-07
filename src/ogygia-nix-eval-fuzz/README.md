@@ -24,8 +24,11 @@ mode:
 Error messages and stack traces are never compared: two failures that
 `tryEval` treats alike count as agreement, whatever they say.
 
-Nix runs first at each step, with 10 seconds and 1 GiB of address space.
-An input on which it runs out of time, memory or stack says nothing about
+Nix runs first at each step. On a new input it has 10 seconds and 1 GiB of
+address space; on a finding, which has already finished within those once,
+it has no limit, so the result does not depend on how busy the machine is.
+An input on which it runs out of time, memory or stack, or on which the
+kernel kills it, says nothing about
 equivalence, so it is skipped before ogygia-nix-eval sees it. So is one on
 which it hits a fixed limit of its implementation, such as the size of a
 compiled regular expression; `builtins.tryEval` cannot catch those errors,
@@ -86,11 +89,11 @@ To follow new revisions, stop `run` and start the new revision's.
 
 Findings are owned by this tool, not by whoever fixes them. `recheck DIR`
 runs every finding again with the current build, using the same check that
-found it:
+found it but with no limit on Nix:
 
 - if it still diverges, it is kept and its report refreshed;
 - if the evaluators now agree, it is deleted;
-- if Nix runs out of time or memory, it is left as it was;
+- if Nix runs out of memory or stack, it is left as it was;
 - if Nix hits a fixed limit, it is deleted, as Nix will hit it on every run.
 
 `run` does this before it starts fuzzing, so the findings shrink as fixes
