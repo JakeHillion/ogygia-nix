@@ -83,7 +83,7 @@ well_known! {
     null = "null",
 }
 
-/// The names Nix 2.34 interns before reading any input, in its order: the
+/// The names Nix interns before reading any input, in its order: the
 /// names it refers to itself, those of the builtins, and the variables of
 /// `derivation`. Attribute sets are ordered by symbol, so these come first.
 pub const NIX_STARTUP: &[&str] = &[

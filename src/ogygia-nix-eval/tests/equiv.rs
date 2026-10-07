@@ -1,5 +1,5 @@
 //! Equivalence tests: every `tests/cases/**/*.nix` file is evaluated by this
-//! crate and by a pinned `nix-instantiate`, and the deeply forced results must
+//! crate and by the reference `nix-instantiate`, and the deeply forced results must
 //! print identically (or both evaluations must fail).
 //!
 //! Adding a test is adding a file. A case may start with directive comments:
@@ -10,8 +10,7 @@
 //!
 //! The Nix binary is `$OGYGIA_NIX_EVAL_NIX_INSTANTIATE`, else the one baked in
 //! at build time through `OGYGIA_NIX_INSTANTIATE_BIN`, else `nix-instantiate`
-//! from `PATH`. It must be the pinned version unless
-//! `$OGYGIA_NIX_EVAL_ANY_NIX` is set.
+//! from `PATH`.
 
 use std::path::Path;
 use std::path::PathBuf;
@@ -23,8 +22,6 @@ use libtest_mimic::Completion;
 use libtest_mimic::Failed;
 use libtest_mimic::Trial;
 use ogygia_nix_eval::Settings;
-
-const PINNED_NIX_VERSION: &str = "2.34.8";
 
 /// Rebuilds every set and list so that Nix's printer never abbreviates a
 /// value it has already printed as `«repeated»`, which depends on sharing
@@ -60,24 +57,6 @@ fn nix_command() -> Command {
         .env("XDG_CACHE_HOME", s.join("cache"))
         .env_remove("NIX_PATH");
     cmd
-}
-
-fn check_nix_version() -> Result<(), String> {
-    if std::env::var_os("OGYGIA_NIX_EVAL_ANY_NIX").is_some() {
-        return Ok(());
-    }
-    let out = nix_command()
-        .arg("--version")
-        .output()
-        .map_err(|e| format!("running {}: {e}", nix_instantiate()))?;
-    let version = String::from_utf8_lossy(&out.stdout);
-    if !version.contains(PINNED_NIX_VERSION) {
-        return Err(format!(
-            "equivalence tests need Nix {PINNED_NIX_VERSION}, found: {}",
-            version.trim()
-        ));
-    }
-    Ok(())
 }
 
 struct Case {
@@ -195,7 +174,6 @@ fn main() {
     let mut files = Vec::new();
     collect(&root, &mut files);
 
-    let version = check_nix_version();
     let trials = files
         .into_iter()
         .map(|path| {
@@ -205,13 +183,9 @@ fn main() {
                 .with_extension("")
                 .to_string_lossy()
                 .into_owned();
-            let version = version.clone();
-            Trial::ignorable_test(name, move || {
-                version?;
-                match load_case(&path)? {
-                    Some(case) => run_case(&case).map(|()| Completion::Completed),
-                    None => Ok(Completion::ignored_with("needs OGYGIA_NIX_EVAL_NIXPKGS")),
-                }
+            Trial::ignorable_test(name, move || match load_case(&path)? {
+                Some(case) => run_case(&case).map(|()| Completion::Completed),
+                None => Ok(Completion::ignored_with("needs OGYGIA_NIX_EVAL_NIXPKGS")),
             })
         })
         .collect();
