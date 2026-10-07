@@ -165,33 +165,33 @@ pub fn hash_size(algo: &str) -> Option<usize> {
     })
 }
 
-/// Parse a hash in any format Nix accepts: SRI (`sha256-<base64>`), or
-/// base16, Nix base-32 or base64 of a digest of `algo`. Returns the
-/// algorithm and the digest.
+/// Parse a hash in any format Nix accepts: `<algo>:<hash>`, SRI
+/// (`<algo>-<base64>`), or base16, Nix base-32 or base64 of a digest of
+/// `algo`. A string containing `:` or `-` is always taken to name its
+/// algorithm before the first one. Returns the algorithm and the digest.
 pub fn parse_hash(s: &str, algo: Option<&str>) -> Result<(String, Vec<u8>)> {
-    if let Some((a, rest)) = s.split_once('-')
-        && let Some(size) = hash_size(a)
-    {
-        if let Some(expected) = algo
-            && expected != a
-        {
-            bail!("hash '{s}' should have type '{expected}'");
+    let prefix = match s.split_once(':') {
+        Some((a, rest)) => Some((a, rest, false)),
+        None => s.split_once('-').map(|(a, rest)| (a, rest, true)),
+    };
+    let (algo, s, sri) = match (prefix, algo) {
+        (Some((a, ..)), _) if hash_size(a).is_none() => bail!("unknown hash algorithm '{a}'"),
+        (Some((a, ..)), Some(expected)) if a != expected => {
+            bail!("hash '{s}' should have type '{expected}'")
         }
-        return match base64_decode(rest) {
-            Some(bytes) if bytes.len() == size => Ok((a.to_owned(), bytes)),
-            _ => bail!("invalid SRI hash '{s}'"),
-        };
-    }
-    let (algo, s) = match s.split_once(':') {
-        Some((a, rest)) if hash_size(a).is_some() => (a, rest),
-        _ => match algo {
-            Some(a) => (a, s),
-            None => bail!("hash '{s}' does not include a type"),
-        },
+        (Some(prefix), _) => prefix,
+        (None, Some(a)) => (a, s, false),
+        (None, None) => bail!("hash '{s}' does not include a type"),
     };
     let Some(size) = hash_size(algo) else {
         bail!("unknown hash algorithm '{algo}'");
     };
+    if sri {
+        return match base64_decode(s) {
+            Some(bytes) if bytes.len() == size => Ok((algo.to_owned(), bytes)),
+            _ => bail!("invalid SRI hash '{s}'"),
+        };
+    }
     let bytes = if s.len() == size * 2 {
         hex::decode(s).ok()
     } else if s.len() == (size * 8).div_ceil(5) {
