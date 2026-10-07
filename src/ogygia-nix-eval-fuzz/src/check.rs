@@ -318,7 +318,7 @@ fn check_with(eval: impl Fn(&str) -> Run, src: &str, budget: Budget) -> Outcome 
         return Outcome::Ignored;
     }
     let ours: Run = run_with_stack(|| {
-        Context::new(Io::default())
+        Context::new(Io::pure())
             .compile_str(src, "/", true)
             .map(|_| String::new())
             .map_err(|e| e.msg)
@@ -407,6 +407,7 @@ mod tests {
         assert_eq!(outcome("1 +"), "parse-rejected");
         assert_eq!(outcome("undefined"), "parse-rejected");
         assert_eq!(outcome("~/a"), "parse-rejected");
+        assert_eq!(outcome("__currentTime"), "parse-rejected");
     }
 
     #[test]
