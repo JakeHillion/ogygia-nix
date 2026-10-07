@@ -5,6 +5,7 @@ mod findings;
 mod mutate;
 mod stats;
 
+pub use check::Budget;
 pub use check::Outcome;
 pub use check::block_network;
 pub use check::check;
