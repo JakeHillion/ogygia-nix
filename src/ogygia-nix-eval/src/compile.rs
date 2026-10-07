@@ -1042,13 +1042,24 @@ impl<'a> Compiler<'a> {
             },
             ast::Attr::Dynamic(d) => {
                 let inner = child(d.expr())?;
-                // `${"lit"}` is a static name.
-                if let ast::Expr::Str(s) = &inner
-                    && let Some(lit) = static_str(s)
-                {
-                    return Ok(AttrName::Static(self.ctx.intern(&lit)));
+                // A string literal such as `${"lit"}`, `${(f:o)}` or
+                // `${''lit''}` is a static name.
+                let mut lit = inner.clone();
+                while let ast::Expr::Paren(p) = &lit {
+                    lit = child(p.expr())?;
                 }
-                AttrName::Dynamic(inner)
+                let name = match &lit {
+                    ast::Expr::Str(s) => static_str(s),
+                    ast::Expr::Literal(l) => match l.kind() {
+                        ast::LiteralKind::Uri(u) => Some(u.syntax().text().to_owned()),
+                        _ => None,
+                    },
+                    _ => None,
+                };
+                match name {
+                    Some(name) => AttrName::Static(self.ctx.intern(&name)),
+                    None => AttrName::Dynamic(inner),
+                }
             }
         })
     }
