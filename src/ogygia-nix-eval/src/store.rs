@@ -260,7 +260,7 @@ mod tests {
 
     #[test]
     fn text_path_matches_nix() {
-        // `builtins.toFile "x" "y"` in Nix 2.34.
+        // `builtins.toFile "x" "y"` in Nix.
         assert_eq!(
             text_path(b"y", "x", &[]),
             "/nix/store/lfngsssysp6h1v4ccqg23c52s9sjl779-x"

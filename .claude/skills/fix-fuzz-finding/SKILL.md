@@ -48,8 +48,7 @@ behind the working tree, so a finding may already be fixed. Before
 working on one, confirm it still diverges with the current build:
 
 ```sh
-cargo build -p ogygia-nix-eval-fuzz
-target/debug/ogygia-nix-eval-fuzz check DIR/findings/<hash>/input.nix
+nix run .#ogygia-nix-eval-fuzz -- check DIR/findings/<hash>/input.nix
 ```
 
 If it agrees, pick another.
@@ -60,13 +59,13 @@ so look at them with `xxd` before reasoning about them.
 ## Minimising
 
 Reduce the input by hand to the smallest expression that still diverges,
-checking each candidate against both sides:
+checking each candidate against both sides. Run Nix as the version the
+flake compares against, not whatever `nix-instantiate` is on `PATH`:
 
 ```sh
-cargo build -p ogygia-nix-eval-fuzz
-target/debug/ogygia-nix-eval-fuzz check candidate.nix   # report and non-zero exit while it diverges
-nix-instantiate --parse --option pure-eval true -E '...'
-nix-instantiate --eval --strict --option pure-eval true -E '...'
+nix run .#ogygia-nix-eval-fuzz -- check candidate.nix   # report and non-zero exit while it diverges
+nix shell --inputs-from . nixpkgs#nixVersions.latest --command nix-instantiate --parse --option pure-eval true -E '...'
+nix shell --inputs-from . nixpkgs#nixVersions.latest --command nix-instantiate --eval --strict --option pure-eval true -E '...'
 ```
 
 Both evaluators run in pure mode in the fuzzer, so behaviour that only
