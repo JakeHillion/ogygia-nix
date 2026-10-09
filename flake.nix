@@ -30,11 +30,13 @@
   };
 
   outputs = { self, nixpkgs, flake-utils, treefmt-nix, fenix, crane, advisory-db, nix-fast-build }:
-    flake-utils.lib.eachSystem [ "aarch64-linux" "x86_64-linux" ]
+    flake-utils.lib.eachSystem [ "aarch64-linux" "x86_64-linux" "aarch64-darwin" ]
       (system:
         let
           pkgs = nixpkgs.legacyPackages.${system};
           lib = pkgs.lib;
+          inherit (pkgs.stdenv.hostPlatform) isLinux;
+          linuxOnly = lib.optionalAttrs isLinux;
           toolchain = fenix.packages.${system}.combine [
             (fenix.packages.${system}.stable.withComponents [
               "cargo"
@@ -151,8 +153,9 @@
             # runs after patchelf has made it loadable. Each shim embeds the
             # store path it was generated from, leaving no way for the
             # completions and the binary they call to drift apart.
-            postInstall = ''
+            postInstall = lib.optionalString isLinux ''
               ${pkgs.patchelf}/bin/patchelf --set-rpath "${lib.makeLibraryPath [ pkgs.openssl ]}" $out/bin/ogygia
+            '' + ''
               installShellCompletion --cmd ogygia \
                 --bash <(COMPLETE=bash $out/bin/ogygia) \
                 --zsh <(COMPLETE=zsh $out/bin/ogygia) \
@@ -230,7 +233,7 @@
             ];
             buildPhase = ''
               runHook preBuild
-              cargo nextest archive --workspace --archive-file archive.tar.zst
+              cargo nextest archive ${if isLinux then "--workspace" else "-p ogygia"} --archive-file archive.tar.zst
               # Decompress so Nix can scan the tar for store-path references and
               # retain the test binaries' runtime deps; compressed, they're hidden.
               unzstd archive.tar.zst
@@ -242,6 +245,12 @@
               cp archive.tar $out/
               runHook postInstall
             '';
+          } // lib.optionalAttrs (!isLinux) {
+            # crane's hooks rewrite store paths inside every file in $out,
+            # the tar included, which breaks the code signatures of the
+            # Darwin test binaries inside it; macOS then kills them on launch.
+            doNotRemoveReferencesToVendorDir = true;
+            doNotRemoveReferencesToRustToolchain = true;
           });
 
           # The ogygia-nix-eval differential fuzzer, instrumented by cargo-fuzz.
@@ -314,8 +323,10 @@
         in
         {
           packages = {
-            inherit ogygia ogygia-irisd ogygia-hostinfod ogygia-dashboard ogygia-updated ogygia-clevis ogygia-nextest-archive ogygia-nix-eval-fuzz;
+            inherit ogygia ogygia-nextest-archive;
             default = ogygia;
+          } // linuxOnly {
+            inherit ogygia-irisd ogygia-hostinfod ogygia-dashboard ogygia-updated ogygia-clevis ogygia-nix-eval-fuzz;
           };
 
           devShells.default = craneLib.devShell {
@@ -353,7 +364,7 @@
 
           formatter = treefmtEval.config.build.wrapper;
 
-          checks = self.packages.${system} // self.devShells.${system} // {
+          checks = self.packages.${system} // self.devShells.${system} // linuxOnly {
 
             ogygia-clippy = craneLib.cargoClippy (commonArgs // {
               inherit cargoArtifacts;

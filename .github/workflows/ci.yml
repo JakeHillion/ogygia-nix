@@ -13,6 +13,7 @@ jobs:
         os:
           - ubuntu-24.04
           - ubuntu-24.04-arm
+          - macos-26
 
     runs-on: ${{ matrix.os }}
 
@@ -28,6 +29,7 @@ jobs:
           extra-substituters = https://nixcache.jakehillion.me
           extra-trusted-public-keys = nixcache.jakehillion.me-1:HQsjYdrcs3ilS/ngtlbTQXU4Xfsm+va5NN7yoK0wKMg=
           max-jobs = 2
+          sandbox = true
 
     - name: Setup Nix S3 cache
       uses: testquorum/nix-s3-generations@505cc3553746818b68be0f79bc2951f0f379d5cf # v0.1.6
@@ -46,7 +48,7 @@ jobs:
         arguments: .#ci
 
     - name: Build all outputs
-      run: nix-fast-build --no-nom --flake '.#checks' -j 2 --eval-workers 4
+      run: nix-fast-build --no-nom --flake ".#checks.$(nix eval --raw --impure --expr builtins.currentSystem)" -j 2 --eval-workers 4
 
     - name: Run tests from the Nix-built nextest archive
       run: |
@@ -58,3 +60,12 @@ jobs:
           --workspace-remap "$GITHUB_WORKSPACE" \
           --test-threads num-cpus \
           --no-fail-fast
+
+  all-checks:
+    needs: nix
+    if: always()
+    runs-on: ubuntu-24.04
+
+    steps:
+    - name: Require every build and test job to pass
+      run: test "${{ needs.nix.result }}" = success
