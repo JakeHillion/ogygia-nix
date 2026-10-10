@@ -58,3 +58,52 @@ jobs:
           --workspace-remap "$GITHUB_WORKSPACE" \
           --test-threads num-cpus \
           --no-fail-fast
+
+  macos:
+    runs-on: xcode-27
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+      with:
+        fetch-depth: 0
+
+    # No S3 cache step here: this job adds Xcode to the store, and Xcode's
+    # licence forbids pushing it to the public cache.
+    - name: Install Nix
+      uses: cachix/install-nix-action@a49548c11d9846ad46ecc0115273879b045f001c # v31
+      with:
+        extra_nix_config: |
+          accept-flake-config = true
+          extra-substituters = https://nixcache.jakehillion.me
+          extra-trusted-public-keys = nixcache.jakehillion.me-1:HQsjYdrcs3ilS/ngtlbTQXU4Xfsm+va5NN7yoK0wKMg=
+          sandbox = true
+          # The host paths ogygia-macos declares in __impureHostDeps.
+          allowed-impure-host-deps = /System/Library /bin/sh /dev /usr/lib /usr/share/firmlinks /Library/Developer/PrivateFrameworks /Library/Apple/System/Library/PrivateFrameworks /Library/Preferences/com.apple.dt.Xcode.plist /usr/bin/codesign /usr/bin/touch
+
+    # Xcode cannot be downloaded without an Apple ID, so the runner's copy
+    # is added under the hash nixpkgs pins. A runner image whose Xcode
+    # differs from the pin fails here rather than building with it.
+    - name: Add Xcode to the Nix store
+      run: |
+        expected="$(nix eval --raw .#packages.aarch64-darwin.ogygia-macos.xcode.outPath)"
+        cp -cR /Applications/Xcode_27.app "$RUNNER_TEMP/Xcode.app"
+        # App Store installs carry a per-user receipt; the pin excludes it.
+        rm -rf "$RUNNER_TEMP/Xcode.app/Contents/_MASReceipt"
+        added="$(nix-store --add-fixed --recursive sha256 "$RUNNER_TEMP/Xcode.app")"
+        rm -rf "$RUNNER_TEMP/Xcode.app"
+        if [ "$added" != "$expected" ]; then
+          echo "::error::Runner Xcode is $added, but the pin expects $expected"
+          exit 1
+        fi
+
+    - name: Build
+      run: nix build -L --out-link ogygia-macos .#packages.aarch64-darwin.ogygia-macos
+
+    - name: Check the bundle
+      run: |
+        app=ogygia-macos/Applications/Ogygia.app
+        test -d "$app/Contents/Frameworks/Sparkle.framework"
+        test "$(plutil -extract CFBundleIdentifier raw "$app/Contents/Info.plist")" = dev.ogygia.macos
+        test "$(plutil -extract CFBundleVersion raw "$app/Contents/Info.plist")" = "$(git rev-list --count HEAD)"
+        test "$(plutil -extract OgygiaGitRevision raw "$app/Contents/Info.plist")" = "$(git rev-parse HEAD | cut -c1-7)"
