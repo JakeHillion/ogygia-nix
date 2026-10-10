@@ -153,10 +153,7 @@ impl Io {
     fn resolve(&self, logical: &str) -> Result<PathBuf> {
         if let Some(rest) = logical.strip_prefix(crate::path::COREPKGS) {
             let Some(include) = DEFAULT_INCLUDE_PATH else {
-                bail!(
-                    "path '{}' does not exist",
-                    crate::path::show(logical, self.pure)
-                );
+                bail!("path '{}' does not exist", crate::path::show(logical));
             };
             return Ok(Path::new(include)
                 .join("nix")
