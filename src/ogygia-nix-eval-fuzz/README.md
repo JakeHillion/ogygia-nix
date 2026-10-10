@@ -32,7 +32,11 @@ kernel kills it, says nothing about
 equivalence, so it is skipped before ogygia-nix-eval sees it. So is one on
 which it hits a fixed limit of its implementation, such as the size of a
 compiled regular expression; `builtins.tryEval` cannot catch those errors,
-so no expression can depend on them. Both
+so no expression can depend on them. Nix runs in read-write mode, in user and
+mount namespaces where `/nix/store` is overlaid by a new, empty layer and
+database, so it writes and reads back derivations and files at their real
+paths, as on any system, but never sees what another run wrote. This needs
+Linux with unprivileged user namespaces. Both
 evaluators are pointed at a proxy that refuses connections, so fetches fail
 without touching the network. Inputs that are not UTF-8 are ignored, as
 ogygia-nix-eval only accepts text, and so are inputs containing a NUL byte:

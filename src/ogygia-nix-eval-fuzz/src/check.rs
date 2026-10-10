@@ -1,9 +1,13 @@
 //! Comparing ogygia-nix-eval with `nix-instantiate` on one input.
 
+use std::ffi::CStr;
+use std::ffi::CString;
 use std::io::Read;
 use std::io::Write;
+use std::os::unix::fs::PermissionsExt;
 use std::os::unix::process::CommandExt;
 use std::os::unix::process::ExitStatusExt;
+use std::path::Path;
 use std::path::PathBuf;
 use std::process::Command;
 use std::process::Stdio;
@@ -51,9 +55,9 @@ const PROXY_VARS: &[&str] = &[
 ];
 
 const NIX_ARGS: &[&str] = &[
-    "--readonly-mode",
+    "--read-write-mode",
     "--store",
-    "dummy://",
+    "local",
     "--option",
     "pure-eval",
     "true",
@@ -156,7 +160,89 @@ fn read_all(mut r: impl Read + Send + 'static) -> std::thread::JoinHandle<Vec<u8
 /// Fails with [`Outcome::Skipped`] or [`Outcome::Limited`] when what Nix
 /// did says nothing about equivalence.
 fn run_nix(mode: &[&str], expr: &str, budget: Budget) -> Result<Run, Outcome> {
+    let store = tempfile::Builder::new()
+        .prefix("store-")
+        .tempdir_in(scratch())
+        .expect("creating a Nix store")
+        .keep();
+    let run = run_nix_in(&store, mode, expr, budget);
+    remove_store(&store);
+    run
+}
+
+/// Delete what a run of Nix wrote, whose directories it made read-only.
+fn remove_store(store: &Path) {
+    fn make_writable(path: &Path) -> std::io::Result<()> {
+        let meta = std::fs::symlink_metadata(path)?;
+        if !meta.is_dir() {
+            return Ok(());
+        }
+        let mut perms = meta.permissions();
+        perms.set_mode(perms.mode() | 0o700);
+        std::fs::set_permissions(path, perms)?;
+        for entry in std::fs::read_dir(path)? {
+            make_writable(&entry?.path())?;
+        }
+        Ok(())
+    }
+    make_writable(store).expect("making a Nix store writable");
+    std::fs::remove_dir_all(store).expect("removing a Nix store");
+}
+
+/// Write `data` to the file at `path`, between fork and exec.
+///
+/// # Safety
+///
+/// As [`CommandExt::pre_exec`]: only async-signal-safe calls.
+unsafe fn write_file(path: &CStr, data: &CStr) -> std::io::Result<()> {
+    let data = data.to_bytes();
+    // SAFETY: open, write and close are async-signal-safe, and both pointers
+    // are valid for the lengths given.
+    unsafe {
+        let fd = libc::open(path.as_ptr(), libc::O_WRONLY | libc::O_CLOEXEC);
+        if fd < 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        let written = libc::write(fd, data.as_ptr().cast(), data.len());
+        let err = std::io::Error::last_os_error();
+        libc::close(fd);
+        if written != data.len() as isize {
+            return Err(err);
+        }
+    }
+    Ok(())
+}
+
+fn run_nix_in(store: &Path, mode: &[&str], expr: &str, budget: Budget) -> Result<Run, Outcome> {
+    // Nix gets user and mount namespaces in which /nix/store is overlaid by an
+    // empty layer in `store`, with a database there too. It writes and reads
+    // back paths at /nix/store as on any system, as a store elsewhere would
+    // show in path values, and the host store and other runs stay untouched.
     let s = scratch();
+    for dir in ["upper", "work", "state"] {
+        std::fs::create_dir(store.join(dir)).expect("creating a Nix store");
+    }
+    let dir = store.to_str().expect("a UTF-8 scratch directory");
+    assert!(
+        !dir.contains([',', ':', '\\']),
+        "{dir} cannot be given to overlayfs"
+    );
+    let overlay = CString::new(format!(
+        "lowerdir=/nix/store,upperdir={dir}/upper,workdir={dir}/work"
+    ))
+    .unwrap();
+    // Nix keeps our ids, so it does not act as root.
+    // SAFETY: getuid and getgid cannot fail.
+    let (uid, gid) = unsafe { (libc::getuid(), libc::getgid()) };
+    let uid_map = CString::new(format!("{uid} {uid} 1")).unwrap();
+    let gid_map = CString::new(format!("{gid} {gid} 1")).unwrap();
+    let limit = match budget {
+        Budget::Fuzzing => Some(libc::rlimit {
+            rlim_cur: NIX_MEMORY,
+            rlim_max: NIX_MEMORY,
+        }),
+        Budget::Unlimited => None,
+    };
     let mut cmd = Command::new(nix_instantiate());
     cmd.args(mode)
         .args(NIX_ARGS)
@@ -166,7 +252,7 @@ fn run_nix(mode: &[&str], expr: &str, budget: Budget) -> Result<Run, Outcome> {
         .current_dir("/")
         .env_clear()
         .env("HOME", s)
-        .env("NIX_STATE_DIR", s.join("state"))
+        .env("NIX_STATE_DIR", store.join("state"))
         .env("NIX_CONF_DIR", s.join("conf"))
         .env("NIX_LOG_DIR", s.join("log"))
         .env("XDG_CACHE_HOME", s.join("cache"))
@@ -174,21 +260,34 @@ fn run_nix(mode: &[&str], expr: &str, budget: Budget) -> Result<Run, Outcome> {
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    if let Budget::Fuzzing = budget {
-        let limit = libc::rlimit {
-            rlim_cur: NIX_MEMORY,
-            rlim_max: NIX_MEMORY,
-        };
-        // SAFETY: setrlimit is async-signal-safe and touches no memory of ours.
-        unsafe {
-            cmd.pre_exec(move || {
-                if libc::setrlimit(libc::RLIMIT_AS, &limit) == 0 {
-                    Ok(())
-                } else {
-                    Err(std::io::Error::last_os_error())
-                }
-            });
-        }
+    // SAFETY: the closure makes only async-signal-safe calls, on memory it
+    // owns, and the child is single-threaded, as unshare(CLONE_NEWUSER)
+    // requires.
+    unsafe {
+        cmd.pre_exec(move || {
+            if libc::unshare(libc::CLONE_NEWUSER | libc::CLONE_NEWNS) != 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            write_file(c"/proc/self/setgroups", c"deny")?;
+            write_file(c"/proc/self/uid_map", &uid_map)?;
+            write_file(c"/proc/self/gid_map", &gid_map)?;
+            if libc::mount(
+                c"overlay".as_ptr(),
+                c"/nix/store".as_ptr(),
+                c"overlay".as_ptr(),
+                0,
+                overlay.as_ptr().cast(),
+            ) != 0
+            {
+                return Err(std::io::Error::last_os_error());
+            }
+            if let Some(limit) = limit
+                && libc::setrlimit(libc::RLIMIT_AS, &limit) != 0
+            {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
     }
     let mut child = cmd.spawn().expect("running nix-instantiate");
     let stdout = read_all(child.stdout.take().unwrap());
@@ -433,6 +532,33 @@ mod tests {
             outcome("builtins.findFile [ { path = \"/bin\"; prefix = \"\"; } ] \"sh\""),
             "uncaught"
         );
+    }
+
+    #[test]
+    fn shows_the_store_directory_without_a_trailing_slash() {
+        assert_eq!(outcome("/nix/store/."), "values");
+        assert_eq!(outcome("builtins.toXML [ /nix/store /nix ]"), "values");
+    }
+
+    #[test]
+    fn reads_back_what_nix_writes() {
+        assert_eq!(
+            outcome("builtins.readFile \"${<nix/fetchurl.nix>}\" != \"\""),
+            "values"
+        );
+    }
+
+    #[test]
+    fn removes_read_only_stores() {
+        let store = tempfile::tempdir_in(scratch()).unwrap().keep();
+        let dir = store.join("upper/x");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("f"), "").unwrap();
+        for d in [&dir, &store.join("upper")] {
+            std::fs::set_permissions(d, std::fs::Permissions::from_mode(0o555)).unwrap();
+        }
+        remove_store(&store);
+        assert!(!store.exists());
     }
 
     #[test]
