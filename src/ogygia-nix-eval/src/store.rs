@@ -139,7 +139,10 @@ pub fn parse_store_path(path: &str) -> Option<String> {
     let path = crate::path::canon_path(path);
     let base = path.strip_prefix(STORE_DIR)?.strip_prefix('/')?;
     let (hash, name) = (base.as_bytes().get(..32)?, base.get(33..)?);
-    if base.contains('/') || !hash.iter().all(|c| BASE32_CHARS.contains(c)) {
+    if base.contains('/')
+        || base.as_bytes()[32] != b'-'
+        || !hash.iter().all(|c| BASE32_CHARS.contains(c))
+    {
         return None;
     }
     check_name(name).ok()?;
