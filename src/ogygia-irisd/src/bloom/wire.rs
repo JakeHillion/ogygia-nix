@@ -89,8 +89,10 @@ pub fn deserialize(data: &[u8]) -> Result<(BloomHeader, Vec<u64>)> {
     );
 
     let words: Vec<u64> = body
-        .chunks_exact(8)
-        .map(|c| u64::from_be_bytes(c.try_into().expect("chunks_exact guarantees 8 bytes")))
+        .as_chunks::<8>()
+        .0
+        .iter()
+        .map(|c| u64::from_be_bytes(*c))
         .collect();
 
     let expected_words = (header.num_bits as usize).div_ceil(64);

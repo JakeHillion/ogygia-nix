@@ -25,7 +25,7 @@ use crate::value::Value;
 
 /// The Nix version this evaluator reports, matching the Nix its equivalence
 /// tests run against.
-pub const NIX_VERSION: &str = "2.35.1";
+pub const NIX_VERSION: &str = "2.35.2";
 
 /// Builtins that are also in the global scope without the `__` prefix.
 const GLOBAL: &[&str] = &[
