@@ -30,7 +30,7 @@ jobs:
           max-jobs = 2
 
     - name: Setup Nix S3 cache
-      uses: testquorum/nix-s3-generations@c1e54ade2cf980cd6575b39621eea3f2687dcdfb # v0.1.5
+      uses: testquorum/nix-s3-generations@505cc3553746818b68be0f79bc2951f0f379d5cf # v0.1.6
       with:
         s3-endpoint: https://28e45df51086264c6d9cf2b5e6ecc190.r2.cloudflarestorage.com
         bucket: jakehillion-nix
