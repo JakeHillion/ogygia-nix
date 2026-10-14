@@ -15,6 +15,7 @@
   "rebaseWhen": "behind-base-branch",
   "schedule": ["after 11pm on Monday"],
   "extends": [
+    ":semanticCommits",
     "config:recommended",
     "helpers:pinGitHubActionDigests"
   ]
