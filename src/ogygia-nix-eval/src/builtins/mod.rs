@@ -9,6 +9,7 @@ mod json;
 mod lists;
 mod misc;
 pub(crate) mod strings;
+mod url;
 mod xml;
 
 use std::cell::Cell;

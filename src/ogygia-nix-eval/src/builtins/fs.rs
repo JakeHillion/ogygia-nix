@@ -294,7 +294,8 @@ pub fn fetch_git<'a>(ev: &Eval<'a>, args: &[Value<'a>]) -> R<'a> {
 }
 
 /// Rejects a `fetchGit` URL that is neither an absolute path nor has a
-/// scheme, and an SCP-style `host:` with nothing after the colon.
+/// scheme, an SCP-style `host:` with nothing after the colon, and
+/// invalid syntax in a URL that is not SCP-style.
 fn check_git_url<'a>(url: &[u8]) -> R<'a, ()> {
     const SCHEMES: &[&[u8]] = &[b"file", b"git", b"ssh", b"http", b"https", b"ftp", b"ftps"];
     if url.first() == Some(&b'/') {
@@ -308,6 +309,9 @@ fn check_git_url<'a>(url: &[u8]) -> R<'a, ()> {
     let known = SCHEMES.contains(&scheme.strip_prefix(b"git+").unwrap_or(scheme));
     if scheme.len() + 1 == url.len() && !known {
         return eval_err(format!("SCP-style Git URL '{shown}' has an empty path"));
+    }
+    if known || url[scheme.len() + 1..].starts_with(b"//") {
+        super::url::check(url).or_else(eval_err)?;
     }
     Ok(())
 }
