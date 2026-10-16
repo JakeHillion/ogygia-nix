@@ -12,6 +12,8 @@ use std::time::Duration;
 use std::time::Instant;
 
 use ogygia_nix_eval::Context;
+use ogygia_nix_eval::Error;
+use ogygia_nix_eval::Feature;
 use ogygia_nix_eval::Io;
 use ogygia_nix_eval::Settings;
 use ogygia_nix_eval::run_with_stack;
@@ -78,7 +80,9 @@ pub unsafe fn block_network() {
 
 /// What [`check`] made of an input.
 pub enum Outcome {
-    /// It contains a NUL byte, at which Nix stops reading its input.
+    /// It is not a meaningful comparison: it contains a NUL byte, at which
+    /// Nix stops reading its input, or ogygia-nix-eval reached a feature
+    /// the fuzzer disables.
     Ignored,
     /// Both sides reject it.
     ParseRejected,
@@ -256,11 +260,15 @@ fn limited(stderr: &str) -> bool {
     stderr.contains("memory limit exceeded by regular expression")
 }
 
-fn pure() -> Settings {
+fn settings() -> Settings {
     Settings {
         current_system: None,
         nix_path: Vec::new(),
         pure: true,
+        // Nix's regular expressions are libstdc++'s `std::regex`, whose
+        // semantics are too broken to reasonably match, so inputs that use
+        // one are not compared.
+        disabled: vec![Feature::Regex],
     }
 }
 
@@ -277,6 +285,16 @@ fn diverged(step: &str, src: &str, expr: &str, theirs: &Run, ours: &Run) -> Outc
         show(theirs),
         show(ours)
     ))
+}
+
+/// Fails with [`Outcome::Ignored`] when evaluation reached a disabled
+/// feature.
+fn run_ours(eval: impl Fn(&str) -> Result<String, Error>, expr: &str) -> Result<Run, Outcome> {
+    match eval(expr) {
+        Ok(out) => Ok(Ok(out)),
+        Err(Error::Disabled(_)) => Err(Outcome::Ignored),
+        Err(Error::Eval(e)) => Ok(Err(e)),
+    }
 }
 
 /// Both sides succeed with the same output, or both fail.
@@ -303,17 +321,18 @@ fn agree(theirs: &Run, ours: &Run) -> bool {
 /// a fixed limit of its implementation is [limited](Outcome::Limited).
 /// An input containing a NUL byte is [ignored](Outcome::Ignored): Nix
 /// stops reading at the first one outside a string, so it evaluates a
-/// prefix of the input rather than the input.
+/// prefix of the input rather than the input. So is one on which
+/// ogygia-nix-eval reaches a feature the fuzzer disables.
 pub fn check(src: &str, budget: Budget) -> Outcome {
     check_with(
-        |expr| ogygia_nix_eval::eval_to_string(expr, "/", pure()),
+        |expr| ogygia_nix_eval::eval_to_string(expr, "/", settings()),
         src,
         budget,
     )
 }
 
 /// [`check`], with `eval` standing in for ogygia-nix-eval's evaluation.
-fn check_with(eval: impl Fn(&str) -> Run, src: &str, budget: Budget) -> Outcome {
+fn check_with(eval: impl Fn(&str) -> Result<String, Error>, src: &str, budget: Budget) -> Outcome {
     if src.contains('\0') {
         return Outcome::Ignored;
     }
@@ -341,7 +360,10 @@ fn check_with(eval: impl Fn(&str) -> Run, src: &str, budget: Budget) -> Outcome 
         Ok(theirs) => theirs,
         Err(outcome) => return outcome,
     };
-    let ours = eval(&expr);
+    let ours = match run_ours(&eval, &expr) {
+        Ok(ours) => ours,
+        Err(outcome) => return outcome,
+    };
     if !agree(&theirs, &ours) {
         return diverged("eval", src, &expr, &theirs, &ours);
     }
@@ -354,7 +376,10 @@ fn check_with(eval: impl Fn(&str) -> Run, src: &str, budget: Budget) -> Outcome 
         Ok(theirs) => theirs,
         Err(outcome) => return outcome,
     };
-    let ours = eval(&expr);
+    let ours = match run_ours(&eval, &expr) {
+        Ok(ours) => ours,
+        Err(outcome) => return outcome,
+    };
     if !agree(&theirs, &ours) {
         return diverged("catch", src, &expr, &theirs, &ours);
     }
@@ -439,6 +464,20 @@ mod tests {
     fn ignores_nul_bytes() {
         assert_eq!(outcome("1\0+"), "ignored");
         assert_eq!(outcome("\"a\0b\""), "ignored");
+    }
+
+    #[test]
+    fn ignores_regex() {
+        assert_eq!(outcome("builtins.match \"a\" \"a\""), "ignored");
+        assert_eq!(
+            outcome("builtins.tryEval (builtins.split \"a\" \"a\")"),
+            "ignored"
+        );
+        assert_eq!(
+            outcome("builtins.addErrorContext (throw \"x\") (builtins.match \"a\" \"a\")"),
+            "ignored"
+        );
+        assert_eq!(outcome("builtins.typeOf builtins.match"), "values");
     }
 
     #[test]

@@ -115,6 +115,10 @@ pub fn abort<'a>(ev: &Eval<'a>, args: &[Value<'a>]) -> R<'a> {
 
 pub fn add_error_context<'a>(ev: &Eval<'a>, args: &[Value<'a>]) -> R<'a> {
     ev.force(args[1]).or_else(|mut e| {
+        // Coercing the message may fail, and must not replace this error.
+        if let ErrorKind::Disabled(_) = e.kind {
+            return Err(e);
+        }
         e.trace.push(message(ev, args[0], Coerce::PLAIN)?);
         Err(e)
     })

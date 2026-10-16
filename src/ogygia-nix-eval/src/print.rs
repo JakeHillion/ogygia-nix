@@ -270,7 +270,8 @@ mod tests {
             "/",
             crate::Settings::default(),
         )
-        .unwrap_err();
+        .unwrap_err()
+        .to_string();
         assert!(err.contains("first"), "{err}");
     }
 }

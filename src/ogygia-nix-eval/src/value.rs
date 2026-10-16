@@ -159,6 +159,8 @@ pub enum ErrorKind {
     InfiniteRecursion,
     /// Any other evaluation error.
     Eval,
+    /// Use of a feature in [`crate::Settings::disabled`].
+    Disabled(crate::Feature),
 }
 
 #[derive(Debug)]
