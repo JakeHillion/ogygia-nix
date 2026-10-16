@@ -2,8 +2,10 @@
 
 use std::io::Read;
 use std::io::Write;
+use std::os::unix::fs::PermissionsExt;
 use std::os::unix::process::CommandExt;
 use std::os::unix::process::ExitStatusExt;
+use std::path::Path;
 use std::path::PathBuf;
 use std::process::Command;
 use std::process::Stdio;
@@ -52,14 +54,11 @@ const PROXY_VARS: &[&str] = &[
     "ALL_PROXY",
 ];
 
-const NIX_ARGS: &[&str] = &[
-    "--readonly-mode",
-    "--store",
-    "dummy://",
-    "--option",
-    "pure-eval",
-    "true",
-];
+// `nix-instantiate --eval` only writes what it adds to the store, such as
+// `toFile` results and `.drv` files, in read-write mode; without that, or
+// with a `dummy://` store, reading them back fails where ogygia-nix-eval
+// succeeds.
+const NIX_ARGS: &[&str] = &["--read-write-mode", "--option", "pure-eval", "true"];
 
 /// Point this process, and the Nix processes it starts, at a proxy that
 /// refuses connections, so fetches fail without reaching the network.
@@ -141,6 +140,46 @@ fn scratch() -> &'static PathBuf {
     })
 }
 
+/// An empty chroot store for one Nix run, deleted on drop. Its store
+/// directory is still `/nix/store`, so store paths match ogygia-nix-eval's.
+struct Store(tempfile::TempDir);
+
+impl Store {
+    fn new() -> Store {
+        Store(
+            tempfile::Builder::new()
+                .prefix("store-")
+                .tempdir_in(scratch())
+                .expect("create store dir"),
+        )
+    }
+
+    fn uri(&self) -> String {
+        format!("local?root={}", self.0.path().display())
+    }
+}
+
+impl Drop for Store {
+    fn drop(&mut self) {
+        // Nix makes store paths read-only, which would stop the TempDir
+        // removing them once this returns.
+        make_writable(self.0.path());
+    }
+}
+
+fn make_writable(path: &Path) {
+    let meta = std::fs::symlink_metadata(path).expect("stat store path");
+    if !meta.is_dir() {
+        return;
+    }
+    let mut perms = meta.permissions();
+    perms.set_mode(perms.mode() | 0o700);
+    std::fs::set_permissions(path, perms).expect("make store path writable");
+    for entry in std::fs::read_dir(path).expect("read store dir") {
+        make_writable(&entry.expect("read store dir").path());
+    }
+}
+
 fn nix_instantiate() -> String {
     std::env::var("OGYGIA_NIX_EVAL_NIX_INSTANTIATE")
         .ok()
@@ -161,9 +200,12 @@ fn read_all(mut r: impl Read + Send + 'static) -> std::thread::JoinHandle<Vec<u8
 /// did says nothing about equivalence.
 fn run_nix(mode: &[&str], expr: &str, budget: Budget) -> Result<Run, Outcome> {
     let s = scratch();
+    let store = Store::new();
     let mut cmd = Command::new(nix_instantiate());
     cmd.args(mode)
         .args(NIX_ARGS)
+        .arg("--store")
+        .arg(store.uri())
         // On standard input, the expression cannot be mistaken for a flag and
         // may contain NUL bytes.
         .arg("-")
@@ -425,6 +467,14 @@ mod tests {
     #[test]
     fn keeps_trailing_whitespace_in_paths() {
         assert_eq!(outcome("/a + \"b \""), "values");
+    }
+
+    #[test]
+    fn reads_back_what_nix_adds_to_the_store() {
+        assert_eq!(
+            outcome("builtins.readDir (builtins.filterSource (p: k: false) <nix/.>)"),
+            "values"
+        );
     }
 
     #[test]
