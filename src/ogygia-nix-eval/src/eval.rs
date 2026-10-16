@@ -48,6 +48,9 @@ pub struct Settings {
     /// Search path entries for `<...>` lookups, as `(prefix, path)`.
     pub nix_path: Vec<(String, String)>,
     pub pure: bool,
+    /// Features whose use fails evaluation with [`crate::Error::Disabled`],
+    /// which `builtins.tryEval` does not catch.
+    pub disabled: Vec<Feature>,
 }
 
 impl Default for Settings {
@@ -56,7 +59,23 @@ impl Default for Settings {
             current_system: Some(crate::CURRENT_SYSTEM.to_owned()),
             nix_path: Vec::new(),
             pure: false,
+            disabled: Vec::new(),
         }
+    }
+}
+
+/// A part of the language that [`Settings::disabled`] can switch off.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Feature {
+    /// Regular expressions, in `builtins.match` and `builtins.split`.
+    Regex,
+}
+
+impl std::fmt::Display for Feature {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Feature::Regex => "regex",
+        })
     }
 }
 
@@ -96,6 +115,17 @@ impl Coerce {
 }
 
 impl<'a> Eval<'a> {
+    /// Fail unless `feature` is enabled.
+    pub(crate) fn require(&self, feature: Feature) -> R<'a, ()> {
+        if self.settings.disabled.contains(&feature) {
+            return Err(error(
+                ErrorKind::Disabled(feature),
+                format!("disabled feature: {feature}"),
+            ));
+        }
+        Ok(())
+    }
+
     pub fn new(ctx: &'a Context, bump: &'a Bump, settings: Settings) -> Eval<'a> {
         let ev = Eval {
             ctx,

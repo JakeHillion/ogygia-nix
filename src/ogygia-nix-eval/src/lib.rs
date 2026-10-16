@@ -24,6 +24,7 @@ mod value;
 
 pub use context::Context;
 pub use eval::Eval;
+pub use eval::Feature;
 pub use eval::Settings;
 pub use io::Io;
 pub use print::print_strict;
@@ -65,10 +66,21 @@ pub fn run_with_stack<T: Send>(f: impl FnOnce() -> T + Send) -> T {
     })
 }
 
+/// Why [`eval_to_string`] failed.
+#[derive(Debug, thiserror::Error)]
+pub enum Error {
+    /// Evaluation failed; holds the message and trace.
+    #[error("{0}")]
+    Eval(String),
+    /// The expression used a feature in [`Settings::disabled`].
+    #[error("disabled feature: {0}")]
+    Disabled(Feature),
+}
+
 /// Evaluate the expression in `text`, deeply forcing it, and render it the
 /// way `nix-instantiate --eval --strict` does. Relative paths resolve
 /// against `base_dir`.
-pub fn eval_to_string(text: &str, base_dir: &str, settings: Settings) -> Result<String, String> {
+pub fn eval_to_string(text: &str, base_dir: &str, settings: Settings) -> Result<String, Error> {
     run_with_stack(|| {
         let ctx = Context::new(if settings.pure {
             Io::pure()
@@ -82,7 +94,10 @@ pub fn eval_to_string(text: &str, base_dir: &str, settings: Settings) -> Result<
             .and_then(|v| print_strict(&ev, v));
         match result {
             Ok(bytes) => Ok(String::from_utf8_lossy(&bytes).into_owned()),
-            Err(e) => Err(e.to_string()),
+            Err(e) => Err(match e.kind {
+                value::ErrorKind::Disabled(feature) => Error::Disabled(feature),
+                _ => Error::Eval(e.to_string()),
+            }),
         }
     })
 }

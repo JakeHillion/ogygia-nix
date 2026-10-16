@@ -2208,6 +2208,7 @@ dependencies = [
  "rowan",
  "sha1",
  "sha2",
+ "thiserror",
  "toml",
  "toml_parser",
 ]

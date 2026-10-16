@@ -16,6 +16,7 @@ use sha2::Sha512;
 
 use crate::eval::Coerce;
 use crate::eval::Eval;
+use crate::eval::Feature;
 use crate::value::R;
 use crate::value::Value;
 use crate::value::eval_err;
@@ -580,6 +581,7 @@ fn regex_error(re: &[u8], e: impl std::fmt::Display) -> Box<crate::value::EvalEr
 }
 
 fn compile_match_regex<'a>(ev: &Eval<'a>, re: &[u8]) -> R<'a, Rc<regex::bytes::Regex>> {
+    ev.require(Feature::Regex)?;
     if let Some(r) = ev.ctx.match_regexes.borrow().get(re) {
         return Ok(r.clone());
     }
@@ -637,6 +639,7 @@ pub(crate) struct SplitRegex {
 }
 
 fn compile_split_regex<'a>(ev: &Eval<'a>, re: &[u8]) -> R<'a, Rc<SplitRegex>> {
+    ev.require(Feature::Regex)?;
     if let Some(r) = ev.ctx.split_regexes.borrow().get(re) {
         return Ok(r.clone());
     }
