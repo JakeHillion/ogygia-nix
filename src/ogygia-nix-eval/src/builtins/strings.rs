@@ -87,26 +87,28 @@ pub fn dir_of<'a>(ev: &Eval<'a>, args: &[Value<'a>]) -> R<'a> {
     }
 }
 
-pub fn hash_bytes(algo: &[u8], data: &[u8]) -> Option<Vec<u8>> {
-    Some(match algo {
-        b"md5" => Md5::digest(data).to_vec(),
-        b"sha1" => Sha1::digest(data).to_vec(),
-        b"sha256" => Sha256::digest(data).to_vec(),
-        b"sha512" => Sha512::digest(data).to_vec(),
-        _ => return None,
+pub type HashFn = fn(&[u8]) -> Vec<u8>;
+
+/// The hash function named `algo`.
+pub fn hash_fn<'a>(algo: &[u8]) -> R<'a, HashFn> {
+    Ok(match algo {
+        b"md5" => |d| Md5::digest(d).to_vec(),
+        b"sha1" => |d| Sha1::digest(d).to_vec(),
+        b"sha256" => |d| Sha256::digest(d).to_vec(),
+        b"sha512" => |d| Sha512::digest(d).to_vec(),
+        _ => {
+            return eval_err(format!(
+                "unknown hash algorithm '{}'",
+                String::from_utf8_lossy(algo)
+            ));
+        }
     })
 }
 
 pub fn hash_string<'a>(ev: &Eval<'a>, args: &[Value<'a>]) -> R<'a> {
-    let algo = ev.force_str_no_ctx(args[0])?;
+    let hash = hash_fn(ev.force_str_no_ctx(args[0])?)?;
     let s = ev.force_str(args[1])?;
-    match hash_bytes(algo, s.s) {
-        Some(h) => Ok(ev.string(&hex::encode(h))),
-        None => eval_err(format!(
-            "unknown hash algorithm '{}'",
-            String::from_utf8_lossy(algo)
-        )),
-    }
+    Ok(ev.string(&hex::encode(hash(s.s))))
 }
 
 pub fn replace_strings<'a>(ev: &Eval<'a>, args: &[Value<'a>]) -> R<'a> {

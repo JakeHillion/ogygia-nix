@@ -83,16 +83,10 @@ pub fn path_exists<'a>(ev: &Eval<'a>, args: &[Value<'a>]) -> R<'a> {
 }
 
 pub fn hash_file<'a>(ev: &Eval<'a>, args: &[Value<'a>]) -> R<'a> {
-    let algo = ev.force_str_no_ctx(args[0])?;
+    let hash = super::strings::hash_fn(ev.force_str_no_ctx(args[0])?)?;
     let path = ev.coerce_to_path(args[1])?;
     let bytes = ev.ctx.io.read(&path).map_err(io_err)?;
-    match super::strings::hash_bytes(algo, &bytes) {
-        Some(h) => Ok(ev.string(&hex::encode(h))),
-        None => eval_err(format!(
-            "unknown hash algorithm '{}'",
-            String::from_utf8_lossy(algo)
-        )),
-    }
+    Ok(ev.string(&hex::encode(hash(&bytes))))
 }
 
 pub fn find_file<'a>(ev: &Eval<'a>, args: &[Value<'a>]) -> R<'a> {
