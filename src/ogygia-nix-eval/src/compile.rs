@@ -350,7 +350,9 @@ fn parenthesise_legacy_lets(text: Cow<'_, str>, inserted: Vec<u32>) -> (Cow<'_, 
 /// extending over every operator that also binds tighter, so `a + !b + c` is
 /// `a + !(b + c)`, but rnix rejects `!` there. Wraps each such `!` and its
 /// operand in parentheses, and returns the result with `inserted` updated to
-/// also hold the offsets of the parentheses.
+/// also hold the offsets of the parentheses. The operand includes error
+/// tokens, as rnix lexes one such as the trailing `/` of `./a/${b}/ c` as
+/// division after a closing parenthesis.
 fn parenthesise_inverts(text: Cow<'_, str>, inserted: Vec<u32>) -> (Cow<'_, str>, Vec<u32>) {
     use rnix::SyntaxKind::*;
     let tokens = significant_tokens(&text);
@@ -378,7 +380,7 @@ fn parenthesise_inverts(text: Cow<'_, str>, inserted: Vec<u32>) -> (Cow<'_, str>
                 TOKEN_IDENT | TOKEN_INTEGER | TOKEN_FLOAT | TOKEN_URI | TOKEN_CUR_POS
                 | TOKEN_PATH_ABS | TOKEN_PATH_HOME | TOKEN_PATH_REL | TOKEN_PATH_SEARCH
                 | TOKEN_REC | TOKEN_DOT | TOKEN_OR | TOKEN_QUESTION | TOKEN_CONCAT | TOKEN_MUL
-                | TOKEN_DIV | TOKEN_ADD | TOKEN_SUB | TOKEN_INVERT => true,
+                | TOKEN_DIV | TOKEN_ADD | TOKEN_SUB | TOKEN_INVERT | TOKEN_ERROR => true,
                 _ => false,
             })
             .last();
