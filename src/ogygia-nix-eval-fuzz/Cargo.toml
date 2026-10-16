@@ -15,10 +15,9 @@ libc = { workspace = true }
 libfuzzer-sys = { workspace = true }
 rnix = { workspace = true }
 sha2 = { workspace = true }
+tempfile = { workspace = true }
 ogygia-nix-eval = { path = "../ogygia-nix-eval" }
 
-[dev-dependencies]
-tempfile = { workspace = true }
 
 [[bin]]
 name = "ogygia-nix-eval-fuzz"
