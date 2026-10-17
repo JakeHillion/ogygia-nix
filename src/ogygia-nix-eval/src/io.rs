@@ -8,6 +8,7 @@
 
 use std::borrow::Cow;
 use std::cell::RefCell;
+use std::collections::BTreeSet;
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::io::ErrorKind;
@@ -377,6 +378,22 @@ impl Io {
     pub fn add_derivation(&self, name: &str, contents: &[u8], refs: &[&str]) -> Result<String> {
         let sp = self.store.add_text(name, contents, refs)?;
         Ok(sp.as_str().to_owned())
+    }
+
+    /// `path` and every store path it refers to, directly or indirectly.
+    pub fn closure(&self, path: &str) -> Result<BTreeSet<String>> {
+        let mut closure = BTreeSet::new();
+        let mut todo = vec![path.to_owned()];
+        while let Some(p) = todo.pop() {
+            if closure.contains(&p) {
+                continue;
+            }
+            if let Some(sp) = StorePath::parse(&p) {
+                todo.extend(self.store.references(&sp)?);
+            }
+            closure.insert(p);
+        }
+        Ok(closure)
     }
 
     fn allow(&self, sp: StorePath) -> Result<String> {

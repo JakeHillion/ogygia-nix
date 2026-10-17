@@ -137,8 +137,12 @@ impl Derivation {
     /// Write the `.drv` file to the store and return its path.
     pub fn write(&self, io: &Io) -> anyhow::Result<String> {
         let text = self.unparse(&self.input_drvs);
-        let mut refs: Vec<&str> = self.input_srcs.iter().map(String::as_str).collect();
-        refs.extend(self.input_drvs.keys().map(String::as_str));
+        let refs: Vec<&str> = (self.input_srcs.iter())
+            .chain(self.input_drvs.keys())
+            .map(String::as_str)
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect();
         io.add_derivation(&format!("{}.drv", self.name), &text, &refs)
     }
 }

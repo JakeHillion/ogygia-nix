@@ -176,6 +176,10 @@ pub trait Store {
     /// `None` if the store does not have it.
     fn accessor(&self, path: &StorePath) -> Result<Option<Rc<dyn Accessor>>>;
 
+    /// The store paths `path` refers to, or none if the store does not have
+    /// it.
+    fn references(&self, path: &StorePath) -> Result<Vec<String>>;
+
     /// Add a regular file holding `contents` that refers to the store paths
     /// `refs`.
     fn add_text(&self, name: &str, contents: &[u8], refs: &[&str]) -> Result<StorePath>;

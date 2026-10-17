@@ -19,11 +19,16 @@ use crate::nar;
 /// copied: they read through to the tree they were added from.
 #[derive(Default)]
 pub struct MemoryStore {
-    objects: RefCell<HashMap<StorePath, Rc<dyn Accessor>>>,
+    objects: RefCell<HashMap<StorePath, Object>>,
+}
+
+struct Object {
+    contents: Rc<dyn Accessor>,
+    refs: Vec<String>,
 }
 
 impl MemoryStore {
-    fn insert(&self, path: StorePath, object: impl FnOnce() -> Rc<dyn Accessor>) -> StorePath {
+    fn insert(&self, path: StorePath, object: impl FnOnce() -> Object) -> StorePath {
         self.objects
             .borrow_mut()
             .entry(path.clone())
@@ -34,13 +39,25 @@ impl MemoryStore {
 
 impl Store for MemoryStore {
     fn accessor(&self, path: &StorePath) -> Result<Option<Rc<dyn Accessor>>> {
-        Ok(self.objects.borrow().get(path).cloned())
+        Ok(self.objects.borrow().get(path).map(|o| o.contents.clone()))
+    }
+
+    fn references(&self, path: &StorePath) -> Result<Vec<String>> {
+        Ok(self
+            .objects
+            .borrow()
+            .get(path)
+            .map(|o| o.refs.clone())
+            .unwrap_or_default())
     }
 
     fn add_text(&self, name: &str, contents: &[u8], refs: &[&str]) -> Result<StorePath> {
         super::check_name(name)?;
         let path = StorePath(super::text_path(contents, name, refs));
-        Ok(self.insert(path, || Rc::new(File(contents.to_vec()))))
+        Ok(self.insert(path, || Object {
+            contents: Rc::new(File(contents.to_vec())),
+            refs: refs.iter().map(|&r| r.to_owned()).collect(),
+        }))
     }
 
     fn add_source(&self, name: &str, tree: Rc<dyn Accessor>) -> Result<StorePath> {
@@ -48,7 +65,10 @@ impl Store for MemoryStore {
         let mut h = Sha256::new();
         nar::dump(&mut h, &*tree, "")?;
         let path = StorePath(super::source_path(&h.finalize(), name));
-        Ok(self.insert(path, || tree))
+        Ok(self.insert(path, || Object {
+            contents: tree,
+            refs: Vec::new(),
+        }))
     }
 }
 
