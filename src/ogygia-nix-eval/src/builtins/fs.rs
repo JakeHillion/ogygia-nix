@@ -197,7 +197,7 @@ fn add_path<'a>(
             .map_err(io_err)?,
         Some(f) => {
             let err: Cell<Option<Box<crate::value::EvalError>>> = Cell::new(None);
-            let keep = |p: &str, ty: crate::io::FileType| -> anyhow::Result<bool> {
+            let keep = |p: &str, ty: crate::accessor::FileType| -> anyhow::Result<bool> {
                 let r = (|| {
                     let g = ev.call(f, ev.string(crate::path::abs(p)))?;
                     ev.force_bool(ev.call(g, ev.string(ty.name()))?)

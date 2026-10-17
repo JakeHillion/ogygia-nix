@@ -9,8 +9,8 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::collections::HashSet;
-use std::io::Write;
-use std::os::unix::ffi::OsStrExt;
+use std::io::ErrorKind;
+use std::os::unix::ffi::OsStringExt;
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::path::PathBuf;
@@ -22,38 +22,10 @@ use anyhow::bail;
 use sha2::Digest;
 use sha2::Sha256;
 
+use crate::accessor::Accessor;
+use crate::accessor::FileType;
+use crate::nar;
 use crate::store;
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
-pub enum FileType {
-    Regular,
-    Directory,
-    Symlink,
-    Unknown,
-}
-
-impl FileType {
-    pub fn name(self) -> &'static str {
-        match self {
-            FileType::Regular => "regular",
-            FileType::Directory => "directory",
-            FileType::Symlink => "symlink",
-            FileType::Unknown => "unknown",
-        }
-    }
-
-    fn of(ft: std::fs::FileType) -> FileType {
-        if ft.is_symlink() {
-            FileType::Symlink
-        } else if ft.is_dir() {
-            FileType::Directory
-        } else if ft.is_file() {
-            FileType::Regular
-        } else {
-            FileType::Unknown
-        }
-    }
-}
 
 enum Target {
     Physical(PathBuf),
@@ -77,13 +49,6 @@ const DEFAULT_INCLUDE_PATH: Option<&str> = option_env!("OGYGIA_NIX_EVAL_DEFAULT_
 /// A `builtins.path` filter: whether to keep a path of the given type.
 pub type KeepFn<'f> = &'f dyn Fn(&str, FileType) -> Result<bool>;
 
-#[derive(Default)]
-pub struct Io {
-    pub(crate) pure: bool,
-    mounts: RefCell<Vec<Mount>>,
-    store_paths: RefCell<HashMap<String, String>>,
-}
-
 /// `logical` relative to `root`, if it is `root` or inside it.
 fn relative<'p>(logical: &'p str, root: &str) -> Option<&'p str> {
     if logical == root {
@@ -94,33 +59,13 @@ fn relative<'p>(logical: &'p str, root: &str) -> Option<&'p str> {
         .strip_prefix('/')
 }
 
-impl Io {
-    /// An [`Io`] that, like Nix in pure evaluation mode, forbids access to
-    /// any path outside a mount.
-    pub fn pure() -> Io {
-        Io {
-            pure: true,
-            ..Io::default()
-        }
-    }
+/// The filesystem as seen through the mounts, addressed by logical path.
+#[derive(Default)]
+struct Fs {
+    mounts: RefCell<Vec<Mount>>,
+}
 
-    /// Fail if `logical` may not be accessed at all.
-    pub fn check_access(&self, logical: &str) -> Result<()> {
-        if self.pure
-            && !logical.starts_with(crate::path::COREPKGS)
-            && !self
-                .mounts
-                .borrow()
-                .iter()
-                .any(|m| relative(logical, &m.logical).is_some())
-        {
-            bail!(
-                "access to absolute path '{logical}' is forbidden in pure evaluation mode (use '--impure' to override)"
-            );
-        }
-        Ok(())
-    }
-
+impl Fs {
     fn add_mount(&self, logical: &str, target: Target, filter: Option<HashSet<String>>) {
         let mut mounts = self.mounts.borrow_mut();
         mounts.retain(|m| m.logical != logical);
@@ -133,27 +78,24 @@ impl Io {
         mounts.sort_by_key(|m| std::cmp::Reverse(m.logical.len()));
     }
 
-    /// Make the logical directory `logical` show the contents of `physical`,
-    /// restricted to `filter` if given.
-    pub fn mount(&self, logical: &str, physical: &Path, filter: Option<HashSet<String>>) {
-        self.add_mount(logical, Target::Physical(physical.to_owned()), filter);
-    }
-
-    pub fn is_mounted(&self, logical: &str) -> bool {
+    fn is_mounted(&self, logical: &str) -> bool {
         self.mounts.borrow().iter().any(|m| m.logical == logical)
     }
 
-    /// The physical path behind `logical`, or an error if a mount filter
-    /// hides it.
-    pub fn physical(&self, logical: &str) -> Result<PathBuf> {
-        self.check_access(logical)?;
-        self.resolve(logical)
+    /// Whether `logical` is a mount or inside one.
+    fn in_mount(&self, logical: &str) -> bool {
+        self.mounts
+            .borrow()
+            .iter()
+            .any(|m| relative(logical, &m.logical).is_some())
     }
 
-    fn resolve(&self, logical: &str) -> Result<PathBuf> {
+    /// The physical path behind `logical`, or `NotFound` if a mount filter
+    /// hides it.
+    fn physical(&self, logical: &str) -> std::io::Result<PathBuf> {
         if let Some(rest) = logical.strip_prefix(crate::path::COREPKGS) {
             let Some(include) = DEFAULT_INCLUDE_PATH else {
-                bail!("path '{}' does not exist", crate::path::show(logical));
+                return Err(ErrorKind::NotFound.into());
             };
             return Ok(Path::new(include)
                 .join("nix")
@@ -171,7 +113,7 @@ impl Io {
                 && !rest.is_empty()
                 && !f.contains(rest)
             {
-                bail!("path '{logical}' does not exist");
+                return Err(ErrorKind::NotFound.into());
             }
             match &m.target {
                 Target::Physical(p) if rest.is_empty() => return Ok(p.clone()),
@@ -180,48 +122,30 @@ impl Io {
                 Target::Logical(l) => format!("{}/{rest}", l.trim_end_matches('/')),
             }
         };
-        self.resolve(&next)
+        self.physical(&next)
     }
+}
 
-    pub fn read(&self, logical: &str) -> Result<Vec<u8>> {
-        let p = self.physical(logical)?;
-        std::fs::read(&p).with_context(|| format!("reading file '{logical}'"))
-    }
-
-    pub fn read_to_string(&self, logical: &str) -> Result<String> {
-        let bytes = self.read(logical)?;
-        String::from_utf8(bytes).with_context(|| format!("file '{logical}' is not UTF-8"))
-    }
-
-    /// The type of `logical` without following a final symlink, or `None` if
-    /// it does not exist.
-    pub fn file_type(&self, logical: &str) -> Option<FileType> {
-        let p = self.physical(logical).ok()?;
+impl Accessor for Fs {
+    fn file_type(&self, path: &str) -> Option<FileType> {
+        let p = self.physical(path).ok()?;
         std::fs::symlink_metadata(&p)
             .ok()
             .map(|m| FileType::of(m.file_type()))
     }
 
-    /// Whether `logical` exists, following symlinks.
-    pub fn exists(&self, logical: &str) -> bool {
-        match self.physical(logical) {
-            Ok(p) => p.exists() || std::fs::symlink_metadata(&p).is_ok(),
-            Err(_) => false,
-        }
+    fn is_dir(&self, path: &str) -> bool {
+        self.physical(path).map(|p| p.is_dir()).unwrap_or(false)
     }
 
-    pub fn is_dir(&self, logical: &str) -> bool {
-        self.physical(logical).map(|p| p.is_dir()).unwrap_or(false)
+    fn read_file(&self, path: &str) -> std::io::Result<Vec<u8>> {
+        std::fs::read(self.physical(path)?)
     }
 
-    /// The entries of a directory, sorted by name.
-    pub fn read_dir(&self, logical: &str) -> Result<Vec<(String, FileType)>> {
-        let p = self.physical(logical)?;
-        let base = logical.trim_end_matches('/');
+    fn read_dir(&self, path: &str) -> std::io::Result<Vec<(String, FileType)>> {
+        let base = path.trim_end_matches('/');
         let mut out = Vec::new();
-        for entry in
-            std::fs::read_dir(&p).with_context(|| format!("reading directory '{logical}'"))?
-        {
+        for entry in std::fs::read_dir(self.physical(path)?)? {
             let entry = entry?;
             let name = entry.file_name().to_string_lossy().into_owned();
             // Entries hidden by a mount filter do not exist.
@@ -232,6 +156,88 @@ impl Io {
         }
         out.sort();
         Ok(out)
+    }
+
+    fn read_link(&self, path: &str) -> std::io::Result<Vec<u8>> {
+        Ok(std::fs::read_link(self.physical(path)?)?
+            .into_os_string()
+            .into_vec())
+    }
+
+    fn is_executable(&self, path: &str) -> std::io::Result<bool> {
+        let meta = std::fs::symlink_metadata(self.physical(path)?)?;
+        Ok(meta.permissions().mode() & 0o100 != 0)
+    }
+}
+
+#[derive(Default)]
+pub struct Io {
+    pub(crate) pure: bool,
+    fs: Fs,
+    store_paths: RefCell<HashMap<String, String>>,
+}
+
+impl Io {
+    /// An [`Io`] that, like Nix in pure evaluation mode, forbids access to
+    /// any path outside a mount.
+    pub fn pure() -> Io {
+        Io {
+            pure: true,
+            ..Io::default()
+        }
+    }
+
+    /// Fail if `logical` may not be accessed at all.
+    pub fn check_access(&self, logical: &str) -> Result<()> {
+        if self.pure && !logical.starts_with(crate::path::COREPKGS) && !self.fs.in_mount(logical) {
+            bail!(
+                "access to absolute path '{logical}' is forbidden in pure evaluation mode (use '--impure' to override)"
+            );
+        }
+        Ok(())
+    }
+
+    /// Make the logical directory `logical` show the contents of `physical`,
+    /// restricted to `filter` if given.
+    pub fn mount(&self, logical: &str, physical: &Path, filter: Option<HashSet<String>>) {
+        self.fs
+            .add_mount(logical, Target::Physical(physical.to_owned()), filter);
+    }
+
+    pub fn read(&self, logical: &str) -> Result<Vec<u8>> {
+        self.check_access(logical)?;
+        self.fs
+            .read_file(logical)
+            .with_context(|| format!("reading file '{logical}'"))
+    }
+
+    pub fn read_to_string(&self, logical: &str) -> Result<String> {
+        let bytes = self.read(logical)?;
+        String::from_utf8(bytes).with_context(|| format!("file '{logical}' is not UTF-8"))
+    }
+
+    /// The type of `logical` without following a final symlink, or `None` if
+    /// it does not exist.
+    pub fn file_type(&self, logical: &str) -> Option<FileType> {
+        self.check_access(logical).ok()?;
+        self.fs.file_type(logical)
+    }
+
+    /// Whether `logical` exists, following symlinks.
+    pub fn exists(&self, logical: &str) -> bool {
+        self.file_type(logical).is_some()
+    }
+
+    pub fn is_dir(&self, logical: &str) -> bool {
+        self.check_access(logical).is_ok() && self.fs.is_dir(logical)
+    }
+
+    /// The entries of a directory, sorted by name.
+    pub fn read_dir(&self, logical: &str) -> Result<Vec<(String, FileType)>> {
+        self.check_access(logical)?;
+        self.fs
+            .read_dir(logical)
+            .with_context(|| format!("reading directory '{logical}'"))
     }
 
     /// The file `import` reads for `logical`: the path itself, or its
@@ -276,15 +282,23 @@ impl Io {
             bail!("path '{logical}' does not exist");
         }
         let mut kept = HashSet::new();
-        let accept_all = |_: &str, _: FileType| Ok(true);
-        let keep = keep.unwrap_or(&accept_all);
         let mut h = Sha256::new();
-        store::nar_str(&mut h, b"nix-archive-1")?;
-        self.dump(&mut h, logical, logical, keep, &mut kept)?;
+        nar::dump(&mut h, &self.fs, logical, &mut |child, ty| {
+            if let Some(keep) = keep
+                && !keep(child, ty)?
+            {
+                return Ok(false);
+            }
+            if let Some(rel) = relative(child, logical) {
+                kept.insert(rel.to_owned());
+            }
+            Ok(true)
+        })?;
         let hash: [u8; 32] = h.finalize().into();
         let sp = store::source_path(&hash, name);
-        if !self.is_mounted(&sp) {
-            self.add_mount(&sp, Target::Logical(logical.to_owned()), Some(kept));
+        if !self.fs.is_mounted(&sp) {
+            self.fs
+                .add_mount(&sp, Target::Logical(logical.to_owned()), Some(kept));
         }
         Ok(sp)
     }
@@ -296,70 +310,7 @@ impl Io {
             bail!("path '{logical}' does not exist");
         }
         let mut h = Sha256::new();
-        store::nar_str(&mut h, b"nix-archive-1")?;
-        self.dump(
-            &mut h,
-            logical,
-            logical,
-            &|_, _| Ok(true),
-            &mut HashSet::new(),
-        )?;
+        nar::dump(&mut h, &self.fs, logical, &mut |_, _| Ok(true))?;
         Ok(h.finalize().into())
-    }
-
-    /// Write the NAR serialisation of `logical`, recording in `kept` every
-    /// entry included, relative to `root`.
-    fn dump(
-        &self,
-        w: &mut impl Write,
-        root: &str,
-        logical: &str,
-        keep: &dyn Fn(&str, FileType) -> Result<bool>,
-        kept: &mut HashSet<String>,
-    ) -> Result<()> {
-        let p = self.physical(logical)?;
-        let meta = std::fs::symlink_metadata(&p).with_context(|| format!("reading '{logical}'"))?;
-        store::nar_str(w, b"(")?;
-        store::nar_str(w, b"type")?;
-        let ft = meta.file_type();
-        if ft.is_symlink() {
-            store::nar_str(w, b"symlink")?;
-            store::nar_str(w, b"target")?;
-            let target = std::fs::read_link(&p)?;
-            store::nar_str(w, target.as_os_str().as_bytes())?;
-        } else if ft.is_dir() {
-            store::nar_str(w, b"directory")?;
-            let mut entries = self.read_dir(logical)?;
-            entries.sort_by(|a, b| a.0.as_bytes().cmp(b.0.as_bytes()));
-            for (name, ty) in entries {
-                let child = format!("{}/{name}", logical.trim_end_matches('/'));
-                if !keep(&child, ty)? {
-                    continue;
-                }
-                if let Some(rel) = relative(&child, root) {
-                    kept.insert(rel.to_owned());
-                }
-                store::nar_str(w, b"entry")?;
-                store::nar_str(w, b"(")?;
-                store::nar_str(w, b"name")?;
-                store::nar_str(w, name.as_bytes())?;
-                store::nar_str(w, b"node")?;
-                self.dump(w, root, &child, keep, kept)?;
-                store::nar_str(w, b")")?;
-            }
-        } else if ft.is_file() {
-            store::nar_str(w, b"regular")?;
-            if meta.permissions().mode() & 0o100 != 0 {
-                store::nar_str(w, b"executable")?;
-                store::nar_str(w, b"")?;
-            }
-            store::nar_str(w, b"contents")?;
-            let contents = std::fs::read(&p)?;
-            store::nar_str(w, &contents)?;
-        } else {
-            bail!("file '{logical}' has an unsupported type");
-        }
-        store::nar_str(w, b")")?;
-        Ok(())
     }
 }
