@@ -494,6 +494,40 @@ mod tests {
     }
 
     #[test]
+    fn append_context_requires_valid_paths() {
+        assert_eq!(
+            outcome(
+                r#"builtins.appendContext "x" { "/nix/store/p1v2hkzib64izpkmp5zr6gn81rrk8pv1-x" = { }; }"#
+            ),
+            "uncaught"
+        );
+        assert_eq!(
+            outcome(
+                r#"let d = derivation { name = "d"; system = "s"; builder = "/bin/sh"; };
+                in builtins.appendContext "x" { ${builtins.unsafeDiscardStringContext d.outPath} = throw "t"; }"#
+            ),
+            "uncaught"
+        );
+        assert_eq!(
+            outcome(
+                r#"let d = derivation { name = "d"; system = "s"; builder = "/bin/sh"; };
+                in builtins.getContext (builtins.appendContext "x" {
+                  ${builtins.unsafeDiscardStringContext d.drvPath} = { allOutputs = true; outputs = [ "out" ]; };
+                })"#
+            ),
+            "values"
+        );
+        assert_eq!(
+            outcome(
+                r#"builtins.appendContext "x" {
+                  ${builtins.unsafeDiscardStringContext (builtins.toFile "a" "b")} = { outputs = [ (throw "t") ]; };
+                }"#
+            ),
+            "uncaught"
+        );
+    }
+
+    #[test]
     fn both_reject_parse() {
         assert_eq!(outcome("1 +"), "parse-rejected");
         assert_eq!(outcome("undefined"), "parse-rejected");
