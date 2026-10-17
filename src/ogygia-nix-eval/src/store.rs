@@ -1,7 +1,5 @@
 //! Store path computation, as specified in the Nix manual's "Store Path"
-//! and "Nix Archive" sections. Nothing here writes to a store.
-
-use std::io::Write;
+//! section. Nothing here writes to a store.
 
 use anyhow::Result;
 use anyhow::bail;
@@ -147,14 +145,6 @@ pub fn parse_store_path(path: &str) -> Option<String> {
     }
     check_name(name).ok()?;
     Some(path)
-}
-
-/// Write one NAR string: its length, the bytes, and padding to 8 bytes.
-pub fn nar_str(w: &mut impl Write, s: &[u8]) -> std::io::Result<()> {
-    w.write_all(&(s.len() as u64).to_le_bytes())?;
-    w.write_all(s)?;
-    let pad = (8 - s.len() % 8) % 8;
-    w.write_all(&[0u8; 8][..pad])
 }
 
 /// Digest size in bytes of a hash algorithm Nix supports.

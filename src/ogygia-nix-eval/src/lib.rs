@@ -9,6 +9,7 @@
 //! Equivalence with the real Nix evaluator is checked by the tests in
 //! `tests/equiv`.
 
+mod accessor;
 mod builtins;
 mod compile;
 mod context;
@@ -16,6 +17,7 @@ mod derivation;
 mod eval;
 mod io;
 mod ir;
+mod nar;
 mod path;
 mod print;
 mod store;
