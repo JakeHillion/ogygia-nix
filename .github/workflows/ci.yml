@@ -161,6 +161,11 @@ jobs:
         sign "$sparkle/Versions/B/Autoupdate"
         sign "$sparkle/Versions/B/Updater.app"
         sign "$sparkle"
+        # The Nebula daemon and the Nebula it runs, which launchd starts from
+        # the bundle as root.
+        for helper in ogygia-macos-nebulad nebula nebula-cert; do
+          sign "$app/Contents/MacOS/$helper"
+        done
         sign --entitlements app/macos/Ogygia/Ogygia.entitlements "$app"
         codesign --verify --deep --strict --verbose=2 "$app"
 

@@ -96,8 +96,8 @@ pub async fn sign(args: SignArgs<'_>) -> Result<()> {
 /// A signed certificate, as reported by `nebula-cert print`.
 pub struct Cert {
     /// The name the certificate was signed with. `ogygia nebula rekey` signs
-    /// with the `nixosConfigurations` attribute name, so this identifies the
-    /// host a certificate on disk belongs to.
+    /// with the `nixosConfigurations` or `ogygiaConfigurations` attribute
+    /// name, so this identifies the host a certificate on disk belongs to.
     pub name: String,
     pub groups: Vec<String>,
     pub not_after: DateTime<Utc>,

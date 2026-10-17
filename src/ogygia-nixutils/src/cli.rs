@@ -28,6 +28,8 @@ pub struct NixCli {
     /// `Arc` so it can be cloned into a command's `'static` stream without
     /// reallocating.
     bin: Arc<Path>,
+    /// Extra flags for every `nix eval`, ahead of the installable.
+    eval_args: Vec<String>,
 }
 
 impl Default for NixCli {
@@ -35,26 +37,33 @@ impl Default for NixCli {
     fn default() -> Self {
         if which::which("nix").is_ok() {
             tracing::info!("using nix from PATH");
-            return Self {
-                bin: Arc::from(Path::new("nix")),
-            };
+            return Self::at(Path::new("nix"));
         }
         for path in NIX_FALLBACKS {
             if Path::new(path).exists() {
                 tracing::info!("using nix fallback: {path}");
-                return Self {
-                    bin: Arc::from(Path::new(path)),
-                };
+                return Self::at(Path::new(path));
             }
         }
         tracing::warn!("nix not found on PATH or in fallback locations, assuming `nix`");
-        Self {
-            bin: Arc::from(Path::new("nix")),
-        }
+        Self::at(Path::new("nix"))
     }
 }
 
 impl NixCli {
+    fn at(bin: &Path) -> Self {
+        Self {
+            bin: Arc::from(bin),
+            eval_args: Vec::new(),
+        }
+    }
+
+    /// Pass `args` to every `nix eval` ahead of the installable.
+    pub fn with_eval_args(mut self, args: impl IntoIterator<Item = String>) -> Self {
+        self.eval_args.extend(args);
+        self
+    }
+
     /// Evaluate a Nix installable to JSON via `nix eval --json <installable>`,
     /// optionally transforming it with `--apply <expr>`, and deserialize the
     /// result into `T`.
@@ -67,7 +76,9 @@ impl NixCli {
         apply: Option<&str>,
     ) -> Result<T> {
         let mut cmd = Command::new(&*self.bin);
-        cmd.args(["eval", "--json"]).arg(installable);
+        cmd.args(["eval", "--json"])
+            .args(&self.eval_args)
+            .arg(installable);
         if let Some(expr) = apply {
             cmd.args(["--apply", expr]);
         }

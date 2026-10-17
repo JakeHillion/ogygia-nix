@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  ogygia-macos-nebulad, registered by the app with SMAppService. BundleProgram
+  is relative to the app bundle, so the daemon always runs from the installed
+  app and Sparkle updates it with the app.
+-->
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>dev.ogygia.macos.nebulad</string>
+	<key>BundleProgram</key>
+	<string>Contents/MacOS/ogygia-macos-nebulad</string>
+	<key>AssociatedBundleIdentifiers</key>
+	<array>
+		<string>dev.ogygia.macos</string>
+	</array>
+	<key>RunAtLoad</key>
+	<true/>
+	<key>KeepAlive</key>
+	<true/>
+	<!--
+	  077: the log carries Nebula's handshakes, which name every peer and its
+	  public address, so nothing the daemon creates is readable by other users.
+	-->
+	<key>Umask</key>
+	<integer>63</integer>
+	<key>StandardErrorPath</key>
+	<string>/Library/Logs/ogygia-macos-nebulad.log</string>
+</dict>
+</plist>

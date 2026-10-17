@@ -3,6 +3,14 @@
 , fetchurl
 , unzip
 , writeText
+, removeReferencesTo
+, darwin
+, iana-etc
+, libiconv
+, mailcap
+, tzdata
+, nebula
+, ogygia-macos-nebulad
 , xcode
 , version
 , buildNumber
@@ -126,6 +134,27 @@ let
     # The tools are signed by the Sparkle project; leave them untouched.
     dontFixup = true;
   };
+
+  # Executables bundled beside the app's own: the Nebula daemon, and the
+  # Nebula it runs, at the nixpkgs pin.
+  helpers = [
+    "${ogygia-macos-nebulad}/bin/ogygia-macos-nebulad"
+    "${nebula}/bin/nebula"
+    "${nebula}/bin/nebula-cert"
+  ];
+
+  # The helpers load these from the store, but a Mac running the app has no
+  # store paths, so they load the system's copies instead. Both are in the
+  # dyld shared cache rather than on disk.
+  systemLibraries = [
+    { from = "${libiconv}/lib/libiconv.2.dylib"; to = "/usr/lib/libiconv.2.dylib"; }
+    { from = "${darwin.libresolv}/lib/libresolv.9.dylib"; to = "/usr/lib/libresolv.9.dylib"; }
+  ];
+
+  # Go embeds these as the first places to look for its service, MIME and
+  # time zone tables, and falls back to the system's copies when they are
+  # missing, as they are on a Mac running the app.
+  fallbackReferences = [ iana-etc mailcap tzdata ];
 in
 stdenvNoCC.mkDerivation {
   pname = "ogygia-macos";
@@ -136,10 +165,11 @@ stdenvNoCC.mkDerivation {
     fileset = lib.fileset.unions [
       ./Ogygia
       ./Ogygia.xcodeproj
+      ./LaunchDaemons
     ];
   };
 
-  nativeBuildInputs = [ unzip ];
+  nativeBuildInputs = [ unzip removeReferencesTo ];
 
   # Host paths xcodebuild cannot run without. They are readable only, and
   # the sandbox still has no network:
@@ -229,7 +259,24 @@ stdenvNoCC.mkDerivation {
     runHook preInstall
 
     mkdir -p "$out/Applications"
-    cp -R "$TMPDIR/DerivedData/Build/Products/Release/Ogygia.app" "$out/Applications/"
+    app="$out/Applications/Ogygia.app"
+    cp -R "$TMPDIR/DerivedData/Build/Products/Release/Ogygia.app" "$app"
+
+    # SMAppService finds the daemon's plist here, and launchd runs the
+    # daemon from Contents/MacOS.
+    install -D -m 0644 LaunchDaemons/dev.ogygia.macos.nebulad.plist \
+      "$app/Contents/Library/LaunchDaemons/dev.ogygia.macos.nebulad.plist"
+    for helper in ${lib.escapeShellArgs helpers}; do
+      bin="$app/Contents/MacOS/$(basename "$helper")"
+      install -m 0755 "$helper" "$bin"
+      ${lib.concatMapStrings (l: ''
+        xcrun install_name_tool -change ${l.from} ${l.to} "$bin"
+      '') systemLibraries}
+      remove-references-to ${lib.concatMapStringsSep " " (p: "-t ${p}") fallbackReferences} "$bin"
+      # Rewriting the binary invalidated the linker's ad-hoc signature, which
+      # arm64 requires to run at all.
+      /usr/bin/codesign --force --sign - "$bin"
+    done
 
     runHook postInstall
   '';
@@ -238,9 +285,11 @@ stdenvNoCC.mkDerivation {
   # Sparkle ships already signed.
   dontFixup = true;
 
-  # Xcode's licence forbids redistributing it, so the app must never retain
-  # a reference that would carry Xcode into a binary cache with it.
-  disallowedReferences = [ xcode ];
+  # The app runs on Macs without these store paths, so it may refer to none.
+  # In particular, Xcode's licence forbids redistributing it, so the app
+  # must never retain a reference that would carry Xcode into a binary cache
+  # with it.
+  allowedReferences = [ ];
 
   passthru = { inherit xcode sparkleTools; };
 

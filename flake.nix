@@ -45,6 +45,7 @@
             # nixpkgs does not package Xcode 27 yet. The hash is of Xcode
             # 27.0 (27A266a) as installed from Apple's .xip; the App Store
             # build is signed differently and does not match.
+            inherit (self.packages.${system}) ogygia-macos-nebulad;
             xcode = pkgs.darwin.requireXcode "27.0" "sha256-k0YuMjPbP5Adnnx6KhQXGRi8kRLPpXJN+EUxpqYHwOE=";
             version = (nixpkgs.lib.importTOML ./Cargo.toml).workspace.package.version;
             # Sparkle orders updates by CFBundleVersion, so it must grow with
@@ -199,6 +200,22 @@
               src = irisdSrc;
             });
 
+            # The Mac app's Nebula daemon, which is bundled into ogygia-macos
+            # rather than installed on its own.
+            ogygia-macos-nebulad = craneLib.buildPackage (individualCrateArgs // {
+              pname = "ogygia-macos-nebulad";
+              cargoExtraArgs = "-p ogygia-macos-nebulad";
+              src = lib.fileset.toSource {
+                root = ./.;
+                fileset = lib.fileset.unions [
+                  ./Cargo.toml
+                  ./Cargo.lock
+                  (craneLib.fileset.commonCargoSources ./src/ogygia-macos-nebulad)
+                  (craneLib.fileset.commonCargoSources ./src/ogygia-nixutils)
+                ];
+              };
+            });
+
             ogygia-hostinfod = craneLib.buildPackage (individualCrateArgs // {
               pname = "ogygia-hostinfod";
               cargoExtraArgs = "-p ogygia-hostinfod";
@@ -350,6 +367,8 @@
             packages = {
               inherit ogygia ogygia-nextest-archive;
               default = ogygia;
+            } // lib.optionalAttrs (system == "aarch64-darwin") {
+              inherit ogygia-macos-nebulad;
             } // linuxOnly {
               inherit ogygia-irisd ogygia-hostinfod ogygia-dashboard ogygia-updated ogygia-clevis ogygia-nix-eval-fuzz;
             };
@@ -446,6 +465,7 @@
                 inherit pkgs;
                 inherit (nixpkgs) lib;
                 ogygiaModule = self.nixosModules.default;
+                inherit (self.lib) mkOgygiaConfiguration;
               };
 
             } // lib.optionalAttrs (system == "x86_64-linux") {
@@ -475,6 +495,10 @@
               };
             };
           })) // {
+      # Defines a device with no system configuration, such as a Mac running
+      # the Ogygia app, for a fleet's `ogygiaConfigurations` output.
+      lib.mkOgygiaConfiguration = import ./nixos/nebula/device.nix;
+
       nixosModules.default = { pkgs, ... }: {
         imports = [ ./nixos ];
         _module.args.ogygia-irisd = self.packages.${pkgs.stdenv.hostPlatform.system}.ogygia-irisd;
