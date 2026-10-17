@@ -88,9 +88,6 @@ pub struct Eval<'a> {
     globals: RefCell<HashMap<Sym, Value<'a>>>,
     import_cache: RefCell<HashMap<String, Value<'a>>>,
     depth: Cell<usize>,
-    /// Derivations created in this session, with their modulo hashes, by
-    /// `.drv` path.
-    pub(crate) drvs: RefCell<HashMap<String, (crate::derivation::Derivation, [u8; 32])>>,
     pub(crate) empty_attrs: &'a Attrs<'a>,
     pub(crate) empty_list: &'a List<'a>,
 }
@@ -134,7 +131,6 @@ impl<'a> Eval<'a> {
             globals: RefCell::new(HashMap::new()),
             import_cache: RefCell::new(HashMap::new()),
             depth: Cell::new(0),
-            drvs: RefCell::new(HashMap::new()),
             empty_attrs: bump.alloc(Attrs { entries: &[] }),
             empty_list: bump.alloc(List { items: &[] }),
         };

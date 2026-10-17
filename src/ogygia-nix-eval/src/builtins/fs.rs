@@ -155,7 +155,11 @@ pub fn to_file<'a>(ev: &Eval<'a>, args: &[Value<'a>]) -> R<'a> {
             }
         }
     }
-    let path = crate::store::text_path(contents.s, &name, &refs);
+    let path = ev
+        .ctx
+        .io
+        .add_text(&name, contents.s, &refs)
+        .map_err(io_err)?;
     let path: &'a str = ev.bump.alloc_str(&path);
     Ok(ev.str_val(path.as_bytes(), &[Ctx::Opaque(path)]))
 }

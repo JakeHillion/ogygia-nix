@@ -1,10 +1,17 @@
-//! Store path computation, as specified in the Nix manual's "Store Path"
-//! section. Nothing here writes to a store.
+//! Store paths, computed as specified in the Nix manual's "Store Path"
+//! section, and the stores holding the objects they name.
+
+mod memory;
+
+use std::rc::Rc;
 
 use anyhow::Result;
 use anyhow::bail;
 use sha2::Digest;
 use sha2::Sha256;
+
+pub use self::memory::MemoryStore;
+use crate::accessor::Accessor;
 
 pub const STORE_DIR: &str = "/nix/store";
 
@@ -128,23 +135,54 @@ pub fn check_name(name: &str) -> Result<()> {
     Ok(())
 }
 
-/// `parseStorePath`: the canonical form of `path` if it names a store
-/// object rather than a path inside one.
-pub fn parse_store_path(path: &str) -> Option<String> {
-    if !path.starts_with('/') {
-        return None;
+/// The path of a store object, `{STORE_DIR}/{hash}-{name}`.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct StorePath(String);
+
+impl StorePath {
+    /// `parseStorePath`: `path`, made canonical, if it names a store object
+    /// rather than a path inside one.
+    pub fn parse(path: &str) -> Option<StorePath> {
+        if !path.starts_with('/') {
+            return None;
+        }
+        match StorePath::split(&crate::path::canon_path(path))? {
+            (sp, "") => Some(sp),
+            _ => None,
+        }
     }
-    let path = crate::path::canon_path(path);
-    let base = path.strip_prefix(STORE_DIR)?.strip_prefix('/')?;
-    let (hash, name) = (base.as_bytes().get(..32)?, base.get(33..)?);
-    if base.contains('/')
-        || base.as_bytes()[32] != b'-'
-        || !hash.iter().all(|c| BASE32_CHARS.contains(c))
-    {
-        return None;
+
+    /// The store object the canonical path `path` is in, and the path within
+    /// that object, which is empty for the object itself.
+    pub fn split(path: &str) -> Option<(StorePath, &str)> {
+        let base = path.strip_prefix(STORE_DIR)?.strip_prefix('/')?;
+        let (base, rest) = base.split_once('/').unwrap_or((base, ""));
+        let (hash, name) = (base.as_bytes().get(..32)?, base.get(33..)?);
+        if base.as_bytes()[32] != b'-' || !hash.iter().all(|c| BASE32_CHARS.contains(c)) {
+            return None;
+        }
+        check_name(name).ok()?;
+        Some((StorePath(format!("{STORE_DIR}/{base}")), rest))
     }
-    check_name(name).ok()?;
-    Some(path)
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+/// Where store objects are read from and written to.
+pub trait Store {
+    /// The contents of the store object `path`, rooted at the empty path, or
+    /// `None` if the store does not have it.
+    fn accessor(&self, path: &StorePath) -> Result<Option<Rc<dyn Accessor>>>;
+
+    /// Add a regular file holding `contents` that refers to the store paths
+    /// `refs`.
+    fn add_text(&self, name: &str, contents: &[u8], refs: &[&str]) -> Result<StorePath>;
+
+    /// Add the tree rooted at the empty path in `tree`, addressed by the hash
+    /// of its NAR serialisation.
+    fn add_source(&self, name: &str, tree: Rc<dyn Accessor>) -> Result<StorePath>;
 }
 
 /// Digest size in bytes of a hash algorithm Nix supports.

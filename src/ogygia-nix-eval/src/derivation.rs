@@ -8,6 +8,7 @@ use std::collections::BTreeSet;
 use sha2::Digest;
 use sha2::Sha256;
 
+use crate::io::Io;
 use crate::store;
 
 #[derive(Clone, Debug, Default)]
@@ -133,12 +134,12 @@ impl Derivation {
         Ok(Sha256::digest(self.unparse(&inputs)).into())
     }
 
-    /// The `.drv` path this derivation is written to.
-    pub fn drv_path(&self) -> String {
+    /// Write the `.drv` file to the store and return its path.
+    pub fn write(&self, io: &Io) -> anyhow::Result<String> {
         let text = self.unparse(&self.input_drvs);
         let mut refs: Vec<&str> = self.input_srcs.iter().map(String::as_str).collect();
         refs.extend(self.input_drvs.keys().map(String::as_str));
-        store::text_path(&text, &format!("{}.drv", self.name), &refs)
+        io.add_derivation(&format!("{}.drv", self.name), &text, &refs)
     }
 }
 

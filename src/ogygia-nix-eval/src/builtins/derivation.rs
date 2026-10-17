@@ -226,7 +226,7 @@ pub fn derivation_strict<'a>(ev: &Eval<'a>, args: &[Value<'a>]) -> R<'a> {
             }
             Ctx::DrvDeep(d) => {
                 drv.input_srcs.insert(d.to_owned());
-                if let Some((input, _)) = ev.drvs.borrow().get(d) {
+                if let Some((input, _)) = ev.ctx.drvs.borrow().get(d) {
                     drv.input_drvs
                         .entry(d.to_owned())
                         .or_default()
@@ -237,7 +237,7 @@ pub fn derivation_strict<'a>(ev: &Eval<'a>, args: &[Value<'a>]) -> R<'a> {
     }
 
     let modulo_of = |p: &str| -> anyhow::Result<[u8; 32]> {
-        match ev.drvs.borrow().get(p) {
+        match ev.ctx.drvs.borrow().get(p) {
             Some((_, h)) => Ok(*h),
             None => anyhow::bail!("derivation '{p}' is not known to this evaluation"),
         }
@@ -288,9 +288,11 @@ pub fn derivation_strict<'a>(ev: &Eval<'a>, args: &[Value<'a>]) -> R<'a> {
         }
     }
 
-    let drv_path = drv.drv_path();
     let modulo = drv
         .hash_modulo(&modulo_of)
+        .map_err(|e| error(ErrorKind::Eval, format!("{e:#}")))?;
+    let drv_path = drv
+        .write(&ev.ctx.io)
         .map_err(|e| error(ErrorKind::Eval, format!("{e:#}")))?;
     let drv_path: &'a str = ev.bump.alloc_str(&drv_path);
     let mut entries = vec![ev.entry(
@@ -310,7 +312,8 @@ pub fn derivation_strict<'a>(ev: &Eval<'a>, args: &[Value<'a>]) -> R<'a> {
             ),
         ));
     }
-    ev.drvs
+    ev.ctx
+        .drvs
         .borrow_mut()
         .insert(drv_path.to_owned(), (drv, modulo));
     Ok(ev.attrs(entries))
