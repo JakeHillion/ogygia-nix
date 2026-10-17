@@ -157,6 +157,15 @@ impl Store {
     fn uri(&self) -> String {
         format!("local?root={}", self.0.path().display())
     }
+
+    // Nix prints a chroot store's paths at their location on disk, under the
+    // root, rather than in the store directory, until NixOS/nix#16625.
+    fn unroot(&self, out: &str) -> String {
+        out.replace(
+            &format!("{}/nix/store", self.0.path().display()),
+            "/nix/store",
+        )
+    }
 }
 
 impl Drop for Store {
@@ -265,8 +274,8 @@ fn run_nix(mode: &[&str], expr: &str, budget: Budget) -> Result<Run, Outcome> {
         std::thread::sleep(Duration::from_millis(5));
     };
     stdin.join().unwrap();
-    let stdout = stdout.join().unwrap();
-    let stderr = String::from_utf8_lossy(&stderr.join().unwrap()).into_owned();
+    let stdout = store.unroot(&String::from_utf8_lossy(&stdout.join().unwrap()));
+    let stderr = store.unroot(&String::from_utf8_lossy(&stderr.join().unwrap()));
     let status = status?;
     // A SIGKILL not sent above is the kernel's OOM killer.
     if exhausted(&stderr) || status.signal() == Some(libc::SIGKILL) {
@@ -276,7 +285,6 @@ fn run_nix(mode: &[&str], expr: &str, budget: Budget) -> Result<Run, Outcome> {
         return Err(Outcome::Limited);
     }
     Ok(if status.success() {
-        let stdout = String::from_utf8_lossy(&stdout);
         Ok(stdout.strip_suffix('\n').unwrap_or(&stdout).to_owned())
     } else {
         Err(stderr)
@@ -524,6 +532,15 @@ mod tests {
                 }"#
             ),
             "uncaught"
+        );
+    }
+
+    #[test]
+    fn ignores_the_store_root() {
+        assert_eq!(outcome("/nix/store/."), "values");
+        assert_eq!(
+            outcome("/nix/store/p1v2hkzib64izpkmp5zr6gn81rrk8pv1-x/a"),
+            "values"
         );
     }
 
