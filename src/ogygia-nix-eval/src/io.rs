@@ -1,11 +1,12 @@
-//! Filesystem access for the evaluator.
+//! Filesystem and store access for the evaluator.
 //!
 //! Paths the evaluator sees are logical: a flake input is `/nix/store/…-source`
-//! whether or not it has been realised there. [`Io`] maps logical paths onto
-//! physical directories ("mounts"), optionally restricted to a set of files
-//! (the tracked files of a Git checkout), and computes store paths of copied
-//! sources without writing to a store.
+//! whether or not it has been realised there. [`Io`] reads store paths from
+//! its store and other logical paths from physical directories ("mounts"),
+//! optionally restricted to a set of files (the tracked files of a Git
+//! checkout).
 
+use std::borrow::Cow;
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::collections::HashSet;
@@ -25,20 +26,18 @@ use sha2::Sha256;
 use crate::accessor::Accessor;
 use crate::accessor::FileType;
 use crate::nar;
+use crate::path::join;
 use crate::store;
-
-enum Target {
-    Physical(PathBuf),
-    /// Another logical path, as for a store path computed from a source.
-    Logical(String),
-}
+use crate::store::MemoryStore;
+use crate::store::Store;
+use crate::store::StorePath;
 
 struct Mount {
     logical: String,
-    target: Target,
+    physical: PathBuf,
     /// If set, only these paths (relative to the mount, `/`-separated, with
     /// every ancestor directory included) exist.
-    filter: Option<Rc<HashSet<String>>>,
+    filter: Option<HashSet<String>>,
 }
 
 // The directory holding the files Nix ships with itself, which `<nix/…>`
@@ -66,22 +65,6 @@ struct Fs {
 }
 
 impl Fs {
-    fn add_mount(&self, logical: &str, target: Target, filter: Option<HashSet<String>>) {
-        let mut mounts = self.mounts.borrow_mut();
-        mounts.retain(|m| m.logical != logical);
-        mounts.push(Mount {
-            logical: logical.to_owned(),
-            target,
-            filter: filter.map(Rc::new),
-        });
-        // Longest prefix first, so nested mounts win.
-        mounts.sort_by_key(|m| std::cmp::Reverse(m.logical.len()));
-    }
-
-    fn is_mounted(&self, logical: &str) -> bool {
-        self.mounts.borrow().iter().any(|m| m.logical == logical)
-    }
-
     /// Whether `logical` is a mount or inside one.
     fn in_mount(&self, logical: &str) -> bool {
         self.mounts
@@ -101,28 +84,24 @@ impl Fs {
                 .join("nix")
                 .join(rest.trim_start_matches('/')));
         }
-        let next = {
-            let mounts = self.mounts.borrow();
-            let found = mounts
-                .iter()
-                .find_map(|m| relative(logical, &m.logical).map(|rest| (m, rest)));
-            let Some((m, rest)) = found else {
-                return Ok(PathBuf::from(logical));
-            };
-            if let Some(f) = &m.filter
-                && !rest.is_empty()
-                && !f.contains(rest)
-            {
-                return Err(ErrorKind::NotFound.into());
-            }
-            match &m.target {
-                Target::Physical(p) if rest.is_empty() => return Ok(p.clone()),
-                Target::Physical(p) => return Ok(p.join(rest)),
-                Target::Logical(l) if rest.is_empty() => l.clone(),
-                Target::Logical(l) => format!("{}/{rest}", l.trim_end_matches('/')),
-            }
+        let mounts = self.mounts.borrow();
+        let found = mounts
+            .iter()
+            .find_map(|m| relative(logical, &m.logical).map(|rest| (m, rest)));
+        let Some((m, rest)) = found else {
+            return Ok(PathBuf::from(logical));
         };
-        self.physical(&next)
+        if let Some(f) = &m.filter
+            && !rest.is_empty()
+            && !f.contains(rest)
+        {
+            return Err(ErrorKind::NotFound.into());
+        }
+        if rest.is_empty() {
+            Ok(m.physical.clone())
+        } else {
+            Ok(m.physical.join(rest))
+        }
     }
 }
 
@@ -143,13 +122,12 @@ impl Accessor for Fs {
     }
 
     fn read_dir(&self, path: &str) -> std::io::Result<Vec<(String, FileType)>> {
-        let base = path.trim_end_matches('/');
         let mut out = Vec::new();
         for entry in std::fs::read_dir(self.physical(path)?)? {
             let entry = entry?;
             let name = entry.file_name().to_string_lossy().into_owned();
             // Entries hidden by a mount filter do not exist.
-            if self.physical(&format!("{base}/{name}")).is_err() {
+            if self.physical(&join(path, &name)).is_err() {
                 continue;
             }
             out.push((name, FileType::of(entry.file_type()?)));
@@ -170,16 +148,78 @@ impl Accessor for Fs {
     }
 }
 
-#[derive(Default)]
+/// The tree at `root` in `base`, holding only the entries in `kept`
+/// (relative to `root`) if that is set.
+struct Subtree {
+    base: Rc<dyn Accessor>,
+    root: String,
+    kept: Option<HashSet<String>>,
+}
+
+impl Subtree {
+    /// `path` in `base`, or `NotFound` if it is not kept.
+    fn path(&self, path: &str) -> std::io::Result<String> {
+        match &self.kept {
+            Some(kept) if !path.is_empty() && !kept.contains(path) => {
+                Err(ErrorKind::NotFound.into())
+            }
+            _ => Ok(join(&self.root, path)),
+        }
+    }
+}
+
+impl Accessor for Subtree {
+    fn file_type(&self, path: &str) -> Option<FileType> {
+        self.base.file_type(&self.path(path).ok()?)
+    }
+
+    fn is_dir(&self, path: &str) -> bool {
+        self.path(path).is_ok_and(|p| self.base.is_dir(&p))
+    }
+
+    fn read_file(&self, path: &str) -> std::io::Result<Vec<u8>> {
+        self.base.read_file(&self.path(path)?)
+    }
+
+    fn read_dir(&self, path: &str) -> std::io::Result<Vec<(String, FileType)>> {
+        let mut entries = self.base.read_dir(&self.path(path)?)?;
+        entries.retain(|(name, _)| self.path(&join(path, name)).is_ok());
+        Ok(entries)
+    }
+
+    fn read_link(&self, path: &str) -> std::io::Result<Vec<u8>> {
+        self.base.read_link(&self.path(path)?)
+    }
+
+    fn is_executable(&self, path: &str) -> std::io::Result<bool> {
+        self.base.is_executable(&self.path(path)?)
+    }
+}
+
 pub struct Io {
     pub(crate) pure: bool,
-    fs: Fs,
+    fs: Rc<Fs>,
+    store: Box<dyn Store>,
+    /// Store paths pure evaluation may read.
+    allowed: RefCell<HashSet<StorePath>>,
     store_paths: RefCell<HashMap<String, String>>,
+}
+
+impl Default for Io {
+    fn default() -> Io {
+        Io {
+            pure: false,
+            fs: Rc::default(),
+            store: Box::new(MemoryStore::default()),
+            allowed: RefCell::default(),
+            store_paths: RefCell::default(),
+        }
+    }
 }
 
 impl Io {
     /// An [`Io`] that, like Nix in pure evaluation mode, forbids access to
-    /// any path outside a mount.
+    /// any path outside a mount or a store path it did not add.
     pub fn pure() -> Io {
         Io {
             pure: true,
@@ -189,7 +229,11 @@ impl Io {
 
     /// Fail if `logical` may not be accessed at all.
     pub fn check_access(&self, logical: &str) -> Result<()> {
-        if self.pure && !logical.starts_with(crate::path::COREPKGS) && !self.fs.in_mount(logical) {
+        if self.pure
+            && !logical.starts_with(crate::path::COREPKGS)
+            && !self.fs.in_mount(logical)
+            && !StorePath::split(logical).is_some_and(|(sp, _)| self.allowed.borrow().contains(&sp))
+        {
             bail!(
                 "access to absolute path '{logical}' is forbidden in pure evaluation mode (use '--impure' to override)"
             );
@@ -200,14 +244,32 @@ impl Io {
     /// Make the logical directory `logical` show the contents of `physical`,
     /// restricted to `filter` if given.
     pub fn mount(&self, logical: &str, physical: &Path, filter: Option<HashSet<String>>) {
-        self.fs
-            .add_mount(logical, Target::Physical(physical.to_owned()), filter);
+        let mut mounts = self.fs.mounts.borrow_mut();
+        mounts.retain(|m| m.logical != logical);
+        mounts.push(Mount {
+            logical: logical.to_owned(),
+            physical: physical.to_owned(),
+            filter,
+        });
+        // Longest prefix first, so nested mounts win.
+        mounts.sort_by_key(|m| std::cmp::Reverse(m.logical.len()));
+    }
+
+    /// The tree holding `logical`: the store object it is in, if the store
+    /// has it, else the filesystem.
+    fn locate<'p>(&self, logical: &'p str) -> Result<(Rc<dyn Accessor>, Cow<'p, str>)> {
+        if let Some((sp, rest)) = StorePath::split(logical)
+            && let Some(acc) = self.store.accessor(&sp)?
+        {
+            return Ok((acc, Cow::Borrowed(rest)));
+        }
+        Ok((self.fs.clone(), Cow::Borrowed(logical)))
     }
 
     pub fn read(&self, logical: &str) -> Result<Vec<u8>> {
         self.check_access(logical)?;
-        self.fs
-            .read_file(logical)
+        let (acc, path) = self.locate(logical)?;
+        acc.read_file(&path)
             .with_context(|| format!("reading file '{logical}'"))
     }
 
@@ -220,7 +282,8 @@ impl Io {
     /// it does not exist.
     pub fn file_type(&self, logical: &str) -> Option<FileType> {
         self.check_access(logical).ok()?;
-        self.fs.file_type(logical)
+        let (acc, path) = self.locate(logical).ok()?;
+        acc.file_type(&path)
     }
 
     /// Whether `logical` exists, following symlinks.
@@ -229,14 +292,17 @@ impl Io {
     }
 
     pub fn is_dir(&self, logical: &str) -> bool {
-        self.check_access(logical).is_ok() && self.fs.is_dir(logical)
+        self.check_access(logical).is_ok()
+            && self
+                .locate(logical)
+                .is_ok_and(|(acc, path)| acc.is_dir(&path))
     }
 
     /// The entries of a directory, sorted by name.
     pub fn read_dir(&self, logical: &str) -> Result<Vec<(String, FileType)>> {
         self.check_access(logical)?;
-        self.fs
-            .read_dir(logical)
+        let (acc, path) = self.locate(logical)?;
+        acc.read_dir(&path)
             .with_context(|| format!("reading directory '{logical}'"))
     }
 
@@ -253,8 +319,8 @@ impl Io {
         Ok(logical.to_owned())
     }
 
-    /// The store path `logical` would be copied to, as `"${path}"` does. The
-    /// store path then reads as a copy of `logical`.
+    /// Copy `logical` to the store, as `"${path}"` does, and return its store
+    /// path.
     pub fn add_path_to_store(&self, logical: &str) -> Result<String> {
         if let Some(p) = self.store_paths.borrow().get(logical) {
             return Ok(p.clone());
@@ -267,9 +333,9 @@ impl Io {
         Ok(sp)
     }
 
-    /// The store path of `logical` copied under `name`, keeping only entries
-    /// `keep(path, type)` accepts (`builtins.path`). The store path then
-    /// reads as that filtered copy.
+    /// Copy `logical` to the store under `name`, keeping only entries
+    /// `keep(path, type)` accepts (`builtins.path`), and return its store
+    /// path.
     pub fn add_filtered_to_store(
         &self,
         logical: &str,
@@ -281,26 +347,42 @@ impl Io {
         if !self.exists(logical) {
             bail!("path '{logical}' does not exist");
         }
-        let mut kept = HashSet::new();
-        let mut h = Sha256::new();
-        nar::dump(&mut h, &self.fs, logical, &mut |child, ty| {
-            if let Some(keep) = keep
-                && !keep(child, ty)?
-            {
-                return Ok(false);
+        let (base, root) = self.locate(logical)?;
+        let kept = match keep {
+            None => None,
+            Some(keep) => {
+                let mut kept = HashSet::new();
+                select(&*base, &root, logical, "", keep, &mut kept)?;
+                Some(kept)
             }
-            if let Some(rel) = relative(child, logical) {
-                kept.insert(rel.to_owned());
-            }
-            Ok(true)
-        })?;
-        let hash: [u8; 32] = h.finalize().into();
-        let sp = store::source_path(&hash, name);
-        if !self.fs.is_mounted(&sp) {
-            self.fs
-                .add_mount(&sp, Target::Logical(logical.to_owned()), Some(kept));
-        }
-        Ok(sp)
+        };
+        let tree = Rc::new(Subtree {
+            base,
+            root: root.into_owned(),
+            kept,
+        });
+        let sp = self.store.add_source(name, tree)?;
+        self.allow(sp)
+    }
+
+    /// Add a file holding `contents` to the store, as `builtins.toFile` does,
+    /// and return its store path.
+    pub fn add_text(&self, name: &str, contents: &[u8], refs: &[&str]) -> Result<String> {
+        let sp = self.store.add_text(name, contents, refs)?;
+        self.allow(sp)
+    }
+
+    /// Write a derivation's `.drv` file to the store and return its store
+    /// path. Unlike other additions, pure evaluation may not read it.
+    pub fn add_derivation(&self, name: &str, contents: &[u8], refs: &[&str]) -> Result<String> {
+        let sp = self.store.add_text(name, contents, refs)?;
+        Ok(sp.as_str().to_owned())
+    }
+
+    fn allow(&self, sp: StorePath) -> Result<String> {
+        let path = sp.as_str().to_owned();
+        self.allowed.borrow_mut().insert(sp);
+        Ok(path)
     }
 
     /// SHA-256 of the NAR serialisation of `logical`.
@@ -309,8 +391,65 @@ impl Io {
         if !self.exists(logical) {
             bail!("path '{logical}' does not exist");
         }
+        let (acc, path) = self.locate(logical)?;
         let mut h = Sha256::new();
-        nar::dump(&mut h, &self.fs, logical, &mut |_, _| Ok(true))?;
+        nar::dump(&mut h, &*acc, &path)?;
         Ok(h.finalize().into())
+    }
+}
+
+/// Record in `kept` each entry below `rel` in the directory `root` of `base`
+/// that `keep` accepts, in NAR order, not descending into rejected
+/// directories. `keep` sees entries by their logical path below `logical`.
+fn select(
+    base: &dyn Accessor,
+    root: &str,
+    logical: &str,
+    rel: &str,
+    keep: KeepFn<'_>,
+    kept: &mut HashSet<String>,
+) -> Result<()> {
+    let path = join(root, rel);
+    if base.file_type(&path) != Some(FileType::Directory) {
+        return Ok(());
+    }
+    let entries = base
+        .read_dir(&path)
+        .with_context(|| format!("reading directory '{}'", join(logical, rel)))?;
+    for (name, ty) in entries {
+        let child = join(rel, &name);
+        if keep(&join(logical, &child), ty)? {
+            select(base, root, logical, &child, keep, kept)?;
+            kept.insert(child);
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    // Expected results are those of `nix-instantiate --eval --strict
+    // --read-write-mode`.
+
+    fn eval(expr: &str, pure: bool) -> Result<String, crate::Error> {
+        let settings = crate::Settings {
+            pure,
+            ..crate::Settings::default()
+        };
+        crate::eval_to_string(expr, "/", settings)
+    }
+
+    #[test]
+    fn added_files_are_readable() {
+        let expr =
+            r#"builtins.readFile (builtins.unsafeDiscardStringContext (builtins.toFile "x" "y"))"#;
+        assert_eq!(eval(expr, true).unwrap(), r#""y""#);
+    }
+
+    #[test]
+    fn derivation_files_are_readable_only_when_impure() {
+        let expr = r#"builtins.readFile (derivation { name = "d"; system = "x"; builder = "/b"; }).drvPath"#;
+        assert!(eval(expr, false).unwrap().starts_with(r#""Derive("#));
+        assert!(eval(expr, true).is_err());
     }
 }

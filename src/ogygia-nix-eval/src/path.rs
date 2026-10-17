@@ -67,6 +67,16 @@ pub fn base_name_of(p: &[u8]) -> &[u8] {
     }
 }
 
+/// The relative path `name` within the directory `dir`, where an empty `dir`
+/// is the root of a relative tree and an empty `name` is `dir` itself.
+pub fn join(dir: &str, name: &str) -> String {
+    match (dir, name) {
+        ("", _) => name.to_owned(),
+        (_, "") => dir.to_owned(),
+        _ => format!("{}/{name}", dir.trim_end_matches('/')),
+    }
+}
+
 /// The name of the store path that copying the path `p` gives.
 pub fn store_name(p: &str) -> String {
     match base_name_of(abs(p).as_bytes()) {
