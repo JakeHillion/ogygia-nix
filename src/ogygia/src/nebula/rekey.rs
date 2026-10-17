@@ -31,10 +31,10 @@ const RENEW_AFTER_FRACTION: f64 = 1.0 / 3.0;
 
 #[derive(Args)]
 pub struct RekeyArgs {
-    /// Process every host in the flake.
+    /// Process every host and device in the flake.
     #[arg(short = 'a', long)]
     pub all: bool,
-    /// Process a single host.
+    /// Process a single host or device.
     #[arg(long)]
     pub host: Option<String>,
     /// Re-sign even if a matching cert already exists.
@@ -73,8 +73,8 @@ async fn async_run(args: &RekeyArgs) -> Result<()> {
 
     let nix = Nix::default();
 
-    let targets: Vec<String> = if let Some(host) = &args.host {
-        vec![host.clone()]
+    let targets: Vec<flake_eval::Host> = if let Some(host) = &args.host {
+        vec![flake_eval::find_host(&nix, &args.flake, host).await?]
     } else {
         flake_eval::list_hosts(&nix, &args.flake).await?
     };
@@ -86,8 +86,9 @@ async fn async_run(args: &RekeyArgs) -> Result<()> {
     let mut signed = 0usize;
     let mut skipped = 0usize;
 
-    for host in &targets {
-        let info = flake_eval::host_info(&nix, &args.flake, host).await?;
+    for target in &targets {
+        let host = &target.name;
+        let info = flake_eval::host_info(&nix, &args.flake, target).await?;
         if !info.enabled {
             tracing::debug!(%host, "skipping (nebula disabled)");
             skipped += 1;
@@ -199,7 +200,8 @@ async fn async_run(args: &RekeyArgs) -> Result<()> {
 
 /// What a rekey is about to change for one host.
 struct Delta<'a> {
-    /// The `nixosConfigurations` attribute name, which is also the cert name.
+    /// The `nixosConfigurations` or `ogygiaConfigurations` attribute name,
+    /// which is also the cert name.
     host: &'a str,
     reason: &'static str,
     /// The cert being replaced, absent for a host signed for the first time.

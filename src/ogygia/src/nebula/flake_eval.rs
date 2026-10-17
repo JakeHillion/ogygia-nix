@@ -1,11 +1,13 @@
 //! Helpers for extracting per-host Nebula state from the flake via `nix eval`.
 //!
-//! Reads `nixosConfigurations.<host>.config.ogygia.nebula.{enable,spec,specHash}`
-//! without ever importing the host certificate (which may be missing on a fresh
+//! Reads `<output>.<host>.config.ogygia.nebula.{enable,spec,specHash}` for
+//! every host in `nixosConfigurations` and every device in
+//! `ogygiaConfigurations`, without ever importing the host certificate (which may be missing on a fresh
 //! checkout — that's exactly when rekey runs). The `nix eval` mechanics live in
 //! [`ogygia_nixutils::Nix`]; this module only owns the `ogygia.nebula` schema.
 
 use anyhow::Result;
+use anyhow::anyhow;
 use ogygia_nixutils::Nix;
 use serde::Deserialize;
 
@@ -25,6 +27,33 @@ pub struct HostSpec {
     pub version: u32,
 }
 
+/// The flake output a host is defined in. Both evaluate the same
+/// `ogygia.nebula` options under `config`, so only the output name differs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Output {
+    /// A NixOS host, which runs Nebula through services.nebula.
+    Nixos,
+    /// A device with no system configuration, defined with
+    /// `mkOgygiaConfiguration`, which runs Nebula itself.
+    Device,
+}
+
+impl Output {
+    fn attr(self) -> &'static str {
+        match self {
+            Output::Nixos => "nixosConfigurations",
+            Output::Device => "ogygiaConfigurations",
+        }
+    }
+}
+
+/// A host to evaluate: its attribute name and the output it lives in.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Host {
+    pub output: Output,
+    pub name: String,
+}
+
 /// Per-host evaluation result. `spec` is `None` when the host has nebula
 /// disabled or hasn't been bootstrapped yet.
 #[derive(Debug)]
@@ -37,13 +66,53 @@ pub struct HostInfo {
     pub validity_secs: u64,
 }
 
-/// List the names of every host in `flake_ref#nixosConfigurations`.
-pub async fn list_hosts(nix: &Nix, flake_ref: &str) -> Result<Vec<String>> {
-    nix.eval_json(
-        &format!("{flake_ref}#nixosConfigurations"),
-        Some("builtins.attrNames"),
-    )
-    .await
+/// List every host in the flake: NixOS hosts first, then devices. A flake
+/// need not define either output.
+pub async fn list_hosts(nix: &Nix, flake_ref: &str) -> Result<Vec<Host>> {
+    #[derive(Deserialize)]
+    struct Raw {
+        nixos: Vec<String>,
+        devices: Vec<String>,
+    }
+
+    // `#.` selects the flake's outputs themselves, so one evaluation can
+    // tolerate a missing output.
+    let raw: Raw = nix
+        .eval_json(
+            &format!("{flake_ref}#."),
+            Some(
+                "o: { nixos = builtins.attrNames (o.nixosConfigurations or { }); \
+                 devices = builtins.attrNames (o.ogygiaConfigurations or { }); }",
+            ),
+        )
+        .await?;
+
+    let nixos = raw.nixos.into_iter().map(|name| Host {
+        output: Output::Nixos,
+        name,
+    });
+    let devices = raw.devices.into_iter().map(|name| Host {
+        output: Output::Device,
+        name,
+    });
+    Ok(nixos.chain(devices).collect())
+}
+
+/// Find `name` among the flake's hosts and devices.
+pub async fn find_host(nix: &Nix, flake_ref: &str, name: &str) -> Result<Host> {
+    let mut matches = list_hosts(nix, flake_ref)
+        .await?
+        .into_iter()
+        .filter(|h| h.name == name);
+    match (matches.next(), matches.next()) {
+        (Some(host), None) => Ok(host),
+        (Some(_), Some(_)) => Err(anyhow!(
+            "{name} is defined in both nixosConfigurations and ogygiaConfigurations"
+        )),
+        (None, _) => Err(anyhow!(
+            "{name} is in neither nixosConfigurations nor ogygiaConfigurations"
+        )),
+    }
 }
 
 /// Evaluate `ogygia.nebula.{enable,specHash,spec}` for a single host.
@@ -52,7 +121,7 @@ pub async fn list_hosts(nix: &Nix, flake_ref: &str) -> Result<Vec<String>> {
 /// `certPath` — importing a missing cert is exactly what rekey exists to
 /// resolve. The host name is quoted as a single attribute-path component,
 /// so FQDN attribute names containing dots work.
-pub async fn host_info(nix: &Nix, flake_ref: &str, host: &str) -> Result<HostInfo> {
+pub async fn host_info(nix: &Nix, flake_ref: &str, host: &Host) -> Result<HostInfo> {
     #[derive(Deserialize)]
     struct Raw {
         enable: bool,
@@ -67,13 +136,17 @@ pub async fn host_info(nix: &Nix, flake_ref: &str, host: &str) -> Result<HostInf
 
     let raw: Raw = nix
         .eval_json(
-            &format!("{flake_ref}#nixosConfigurations.\"{host}\".config.ogygia.nebula"),
+            &format!(
+                "{flake_ref}#{}.\"{}\".config.ogygia.nebula",
+                host.output.attr(),
+                host.name
+            ),
             Some("cfg: { inherit (cfg) enable specHash spec; validitySecs = cfg.validitySecs or null; }"),
         )
         .await?;
 
     Ok(HostInfo {
-        host: host.to_string(),
+        host: host.name.clone(),
         enabled: raw.enable,
         spec_hash: raw.spec_hash,
         spec: raw.spec,

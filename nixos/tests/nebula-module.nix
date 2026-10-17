@@ -1,4 +1,4 @@
-{ pkgs, lib, ogygiaModule }:
+{ pkgs, lib, ogygiaModule, mkOgygiaConfiguration }:
 
 let
   fakeCaCert = pkgs.writeText "ca.crt" "ogygia-test-ca-cert\n";
@@ -15,10 +15,24 @@ let
   };
   expectedSpecHash = builtins.substring 0 32 (builtins.hashString "sha256" (builtins.toJSON expectedSpec));
 
+  # A device defined through mkOgygiaConfiguration rather than nixosSystem,
+  # named by its attribute rather than an FQDN.
+  expectedDeviceSpec = {
+    name = "laptop";
+    ipv4 = "10.42.0.9";
+    subnet = "10.42.0.0/16";
+    pubKey = "fake-laptop-pub-key-pem";
+    groups = [ "laptops" ];
+    inherit caFingerprint;
+    version = 2;
+  };
+  expectedDeviceSpecHash = builtins.substring 0 32 (builtins.hashString "sha256" (builtins.toJSON expectedDeviceSpec));
+
   certDir = pkgs.runCommand "ogygia-nebula-test-fixture" { } ''
     mkdir -p $out
     cp ${fakeCaCert} $out/ca.crt
     echo "fake-cert-${expectedSpecHash}" > $out/${expectedSpecHash}.crt
+    echo "fake-cert-${expectedDeviceSpecHash}" > $out/${expectedDeviceSpecHash}.crt
   '';
 
   sharedTopology = {
@@ -26,6 +40,7 @@ let
     hosts = {
       "lighthouse-1" = { ipv4 = "10.42.0.1"; endpoint = "lh1.public.example.com:4242"; };
       "testhost" = { ipv4 = "10.42.0.5"; };
+      "laptop" = { ipv4 = "10.42.0.9"; };
     };
     lighthouses = [ "lighthouse-1" ];
     relays = [ ];
@@ -111,6 +126,39 @@ let
       })
     ];
   };
+
+  deviceModule = {
+    ogygia.nebula = {
+      pubKey = "fake-laptop-pub-key-pem";
+      groups = [ "laptops" ];
+      inherit certDir;
+      topology = sharedTopology;
+      firewall.inbound = [{ port = "any"; proto = "icmp"; host = "any"; }];
+    };
+  };
+
+  device = mkOgygiaConfiguration {
+    name = "laptop";
+    inherit lib;
+    modules = [ deviceModule ];
+  };
+
+  # Before rekey has signed it, the device names the command that would.
+  unsignedDevice = mkOgygiaConfiguration {
+    name = "laptop";
+    inherit lib;
+    modules = [ deviceModule { ogygia.nebula.groups = [ "unsigned" ]; } ];
+  };
+
+  unenrolledDevice = mkOgygiaConfiguration {
+    name = "stranger";
+    inherit lib;
+    modules = [ deviceModule ];
+  };
+
+  renders = cfg:
+    let r = builtins.tryEval (builtins.deepSeq cfg.config.ogygia.nebula.settings null);
+    in r.success;
 in
 pkgs.runCommand "ogygia-nebula-module"
 {
@@ -137,6 +185,11 @@ pkgs.runCommand "ogygia-nebula-module"
   mergedInbound = builtins.toJSON mergeSystem.config.services.nebula.networks.ogygia.firewall.inbound;
   mergedGroups = builtins.toJSON mergeSystem.config.ogygia.nebula.groups;
   noPubFailedCount = toString (builtins.length (failedAssertions noPubKeySystem));
+  inherit expectedDeviceSpecHash;
+  deviceSpecHash = device.config.ogygia.nebula.specHash;
+  deviceSettings = builtins.toJSON device.config.ogygia.nebula.settings;
+  unsignedDeviceRenders = lib.boolToString (renders unsignedDevice);
+  unenrolledDeviceRenders = lib.boolToString (renders unenrolledDevice);
   noPubFailedFirst =
     let fas = failedAssertions noPubKeySystem;
     in if fas == [ ] then "" else (builtins.head fas).message;
@@ -227,6 +280,30 @@ pkgs.runCommand "ogygia-nebula-module"
     *pubKey*) ;;
     *) echo "expected pubKey-related assertion message, got: $noPubFailedFirst" >&2; exit 1 ;;
   esac
+
+  # The device's spec is the same shape as a NixOS host's, so rekey signs
+  # it the same way.
+  if [ "$deviceSpecHash" != "$expectedDeviceSpecHash" ]; then
+    echo "device specHash mismatch: got '$deviceSpecHash', expected '$expectedDeviceSpecHash'" >&2
+    exit 1
+  fi
+  # Its settings are a complete Nebula config bar the key.
+  echo "$deviceSettings" | jq -e '.pki.ca == "ogygia-test-ca-cert\n"' >/dev/null
+  echo "$deviceSettings" | jq -e --arg h "$expectedDeviceSpecHash" '.pki.cert == "fake-cert-\($h)\n"' >/dev/null
+  echo "$deviceSettings" | jq -e '.pki | has("key") | not' >/dev/null
+  echo "$deviceSettings" | jq -e '.lighthouse == { am_lighthouse: false, hosts: ["10.42.0.1"] }' >/dev/null
+  echo "$deviceSettings" | jq -e '.static_host_map."10.42.0.1" == ["lh1.public.example.com:4242"]' >/dev/null
+  echo "$deviceSettings" | jq -e '.listen.port == 0' >/dev/null
+  echo "$deviceSettings" | jq -e '.firewall.inbound == [{ host: "any", port: "any", proto: "icmp" }]' >/dev/null
+  echo "$deviceSettings" | jq -e '.firewall.outbound == [{ host: "any", port: "any", proto: "any" }]' >/dev/null
+  if [ "$unsignedDeviceRenders" != "false" ]; then
+    echo "a device with no cert for its spec must not render settings" >&2
+    exit 1
+  fi
+  if [ "$unenrolledDeviceRenders" != "false" ]; then
+    echo "a device missing from topology.hosts must not render settings" >&2
+    exit 1
+  fi
 
   mkdir -p $out
   echo "spec_hash=$actualSpecHash" > $out/result

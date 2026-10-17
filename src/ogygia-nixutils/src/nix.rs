@@ -49,6 +49,15 @@ impl Nix {
         })
     }
 
+    /// A handle that passes `args` to every evaluation, such as `--refresh`
+    /// or the experimental features a flake needs.
+    pub fn with_eval_args(args: impl IntoIterator<Item = String>) -> Self {
+        Self {
+            db: Arc::new(OnceCell::new()),
+            cli: Arc::new(OnceLock::from(NixCli::default().with_eval_args(args))),
+        }
+    }
+
     /// The store database, opened on first use and cached for the process.
     async fn db(&self) -> Result<&NixDb> {
         self.db.get_or_try_init(NixDb::open).await

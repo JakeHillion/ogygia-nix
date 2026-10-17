@@ -2293,6 +2293,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "ogygia-macos-nebulad"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "core-foundation",
+ "core-foundation-sys",
+ "libc",
+ "ogygia-nixutils",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "ogygia-nix-eval"
 version = "0.1.0"
 dependencies = [

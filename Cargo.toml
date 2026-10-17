@@ -91,6 +91,10 @@ thiserror = "2"
 # Filesystem watching
 notify = { version = "7", default-features = false, features = ["macos_fsevent"] }
 
+# macOS preferences (the `defaults` system)
+core-foundation = "0.10"
+core-foundation-sys = "0.8"
+
 # Process utilities
 which = "7"
 
