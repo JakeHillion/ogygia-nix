@@ -5,8 +5,10 @@ use std::collections::BTreeMap;
 use crate::eval::Eval;
 use crate::value::Ctx;
 use crate::value::Entry;
+use crate::value::ErrorKind;
 use crate::value::R;
 use crate::value::Value;
+use crate::value::error;
 use crate::value::eval_err;
 
 pub fn has_context<'a>(ev: &Eval<'a>, args: &[Value<'a>]) -> R<'a> {
@@ -99,7 +101,19 @@ pub fn append_context<'a>(ev: &Eval<'a>, args: &[Value<'a>]) -> R<'a> {
         let Some(path) = crate::store::StorePath::parse(key) else {
             return eval_err(format!("context key '{key}' is not a store path"));
         };
+        let valid = ev
+            .ctx
+            .io
+            .is_valid(&path)
+            .map_err(|e| error(ErrorKind::Eval, format!("{e:#}")))?;
+        if !valid {
+            return eval_err(format!(
+                "path '{}' is required, but there is no substituter that can build it",
+                path.as_str()
+            ));
+        }
         let path: &'a str = ev.bump.alloc_str(path.as_str());
+        let is_drv = path.ends_with(".drv");
         let info = ev.force_attrs(e.value)?;
         if let Some(p) = info.get(syms.path)
             && ev.force_bool(p)?
@@ -109,10 +123,21 @@ pub fn append_context<'a>(ev: &Eval<'a>, args: &[Value<'a>]) -> R<'a> {
         if let Some(a) = info.get(ev.ctx.intern("allOutputs"))
             && ev.force_bool(a)?
         {
+            if !is_drv {
+                return eval_err(format!(
+                    "tried to add all-outputs context of \"{path}\", which is not a derivation, to a string"
+                ));
+            }
             ctx.push(Ctx::DrvDeep(path));
         }
         if let Some(outs) = info.get(syms.outputs) {
-            for o in ev.force_list(outs)? {
+            let outs = ev.force_list(outs)?;
+            if !is_drv && !outs.is_empty() {
+                return eval_err(format!(
+                    "tried to add derivation output context of \"{path}\", which is not a derivation, to a string"
+                ));
+            }
+            for o in outs {
                 let o = ev.force_str_no_ctx(*o)?;
                 let output: &'a str = ev.bump.alloc_str(&String::from_utf8_lossy(o));
                 ctx.push(Ctx::Built { drv: path, output });

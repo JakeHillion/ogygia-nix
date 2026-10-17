@@ -380,6 +380,11 @@ impl Io {
         Ok(sp.as_str().to_owned())
     }
 
+    /// Whether the store has `path`, or a mount stands in for it.
+    pub fn is_valid(&self, path: &StorePath) -> Result<bool> {
+        Ok(self.fs.in_mount(path.as_str()) || self.store.accessor(path)?.is_some())
+    }
+
     /// `path` and every store path it refers to, directly or indirectly.
     pub fn closure(&self, path: &str) -> Result<BTreeSet<String>> {
         let mut closure = BTreeSet::new();

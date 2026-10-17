@@ -1,3 +1,7 @@
+let
+  f = builtins.unsafeDiscardStringContext (builtins.toFile "x" "y");
+  dot = builtins.unsafeDiscardStringContext (builtins.toFile ".x" "y");
+in
 map
   (
     k:
@@ -5,12 +9,14 @@ map
       builtins.appendContext "x" {
         ${k} = {
           path = true;
+          allOutputs = false;
+          outputs = [ ];
         };
       }
     )
   )
   [
-    "/nix/store/p1v2hkzib64izpkmp5zr6gn81rrk8pv1-x/"
-    "//nix/store/./p1v2hkzib64izpkmp5zr6gn81rrk8pv1-x/sub/.."
-    "/nix/store/p1v2hkzib64izpkmp5zr6gn81rrk8pv1-.x"
+    "${f}/"
+    "/${builtins.replaceStrings [ "/nix/store/" ] [ "/nix/store/./" ] f}/sub/.."
+    dot
   ]
