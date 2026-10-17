@@ -268,17 +268,39 @@ fn base64_decode(s: &str) -> Option<Vec<u8>> {
     Some(out)
 }
 
-/// Render a digest in one of Nix's hash formats.
-pub fn format_hash(algo: &str, bytes: &[u8], format: &str) -> Result<String> {
+/// One of Nix's hash formats.
+#[derive(Clone, Copy)]
+pub enum HashFormat {
+    Base16,
+    Nix32,
+    Base64,
+    Sri,
+}
+
+impl std::str::FromStr for HashFormat {
+    type Err = anyhow::Error;
+
+    fn from_str(format: &str) -> Result<Self> {
+        Ok(match format {
+            "base16" => Self::Base16,
+            "nix32" | "base32" => Self::Nix32,
+            "base64" => Self::Base64,
+            "sri" => Self::Sri,
+            _ => bail!("unknown hash format '{format}'"),
+        })
+    }
+}
+
+/// Render a digest of `algo` in `format`.
+pub fn format_hash(algo: &str, bytes: &[u8], format: HashFormat) -> String {
     use base64::Engine;
     let b64 = base64::engine::general_purpose::STANDARD;
-    Ok(match format {
-        "base16" => hex::encode(bytes),
-        "nix32" | "base32" => base32_encode(bytes),
-        "base64" => b64.encode(bytes),
-        "sri" => format!("{algo}-{}", b64.encode(bytes)),
-        _ => bail!("unknown hash format '{format}'"),
-    })
+    match format {
+        HashFormat::Base16 => hex::encode(bytes),
+        HashFormat::Nix32 => base32_encode(bytes),
+        HashFormat::Base64 => b64.encode(bytes),
+        HashFormat::Sri => format!("{algo}-{}", b64.encode(bytes)),
+    }
 }
 
 #[cfg(test)]

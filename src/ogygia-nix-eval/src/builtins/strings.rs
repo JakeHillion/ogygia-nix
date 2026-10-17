@@ -840,12 +840,19 @@ pub fn convert_hash<'a>(ev: &Eval<'a>, args: &[Value<'a>]) -> R<'a> {
     let Some(hash) = get("hash")? else {
         return eval_err("attribute 'hash' missing in a call to 'convertHash'");
     };
+    let algo = get("hashAlgo")?;
+    if let Some(a) = &algo
+        && crate::store::hash_size(a).is_none()
+    {
+        return eval_err(format!("unknown hash algorithm '{a}'"));
+    }
     let Some(format) = get("toHashFormat")? else {
         return eval_err("attribute 'toHashFormat' missing in a call to 'convertHash'");
     };
-    let algo = get("hashAlgo")?;
-    let result = crate::store::parse_hash(&hash, algo.as_deref())
-        .and_then(|(algo, bytes)| crate::store::format_hash(&algo, &bytes, &format));
+    let result = format.parse().and_then(|format| {
+        let (algo, bytes) = crate::store::parse_hash(&hash, algo.as_deref())?;
+        Ok(crate::store::format_hash(&algo, &bytes, format))
+    });
     match result {
         Ok(s) => Ok(ev.string(&s)),
         Err(e) => eval_err(format!("{e:#}")),
