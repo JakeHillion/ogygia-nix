@@ -18,24 +18,13 @@ fn write_str(w: &mut impl Write, s: &[u8]) -> std::io::Result<()> {
     w.write_all(&[0u8; 8][..pad])
 }
 
-/// Write the NAR serialisation of `path` in `acc`, including each directory
-/// entry only if `keep(entry path, type)` accepts it.
-pub fn dump(
-    w: &mut impl Write,
-    acc: &dyn Accessor,
-    path: &str,
-    keep: &mut dyn FnMut(&str, FileType) -> Result<bool>,
-) -> Result<()> {
+/// Write the NAR serialisation of `path` in `acc`.
+pub fn dump(w: &mut impl Write, acc: &dyn Accessor, path: &str) -> Result<()> {
     write_str(w, b"nix-archive-1")?;
-    dump_node(w, acc, path, keep)
+    dump_node(w, acc, path)
 }
 
-fn dump_node(
-    w: &mut impl Write,
-    acc: &dyn Accessor,
-    path: &str,
-    keep: &mut dyn FnMut(&str, FileType) -> Result<bool>,
-) -> Result<()> {
+fn dump_node(w: &mut impl Write, acc: &dyn Accessor, path: &str) -> Result<()> {
     let Some(ft) = acc.file_type(path) else {
         bail!("path '{path}' does not exist");
     };
@@ -55,17 +44,14 @@ fn dump_node(
             let entries = acc
                 .read_dir(path)
                 .with_context(|| format!("reading directory '{path}'"))?;
-            for (name, ty) in entries {
-                let child = format!("{}/{name}", path.trim_end_matches('/'));
-                if !keep(&child, ty)? {
-                    continue;
-                }
+            for (name, _) in entries {
+                let child = crate::path::join(path, &name);
                 write_str(w, b"entry")?;
                 write_str(w, b"(")?;
                 write_str(w, b"name")?;
                 write_str(w, name.as_bytes())?;
                 write_str(w, b"node")?;
-                dump_node(w, acc, &child, keep)?;
+                dump_node(w, acc, &child)?;
                 write_str(w, b")")?;
             }
         }

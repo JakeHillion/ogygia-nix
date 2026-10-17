@@ -12,6 +12,7 @@ use bumpalo::Bump;
 use crate::builtins;
 use crate::compile;
 use crate::compile::CompileError;
+use crate::derivation::Derivation;
 use crate::io::Io;
 use crate::ir::ExprRef;
 use crate::ir::Source;
@@ -37,6 +38,9 @@ pub struct Context {
     pub(crate) match_regexes: RefCell<HashMap<Vec<u8>, Rc<regex::bytes::Regex>>>,
     /// Compiled `builtins.split` patterns by source.
     pub(crate) split_regexes: RefCell<HashMap<Vec<u8>, Rc<builtins::strings::SplitRegex>>>,
+    /// Derivations written to the store, with their modulo hashes, by `.drv`
+    /// path.
+    pub(crate) drvs: RefCell<HashMap<String, (Derivation, [u8; 32])>>,
 }
 
 impl Context {
@@ -61,6 +65,7 @@ impl Context {
             files: RefCell::new(HashMap::new()),
             match_regexes: RefCell::new(HashMap::new()),
             split_regexes: RefCell::new(HashMap::new()),
+            drvs: RefCell::new(HashMap::new()),
         }
     }
 
