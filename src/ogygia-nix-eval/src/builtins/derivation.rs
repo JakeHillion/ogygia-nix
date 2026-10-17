@@ -122,8 +122,8 @@ pub fn derivation_strict<'a>(ev: &Eval<'a>, args: &[Value<'a>]) -> R<'a> {
     let mut set_outputs = |list: Vec<String>| -> R<'a, ()> {
         let mut seen = BTreeSet::new();
         for o in &list {
-            if o == "drv" {
-                return eval_err("invalid derivation output name 'drv'");
+            if o == "drvPath" {
+                return eval_err("invalid derivation output name 'drvPath'");
             }
             if !seen.insert(o.clone()) {
                 return eval_err(format!("duplicate derivation output '{o}'"));
