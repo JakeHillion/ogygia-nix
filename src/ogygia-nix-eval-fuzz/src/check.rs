@@ -478,6 +478,22 @@ mod tests {
     }
 
     #[test]
+    fn drv_path_context_takes_the_closure() {
+        assert_eq!(
+            outcome(
+                r#"let
+                  b = builtins.toFile "b" "b";
+                  x = derivation { name = "x"; system = "s"; builder = "/bin/sh";
+                    src = builtins.toFile "a" "${b}"; outputs = [ "out" "dev" ]; };
+                  y = derivation { name = "y"; system = "s"; builder = "/bin/sh"; c = x.dev; };
+                  f = c: derivation { name = "d"; system = "s"; builder = "/bin/sh"; inherit c; };
+                in map (d: { inherit (d) drvPath outPath; }) [ (f x.drvPath) (f y.drvPath) ]"#
+            ),
+            "values"
+        );
+    }
+
+    #[test]
     fn both_reject_parse() {
         assert_eq!(outcome("1 +"), "parse-rejected");
         assert_eq!(outcome("undefined"), "parse-rejected");

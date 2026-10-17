@@ -225,12 +225,16 @@ pub fn derivation_strict<'a>(ev: &Eval<'a>, args: &[Value<'a>]) -> R<'a> {
                     .insert(output.to_owned());
             }
             Ctx::DrvDeep(d) => {
-                drv.input_srcs.insert(d.to_owned());
-                if let Some((input, _)) = ev.ctx.drvs.borrow().get(d) {
-                    drv.input_drvs
-                        .entry(d.to_owned())
-                        .or_default()
-                        .extend(input.outputs.keys().cloned());
+                let closure =
+                    (ev.ctx.io.closure(d)).map_err(|e| error(ErrorKind::Eval, format!("{e:#}")))?;
+                for p in closure {
+                    if let Some((input, _)) = ev.ctx.drvs.borrow().get(&p) {
+                        drv.input_drvs
+                            .entry(p.clone())
+                            .or_default()
+                            .extend(input.outputs.keys().cloned());
+                    }
+                    drv.input_srcs.insert(p);
                 }
             }
         }
