@@ -188,12 +188,17 @@ fn intern_names(ctx: &Context, node: &rnix::SyntaxNode) {
     };
     match node.kind() {
         NODE_IDENT => intern_ident(node),
-        NODE_STRING
+        NODE_STRING | NODE_DYNAMIC
             if node
                 .parent()
                 .is_some_and(|p| matches!(p.kind(), NODE_ATTRPATH | NODE_INHERIT)) =>
         {
-            match ast::Str::cast(node.clone()).and_then(|s| static_str(&s)) {
+            let lit = match ast::Attr::cast(node.clone()) {
+                Some(ast::Attr::Str(s)) => static_str(&s),
+                Some(ast::Attr::Dynamic(d)) => d.expr().and_then(|e| literal_name(&e)),
+                _ => None,
+            };
+            match lit {
                 Some(lit) => {
                     ctx.intern(&lit);
                 }
@@ -225,6 +230,20 @@ fn intern_names(ctx: &Context, node: &rnix::SyntaxNode) {
             name.iter().for_each(intern_ident);
         }
         _ => node.children().for_each(|c| intern_names(ctx, &c)),
+    }
+}
+
+/// The name of a `${...}` attribute that Nix treats as static: a string
+/// literal such as `${"lit"}`, `${(f:o)}` or `${''lit''}`.
+fn literal_name(e: &ast::Expr) -> Option<String> {
+    match e {
+        ast::Expr::Paren(p) => literal_name(&p.expr()?),
+        ast::Expr::Str(s) => static_str(s),
+        ast::Expr::Literal(l) => match l.kind() {
+            ast::LiteralKind::Uri(u) => Some(u.syntax().text().to_owned()),
+            _ => None,
+        },
+        _ => None,
     }
 }
 
@@ -1072,21 +1091,7 @@ impl<'a> Compiler<'a> {
             },
             ast::Attr::Dynamic(d) => {
                 let inner = child(d.expr())?;
-                // A string literal such as `${"lit"}`, `${(f:o)}` or
-                // `${''lit''}` is a static name.
-                let mut lit = inner.clone();
-                while let ast::Expr::Paren(p) = &lit {
-                    lit = child(p.expr())?;
-                }
-                let name = match &lit {
-                    ast::Expr::Str(s) => static_str(s),
-                    ast::Expr::Literal(l) => match l.kind() {
-                        ast::LiteralKind::Uri(u) => Some(u.syntax().text().to_owned()),
-                        _ => None,
-                    },
-                    _ => None,
-                };
-                match name {
+                match literal_name(&inner) {
                     Some(name) => AttrName::Static(self.ctx.intern(&name)),
                     None => AttrName::Dynamic(inner),
                 }
