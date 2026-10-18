@@ -14,4 +14,5 @@ pub use findings::recheck;
 pub use findings::record;
 pub use mutate::crossover;
 pub use mutate::mutate;
+pub use stats::Summary;
 pub use stats::count;
