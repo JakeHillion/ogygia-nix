@@ -90,21 +90,26 @@ pub fn hash_file<'a>(ev: &Eval<'a>, args: &[Value<'a>]) -> R<'a> {
 }
 
 pub fn find_file<'a>(ev: &Eval<'a>, args: &[Value<'a>]) -> R<'a> {
-    let search = ev.force_list(args[0])?;
+    let syms = &ev.ctx.syms;
+    let search = ev
+        .force_list(args[0])?
+        .iter()
+        .map(|entry| {
+            let entry = ev.force_attrs(*entry)?;
+            let prefix = match entry.get(syms.prefix) {
+                Some(p) => String::from_utf8_lossy(ev.force_str_no_ctx(p)?).into_owned(),
+                None => String::new(),
+            };
+            let Some(path) = entry.get(syms.path) else {
+                return eval_err("attribute 'path' missing in a search path entry");
+            };
+            let (path, _) = ev.coerce_to_string(path, Coerce::PLAIN)?;
+            Ok((prefix, String::from_utf8_lossy(&path).into_owned()))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
     let name = ev.force_str_no_ctx(args[1])?;
     let name = String::from_utf8_lossy(name).into_owned();
-    let syms = &ev.ctx.syms;
-    for entry in search {
-        let entry = ev.force_attrs(*entry)?;
-        let prefix = match entry.get(syms.prefix) {
-            Some(p) => String::from_utf8_lossy(ev.force_str_no_ctx(p)?).into_owned(),
-            None => String::new(),
-        };
-        let Some(path) = entry.get(syms.path) else {
-            return eval_err("attribute 'path' missing in a search path entry");
-        };
-        let (path, _) = ev.coerce_to_string(path, Coerce::PLAIN)?;
-        let path = String::from_utf8_lossy(&path).into_owned();
+    for (prefix, path) in search {
         let rest = if prefix.is_empty() {
             Some(name.as_str())
         } else if name == prefix {
