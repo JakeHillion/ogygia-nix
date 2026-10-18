@@ -129,9 +129,11 @@ fn fuzz(args: Vec<String>) -> ExitCode {
 }
 
 fn recheck(findings: &Path) -> bool {
-    match ogygia_nix_eval_fuzz::recheck(findings, |src| {
-        ogygia_nix_eval_fuzz::check(src, Budget::Unlimited)
-    }) {
+    match ogygia_nix_eval_fuzz::recheck(
+        findings,
+        |src| ogygia_nix_eval_fuzz::check(src, Budget::Unlimited),
+        |line| report!("{line}"),
+    ) {
         Ok(r) => {
             report!(
                 "rechecked findings: {} kept, {} removed, {} inconclusive",
