@@ -7,8 +7,11 @@ use std::rc::Rc;
 
 use anyhow::Result;
 use anyhow::bail;
+use md5::Md5;
+use sha1::Sha1;
 use sha2::Digest;
 use sha2::Sha256;
+use sha2::Sha512;
 
 pub use self::memory::MemoryStore;
 use crate::accessor::Accessor;
@@ -102,8 +105,8 @@ pub fn text_path(contents: &[u8], name: &str, refs: &[&str]) -> String {
 }
 
 /// The path of a fixed-output derivation's output.
-pub fn fixed_output_path(recursive: bool, algo: &str, hash: &[u8], name: &str) -> String {
-    if recursive && algo == "sha256" {
+pub fn fixed_output_path(recursive: bool, algo: HashAlgo, hash: &[u8], name: &str) -> String {
+    if recursive && algo == HashAlgo::Sha256 {
         return make_store_path("source", hash, name);
     }
     let inner = format!(
@@ -189,41 +192,91 @@ pub trait Store {
     fn add_source(&self, name: &str, tree: Rc<dyn Accessor>) -> Result<StorePath>;
 }
 
-/// Digest size in bytes of a hash algorithm Nix supports.
-pub fn hash_size(algo: &str) -> Option<usize> {
-    Some(match algo {
-        "md5" => 16,
-        "sha1" => 20,
-        "sha256" => 32,
-        "sha512" => 64,
-        _ => return None,
-    })
+/// A hash algorithm Nix supports.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum HashAlgo {
+    Md5,
+    Sha1,
+    Sha256,
+    Sha512,
+}
+
+impl HashAlgo {
+    /// Digest size in bytes.
+    pub fn size(self) -> usize {
+        match self {
+            Self::Md5 => 16,
+            Self::Sha1 => 20,
+            Self::Sha256 => 32,
+            Self::Sha512 => 64,
+        }
+    }
+
+    pub fn digest(self, data: &[u8]) -> Vec<u8> {
+        match self {
+            Self::Md5 => Md5::digest(data).to_vec(),
+            Self::Sha1 => Sha1::digest(data).to_vec(),
+            Self::Sha256 => Sha256::digest(data).to_vec(),
+            Self::Sha512 => Sha512::digest(data).to_vec(),
+        }
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Md5 => "md5",
+            Self::Sha1 => "sha1",
+            Self::Sha256 => "sha256",
+            Self::Sha512 => "sha512",
+        }
+    }
+}
+
+impl std::str::FromStr for HashAlgo {
+    type Err = anyhow::Error;
+
+    fn from_str(algo: &str) -> Result<Self> {
+        Ok(match algo {
+            "md5" => Self::Md5,
+            "sha1" => Self::Sha1,
+            "sha256" => Self::Sha256,
+            "sha512" => Self::Sha512,
+            _ => bail!("unknown hash algorithm '{algo}'"),
+        })
+    }
+}
+
+impl std::fmt::Display for HashAlgo {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.name())
+    }
 }
 
 /// Parse a hash in any format Nix accepts: `<algo>:<hash>`, SRI
 /// (`<algo>-<base64>`), or base16, Nix base-32 or base64 of a digest of
 /// `algo`. A string containing `:` or `-` is always taken to name its
 /// algorithm before the first one. Returns the algorithm and the digest.
-pub fn parse_hash(s: &str, algo: Option<&str>) -> Result<(String, Vec<u8>)> {
+pub fn parse_hash(s: &str, algo: Option<&str>) -> Result<(HashAlgo, Vec<u8>)> {
     let prefix = match s.split_once(':') {
         Some((a, rest)) => Some((a, rest, false)),
         None => s.split_once('-').map(|(a, rest)| (a, rest, true)),
     };
     let (algo, s, sri) = match (prefix, algo) {
-        (Some((a, ..)), _) if hash_size(a).is_none() => bail!("unknown hash algorithm '{a}'"),
-        (Some((a, ..)), Some(expected)) if a != expected => {
-            bail!("hash '{s}' should have type '{expected}'")
+        (Some((a, rest, sri)), expected) => {
+            let a: HashAlgo = a.parse()?;
+            if let Some(expected) = expected
+                && a.name() != expected
+            {
+                bail!("hash '{s}' should have type '{expected}'");
+            }
+            (a, rest, sri)
         }
-        (Some(prefix), _) => prefix,
-        (None, Some(a)) => (a, s, false),
+        (None, Some(a)) => (a.parse()?, s, false),
         (None, None) => bail!("hash '{s}' does not include a type"),
     };
-    let Some(size) = hash_size(algo) else {
-        bail!("unknown hash algorithm '{algo}'");
-    };
+    let size = algo.size();
     if sri {
         return match base64_decode(s) {
-            Some(bytes) if bytes.len() == size => Ok((algo.to_owned(), bytes)),
+            Some(bytes) if bytes.len() == size => Ok((algo, bytes)),
             _ => bail!("invalid SRI hash '{s}'"),
         };
     }
@@ -237,7 +290,7 @@ pub fn parse_hash(s: &str, algo: Option<&str>) -> Result<(String, Vec<u8>)> {
         None
     };
     match bytes {
-        Some(b) if b.len() == size => Ok((algo.to_owned(), b)),
+        Some(b) if b.len() == size => Ok((algo, b)),
         _ => bail!("invalid hash '{s}' for algorithm '{algo}'"),
     }
 }
@@ -292,7 +345,7 @@ impl std::str::FromStr for HashFormat {
 }
 
 /// Render a digest of `algo` in `format`.
-pub fn format_hash(algo: &str, bytes: &[u8], format: HashFormat) -> String {
+pub fn format_hash(algo: HashAlgo, bytes: &[u8], format: HashFormat) -> String {
     use base64::Engine;
     let b64 = base64::engine::general_purpose::STANDARD;
     match format {
