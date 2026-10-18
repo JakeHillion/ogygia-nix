@@ -75,6 +75,10 @@ impl<'a> Writer<'a> {
     }
 
     fn value(&mut self, ev: &Eval<'a>, v: Value<'a>) -> R<'a, ()> {
+        ev.deeper(|| self.level(ev, v))
+    }
+
+    fn level(&mut self, ev: &Eval<'a>, v: Value<'a>) -> R<'a, ()> {
         match ev.force(v)? {
             Value::Int(i) => self.empty("int", &[("value", i.to_string().as_bytes())]),
             Value::Bool(b) => self.empty("bool", &[("value", if b { b"true" } else { b"false" })]),

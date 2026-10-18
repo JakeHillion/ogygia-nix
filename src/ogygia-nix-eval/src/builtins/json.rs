@@ -73,6 +73,15 @@ pub fn write_json<'a>(
     out: &mut Vec<u8>,
     ctx: &mut Vec<Ctx<'a>>,
 ) -> R<'a, ()> {
+    ev.deeper(|| write_json_level(ev, v, out, ctx))
+}
+
+fn write_json_level<'a>(
+    ev: &Eval<'a>,
+    v: Value<'a>,
+    out: &mut Vec<u8>,
+    ctx: &mut Vec<Ctx<'a>>,
+) -> R<'a, ()> {
     let v = ev.force(v)?;
     match v {
         Value::Null => out.extend_from_slice(b"null"),
@@ -91,13 +100,13 @@ pub fn write_json<'a>(
         Value::Attrs(a) => {
             let s = &ev.ctx.syms;
             if a.get(s.to_string).is_some() {
-                let (st, c) = ev.coerce_to_string(v, Coerce::PLAIN)?;
+                let mut st = Vec::new();
+                ev.coerce_level(v, Coerce::PLAIN, &mut st, ctx)?;
                 json_string(out, &st);
-                ctx.extend(c);
                 return Ok(());
             }
             if let Some(p) = a.get(s.out_path) {
-                return write_json(ev, p, out, ctx);
+                return write_json_level(ev, p, out, ctx);
             }
             out.push(b'{');
             for (i, e) in a.sorted(ev.ctx).iter().enumerate() {

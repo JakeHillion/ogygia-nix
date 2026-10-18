@@ -186,7 +186,12 @@ pub fn sort<'a>(ev: &Eval<'a>, args: &[Value<'a>]) -> R<'a> {
     if items.len() == 1 {
         return Ok(ev.list(&items));
     }
+    // Nix compares directly, without a call, when the comparator is `lessThan`.
+    let direct = matches!(cmp, Value::PrimOp(op) if op.name == "lessThan");
     let less = |a: Value<'a>, b: Value<'a>| -> R<'a, bool> {
+        if direct {
+            return ev.less_than(a, b);
+        }
         let g = ev.call(cmp, a)?;
         ev.force_bool(ev.call(g, b)?)
     };

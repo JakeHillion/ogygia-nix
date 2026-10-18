@@ -101,6 +101,10 @@ pub fn print_strict<'a>(ev: &Eval<'a>, v: Value<'a>) -> R<'a, Vec<u8>> {
 }
 
 fn print_value<'a>(ev: &Eval<'a>, v: Value<'a>, out: &mut Vec<u8>) -> R<'a, ()> {
+    ev.deeper(|| print_level(ev, v, out))
+}
+
+fn print_level<'a>(ev: &Eval<'a>, v: Value<'a>, out: &mut Vec<u8>) -> R<'a, ()> {
     let v = ev.force(v)?;
     match v {
         Value::Null => out.extend_from_slice(b"null"),
