@@ -34,22 +34,37 @@ pub fn json_string(out: &mut Vec<u8>, s: &[u8]) {
 }
 
 /// A float the way Nix's JSON writer prints it: the shortest representation
-/// that round-trips, always with a fraction or exponent.
+/// that round-trips, always with a fraction or exponent. Values from 1e-4 up
+/// to but excluding 1e15 are in fixed notation, others in exponent notation
+/// such as `1.5e+15` or `1e-05`.
 pub fn json_float(f: f64) -> String {
     if !f.is_finite() {
         return "null".to_owned();
     }
-    let s = format!("{f:?}");
-    // Rust prints `1e20` as `1e20`; JSON writers print `1e+20`.
-    if let Some((m, e)) = s.split_once('e') {
-        let (sign, digits) = match e.strip_prefix('-') {
-            Some(d) => ('-', d),
-            None => ('+', e),
-        };
-        let m = m.strip_suffix(".0").unwrap_or(m);
-        return format!("{m}e{sign}{digits:0>2}");
+    let sign = if f.is_sign_negative() { "-" } else { "" };
+    let s = format!("{:e}", f.abs());
+    let (m, e) = s.split_once('e').expect("LowerExp has an exponent");
+    let e: i32 = e.parse().expect("LowerExp exponent is an integer");
+    let digits = m.replace('.', "");
+    // The decimal point goes after `point` digits of `digits`.
+    let point = e + 1;
+    if !(-3..=15).contains(&point) {
+        let (first, rest) = digits.split_at(1);
+        let dot = if rest.is_empty() { "" } else { "." };
+        let esign = if e < 0 { '-' } else { '+' };
+        return format!("{sign}{first}{dot}{rest}e{esign}{:02}", e.unsigned_abs());
     }
-    s
+    let len = digits.len() as i32;
+    if point <= 0 {
+        let zeros = "0".repeat(point.unsigned_abs() as usize);
+        format!("{sign}0.{zeros}{digits}")
+    } else if point >= len {
+        let zeros = "0".repeat((point - len) as usize);
+        format!("{sign}{digits}{zeros}.0")
+    } else {
+        let (int, frac) = digits.split_at(point as usize);
+        format!("{sign}{int}.{frac}")
+    }
 }
 
 pub fn write_json<'a>(
