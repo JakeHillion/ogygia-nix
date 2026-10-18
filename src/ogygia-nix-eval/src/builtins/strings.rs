@@ -3,20 +3,16 @@
 use std::cmp::Ordering;
 use std::rc::Rc;
 
-use md5::Md5;
 use regex_automata::Anchored;
 use regex_automata::Input;
 use regex_automata::MatchKind;
 use regex_automata::meta;
 use regex_automata::util::syntax;
-use sha1::Sha1;
-use sha2::Digest;
-use sha2::Sha256;
-use sha2::Sha512;
 
 use crate::eval::Coerce;
 use crate::eval::Eval;
 use crate::eval::Feature;
+use crate::store::HashAlgo;
 use crate::value::R;
 use crate::value::Value;
 use crate::value::eval_err;
@@ -87,28 +83,17 @@ pub fn dir_of<'a>(ev: &Eval<'a>, args: &[Value<'a>]) -> R<'a> {
     }
 }
 
-pub type HashFn = fn(&[u8]) -> Vec<u8>;
-
-/// The hash function named `algo`.
-pub fn hash_fn<'a>(algo: &[u8]) -> R<'a, HashFn> {
-    Ok(match algo {
-        b"md5" => |d| Md5::digest(d).to_vec(),
-        b"sha1" => |d| Sha1::digest(d).to_vec(),
-        b"sha256" => |d| Sha256::digest(d).to_vec(),
-        b"sha512" => |d| Sha512::digest(d).to_vec(),
-        _ => {
-            return eval_err(format!(
-                "unknown hash algorithm '{}'",
-                String::from_utf8_lossy(algo)
-            ));
-        }
-    })
+/// The hash algorithm named `algo`.
+pub fn hash_algo<'a>(algo: &[u8]) -> R<'a, HashAlgo> {
+    String::from_utf8_lossy(algo)
+        .parse()
+        .or_else(|e| eval_err(format!("{e:#}")))
 }
 
 pub fn hash_string<'a>(ev: &Eval<'a>, args: &[Value<'a>]) -> R<'a> {
-    let hash = hash_fn(ev.force_str_no_ctx(args[0])?)?;
+    let algo = hash_algo(ev.force_str_no_ctx(args[0])?)?;
     let s = ev.force_str(args[1])?;
-    Ok(ev.string(&hex::encode(hash(s.s))))
+    Ok(ev.string(&hex::encode(algo.digest(s.s))))
 }
 
 pub fn replace_strings<'a>(ev: &Eval<'a>, args: &[Value<'a>]) -> R<'a> {
@@ -840,18 +825,15 @@ pub fn convert_hash<'a>(ev: &Eval<'a>, args: &[Value<'a>]) -> R<'a> {
     let Some(hash) = get("hash")? else {
         return eval_err("attribute 'hash' missing in a call to 'convertHash'");
     };
-    let algo = get("hashAlgo")?;
-    if let Some(a) = &algo
-        && crate::store::hash_size(a).is_none()
-    {
-        return eval_err(format!("unknown hash algorithm '{a}'"));
-    }
+    let algo = get("hashAlgo")?
+        .map(|a| hash_algo(a.as_bytes()))
+        .transpose()?;
     let Some(format) = get("toHashFormat")? else {
         return eval_err("attribute 'toHashFormat' missing in a call to 'convertHash'");
     };
     let result = format.parse().and_then(|format| {
-        let (algo, bytes) = crate::store::parse_hash(&hash, algo.as_deref())?;
-        Ok(crate::store::format_hash(&algo, &bytes, format))
+        let (algo, bytes) = crate::store::parse_hash(&hash, algo.map(HashAlgo::name))?;
+        Ok(crate::store::format_hash(algo, &bytes, format))
     });
     match result {
         Ok(s) => Ok(ev.string(&s)),
