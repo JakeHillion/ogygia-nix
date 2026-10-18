@@ -34,6 +34,7 @@ use crate::value::R;
 use crate::value::Thunk;
 use crate::value::ThunkState;
 use crate::value::Value;
+use crate::value::anyhow_err;
 use crate::value::error;
 use crate::value::eval_err;
 
@@ -1262,11 +1263,7 @@ impl<'a> Eval<'a> {
     }
 
     pub fn copy_path_to_store(&self, p: &str) -> R<'a, &'a str> {
-        let sp = self
-            .ctx
-            .io
-            .add_path_to_store(p)
-            .map_err(|e| error(ErrorKind::Eval, format!("{e:#}")))?;
+        let sp = self.ctx.io.add_path_to_store(p).map_err(anyhow_err)?;
         Ok(self.bump.alloc_str(&sp))
     }
 
@@ -1275,11 +1272,7 @@ impl<'a> Eval<'a> {
     /// Evaluate the file at `path` (a directory means its `default.nix`),
     /// sharing the result with every other import of it in this session.
     pub fn import(&self, path: &str) -> R<'a> {
-        let path = self
-            .ctx
-            .io
-            .resolve_import(path)
-            .map_err(|e| error(ErrorKind::Eval, format!("{e:#}")))?;
+        let path = self.ctx.io.resolve_import(path).map_err(anyhow_err)?;
         let cached = self.import_cache.borrow().get(&path).copied();
         if let Some(v) = cached {
             return self.force(v);
@@ -1287,7 +1280,7 @@ impl<'a> Eval<'a> {
         let expr = self
             .ctx
             .compile_file(&path, self.settings.pure)
-            .map_err(|e| error(ErrorKind::Eval, format!("{e:#}")))?;
+            .map_err(anyhow_err)?;
         let v = self.thunk(ThunkState::Expr(expr, self.root_env()));
         self.import_cache.borrow_mut().insert(path.clone(), v);
         self.force(v).map_err(|mut e| {
