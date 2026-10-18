@@ -319,7 +319,7 @@ fn check_git_url<'a>(url: &[u8]) -> R<'a, ()> {
     if scheme.len() + 1 == url.len() && !known {
         return eval_err(format!("SCP-style Git URL '{shown}' has an empty path"));
     }
-    if known || url[scheme.len() + 1..].starts_with(b"//") {
+    if known || url.windows(3).any(|w| w == b"://") {
         super::url::check(url).or_else(eval_err)?;
     }
     Ok(())
