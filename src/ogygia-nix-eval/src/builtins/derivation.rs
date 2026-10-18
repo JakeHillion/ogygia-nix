@@ -11,6 +11,7 @@ use crate::derivation::input_addressed_path;
 use crate::derivation::output_path_name;
 use crate::eval::Coerce;
 use crate::eval::Eval;
+use crate::store::HashAlgo;
 use crate::value::Ctx;
 use crate::value::ErrorKind;
 use crate::value::R;
@@ -62,6 +63,17 @@ fn to_str(b: &[u8]) -> String {
     String::from_utf8_lossy(b).into_owned()
 }
 
+/// The algorithm an `outputHashAlgo` value names, or `None` for a value that
+/// names no algorithm, which is ignored.
+fn parse_hash_algo<'a>(algo: &str) -> R<'a, Option<HashAlgo>> {
+    if algo == "blake3" {
+        return eval_err(
+            "experimental Nix feature 'blake3-hashes' is disabled; add '--extra-experimental-features blake3-hashes' to enable it",
+        );
+    }
+    Ok(algo.parse().ok())
+}
+
 /// Whether an `outputHashMode` value hashes recursively (NAR) rather than flat.
 fn parse_hash_mode<'a>(mode: &str, name: &str) -> R<'a, bool> {
     match mode {
@@ -109,7 +121,7 @@ pub fn derivation_strict<'a>(ev: &Eval<'a>, args: &[Value<'a>]) -> R<'a> {
     };
     let mut ctx: Vec<Ctx<'a>> = Vec::new();
     let mut output_hash: Option<String> = None;
-    let mut output_hash_algo: Option<String> = None;
+    let mut output_hash_algo: Option<HashAlgo> = None;
     let mut recursive = false;
     let mut outputs: Vec<String> = vec!["out".to_owned()];
     let mut json = Vec::new();
@@ -167,7 +179,9 @@ pub fn derivation_strict<'a>(ev: &Eval<'a>, args: &[Value<'a>]) -> R<'a> {
                 "builder" => drv.builder = ev.force_str(e.value)?.s.to_vec(),
                 "system" => drv.platform = ev.force_str(e.value)?.s.to_vec(),
                 "outputHash" => output_hash = Some(to_str(ev.force_str(e.value)?.s)),
-                "outputHashAlgo" => output_hash_algo = Some(to_str(ev.force_str(e.value)?.s)),
+                "outputHashAlgo" => {
+                    output_hash_algo = parse_hash_algo(&to_str(ev.force_str(e.value)?.s))?;
+                }
                 "outputHashMode" => {
                     recursive = parse_hash_mode(&to_str(ev.force_str(e.value)?.s), &name)?;
                 }
@@ -189,7 +203,7 @@ pub fn derivation_strict<'a>(ev: &Eval<'a>, args: &[Value<'a>]) -> R<'a> {
             "builder" => drv.builder = s.clone(),
             "system" => drv.platform = s.clone(),
             "outputHash" => output_hash = Some(to_str(&s)),
-            "outputHashAlgo" => output_hash_algo = Some(to_str(&s)),
+            "outputHashAlgo" => output_hash_algo = parse_hash_algo(&to_str(&s))?,
             "outputHashMode" => recursive = parse_hash_mode(&to_str(&s), &name)?,
             "outputs" => set_outputs(
                 to_str(&s)
@@ -251,15 +265,13 @@ pub fn derivation_strict<'a>(ev: &Eval<'a>, args: &[Value<'a>]) -> R<'a> {
         if outputs != ["out"] {
             return eval_err("multiple outputs are not supported in fixed-output derivations");
         }
-        let algo = output_hash_algo.filter(|a| !a.is_empty());
         let (algo, bytes) = if hash.is_empty() {
-            let Some(algo) = algo else {
+            let Some(algo) = output_hash_algo else {
                 return eval_err("empty hash requires explicit hash algorithm");
             };
-            let algo = super::strings::hash_algo(algo.as_bytes())?;
             (algo, vec![0; algo.size()])
         } else {
-            crate::store::parse_hash(&hash, algo.as_deref())
+            crate::store::parse_hash(&hash, output_hash_algo)
                 .map_err(|e| error(ErrorKind::Eval, format!("{e:#}")))?
         };
         let path = crate::store::fixed_output_path(recursive, algo, &bytes, &name);

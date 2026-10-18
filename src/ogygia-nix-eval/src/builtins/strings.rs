@@ -832,7 +832,7 @@ pub fn convert_hash<'a>(ev: &Eval<'a>, args: &[Value<'a>]) -> R<'a> {
         return eval_err("attribute 'toHashFormat' missing in a call to 'convertHash'");
     };
     let result = format.parse().and_then(|format| {
-        let (algo, bytes) = crate::store::parse_hash(&hash, algo.map(HashAlgo::name))?;
+        let (algo, bytes) = crate::store::parse_hash(&hash, algo)?;
         Ok(crate::store::format_hash(algo, &bytes, format))
     });
     match result {

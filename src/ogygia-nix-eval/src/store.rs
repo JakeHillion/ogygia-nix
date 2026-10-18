@@ -255,7 +255,7 @@ impl std::fmt::Display for HashAlgo {
 /// (`<algo>-<base64>`), or base16, Nix base-32 or base64 of a digest of
 /// `algo`. A string containing `:` or `-` is always taken to name its
 /// algorithm before the first one. Returns the algorithm and the digest.
-pub fn parse_hash(s: &str, algo: Option<&str>) -> Result<(HashAlgo, Vec<u8>)> {
+pub fn parse_hash(s: &str, algo: Option<HashAlgo>) -> Result<(HashAlgo, Vec<u8>)> {
     let prefix = match s.split_once(':') {
         Some((a, rest)) => Some((a, rest, false)),
         None => s.split_once('-').map(|(a, rest)| (a, rest, true)),
@@ -264,13 +264,13 @@ pub fn parse_hash(s: &str, algo: Option<&str>) -> Result<(HashAlgo, Vec<u8>)> {
         (Some((a, rest, sri)), expected) => {
             let a: HashAlgo = a.parse()?;
             if let Some(expected) = expected
-                && a.name() != expected
+                && a != expected
             {
                 bail!("hash '{s}' should have type '{expected}'");
             }
             (a, rest, sri)
         }
-        (None, Some(a)) => (a.parse()?, s, false),
+        (None, Some(a)) => (a, s, false),
         (None, None) => bail!("hash '{s}' does not include a type"),
     };
     let size = algo.size();
