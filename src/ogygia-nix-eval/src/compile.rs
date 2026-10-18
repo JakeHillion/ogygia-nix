@@ -314,6 +314,8 @@ fn match_nix_tokens(text: &str) -> (Cow<'_, str>, Vec<u32>) {
 /// applied or used with an operator unparenthesised, but rnix only parses it
 /// where it parses a function. Wraps each in parentheses, and returns the
 /// result with `inserted` updated to also hold the offsets of the parentheses.
+/// One right after `inherit` is left alone, as Nix rejects it there but
+/// accepts the parenthesised one as the source of an inherit-from.
 fn parenthesise_legacy_lets(text: Cow<'_, str>, inserted: Vec<u32>) -> (Cow<'_, str>, Vec<u32>) {
     let tokens = significant_tokens(&text);
     let mut parens = Vec::new();
@@ -325,6 +327,9 @@ fn parenthesise_legacy_lets(text: Cow<'_, str>, inserted: Vec<u32>) -> (Cow<'_, 
         else {
             continue;
         };
+        if i.checked_sub(1).map(|j| tokens[j].0) == Some(rnix::SyntaxKind::TOKEN_INHERIT) {
+            continue;
+        }
         let mut depth = 0usize;
         let close = tokens[i + 1..].iter().find_map(|&(kind, _, end)| {
             match kind {
