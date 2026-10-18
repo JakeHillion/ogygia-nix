@@ -25,8 +25,11 @@ use crate::value::ThunkState;
 use crate::value::Value;
 
 /// The Nix version this evaluator reports, matching the Nix its equivalence
-/// tests run against.
-pub const NIX_VERSION: &str = "2.35.2";
+/// tests run against when built by the flake.
+pub const NIX_VERSION: &str = match option_env!("OGYGIA_NIX_EVAL_NIX_VERSION") {
+    Some(v) => v,
+    None => "2.36.0pre",
+};
 
 /// Builtins that are also in the global scope without the `__` prefix.
 const GLOBAL: &[&str] = &[
