@@ -111,7 +111,7 @@ fn ip_literal(s: &[u8]) -> bool {
     zone_ok && ipv6(addr)
 }
 
-fn ipv6(s: &[u8]) -> bool {
+pub fn ipv6(s: &[u8]) -> bool {
     match s.windows(2).position(|w| w == b"::") {
         Some(i) => match (groups(&s[..i], false), groups(&s[i + 2..], true)) {
             (Some(head), Some(tail)) => head + tail <= 7,
