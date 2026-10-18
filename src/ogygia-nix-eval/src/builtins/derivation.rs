@@ -16,6 +16,7 @@ use crate::value::Ctx;
 use crate::value::ErrorKind;
 use crate::value::R;
 use crate::value::Value;
+use crate::value::anyhow_err;
 use crate::value::error;
 use crate::value::eval_err;
 
@@ -239,8 +240,7 @@ pub fn derivation_strict<'a>(ev: &Eval<'a>, args: &[Value<'a>]) -> R<'a> {
                     .insert(output.to_owned());
             }
             Ctx::DrvDeep(d) => {
-                let closure =
-                    (ev.ctx.io.closure(d)).map_err(|e| error(ErrorKind::Eval, format!("{e:#}")))?;
+                let closure = ev.ctx.io.closure(d).map_err(anyhow_err)?;
                 for p in closure {
                     if let Some((input, _)) = ev.ctx.drvs.borrow().get(&p) {
                         drv.input_drvs
@@ -271,8 +271,7 @@ pub fn derivation_strict<'a>(ev: &Eval<'a>, args: &[Value<'a>]) -> R<'a> {
             };
             (algo, vec![0; algo.size()])
         } else {
-            crate::store::parse_hash(&hash, output_hash_algo)
-                .map_err(|e| error(ErrorKind::Eval, format!("{e:#}")))?
+            crate::store::parse_hash(&hash, output_hash_algo).map_err(anyhow_err)?
         };
         let path = crate::store::fixed_output_path(recursive, algo, &bytes, &name);
         drv.env.insert("out".to_owned(), path.clone().into_bytes());
@@ -289,12 +288,10 @@ pub fn derivation_strict<'a>(ev: &Eval<'a>, args: &[Value<'a>]) -> R<'a> {
             drv.outputs.insert(o.clone(), Output::default());
             drv.env.insert(o.clone(), Vec::new());
         }
-        let modulo = drv
-            .hash_modulo(&modulo_of)
-            .map_err(|e| error(ErrorKind::Eval, format!("{e:#}")))?;
+        let modulo = drv.hash_modulo(&modulo_of).map_err(anyhow_err)?;
         for o in &outputs {
             if let Err(e) = crate::store::check_name(&output_path_name(&name, o)) {
-                return eval_err(format!("{e:#}"));
+                return Err(anyhow_err(e));
             }
             let path = input_addressed_path(&modulo, &name, o);
             drv.env.insert(o.clone(), path.clone().into_bytes());
@@ -302,12 +299,8 @@ pub fn derivation_strict<'a>(ev: &Eval<'a>, args: &[Value<'a>]) -> R<'a> {
         }
     }
 
-    let modulo = drv
-        .hash_modulo(&modulo_of)
-        .map_err(|e| error(ErrorKind::Eval, format!("{e:#}")))?;
-    let drv_path = drv
-        .write(&ev.ctx.io)
-        .map_err(|e| error(ErrorKind::Eval, format!("{e:#}")))?;
+    let modulo = drv.hash_modulo(&modulo_of).map_err(anyhow_err)?;
+    let drv_path = drv.write(&ev.ctx.io).map_err(anyhow_err)?;
     let drv_path: &'a str = ev.bump.alloc_str(&drv_path);
     let mut entries = vec![ev.entry(
         "drvPath",

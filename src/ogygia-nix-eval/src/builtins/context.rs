@@ -5,10 +5,9 @@ use std::collections::BTreeMap;
 use crate::eval::Eval;
 use crate::value::Ctx;
 use crate::value::Entry;
-use crate::value::ErrorKind;
 use crate::value::R;
 use crate::value::Value;
-use crate::value::error;
+use crate::value::anyhow_err;
 use crate::value::eval_err;
 
 pub fn has_context<'a>(ev: &Eval<'a>, args: &[Value<'a>]) -> R<'a> {
@@ -101,11 +100,7 @@ pub fn append_context<'a>(ev: &Eval<'a>, args: &[Value<'a>]) -> R<'a> {
         let Some(path) = crate::store::StorePath::parse(key) else {
             return eval_err(format!("context key '{key}' is not a store path"));
         };
-        let valid = ev
-            .ctx
-            .io
-            .is_valid(&path)
-            .map_err(|e| error(ErrorKind::Eval, format!("{e:#}")))?;
+        let valid = ev.ctx.io.is_valid(&path).map_err(anyhow_err)?;
         if !valid {
             return eval_err(format!(
                 "path '{}' is required, but there is no substituter that can build it",

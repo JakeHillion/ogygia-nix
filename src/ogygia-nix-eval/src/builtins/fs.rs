@@ -10,12 +10,9 @@ use crate::value::Env;
 use crate::value::ErrorKind;
 use crate::value::R;
 use crate::value::Value;
+use crate::value::anyhow_err;
 use crate::value::error;
 use crate::value::eval_err;
-
-fn io_err(e: anyhow::Error) -> Box<crate::value::EvalError> {
-    error(ErrorKind::Eval, format!("{e:#}"))
-}
 
 pub fn import<'a>(ev: &Eval<'a>, args: &[Value<'a>]) -> R<'a> {
     let path = ev.coerce_to_path(args[0])?;
@@ -25,12 +22,12 @@ pub fn import<'a>(ev: &Eval<'a>, args: &[Value<'a>]) -> R<'a> {
 pub fn scoped_import<'a>(ev: &Eval<'a>, args: &[Value<'a>]) -> R<'a> {
     let path = ev.coerce_to_path(args[1])?;
     let scope = ev.force_attrs(args[0])?;
-    let file = ev.ctx.io.resolve_import(&path).map_err(io_err)?;
+    let file = ev.ctx.io.resolve_import(&path).map_err(anyhow_err)?;
     let names: Vec<_> = scope.entries.iter().map(|e| e.name).collect();
     let expr = ev
         .ctx
         .compile_file_scoped(&file, ev.settings.pure, &names)
-        .map_err(io_err)?;
+        .map_err(anyhow_err)?;
     let slots = ev
         .bump
         .alloc_slice_fill_iter(scope.entries.iter().map(|e| Cell::new(e.value)));
@@ -43,13 +40,13 @@ pub fn scoped_import<'a>(ev: &Eval<'a>, args: &[Value<'a>]) -> R<'a> {
 
 pub fn read_file<'a>(ev: &Eval<'a>, args: &[Value<'a>]) -> R<'a> {
     let path = ev.coerce_to_path(args[0])?;
-    let bytes = ev.ctx.io.read(&path).map_err(io_err)?;
+    let bytes = ev.ctx.io.read(&path).map_err(anyhow_err)?;
     Ok(ev.str_val(&bytes, &[]))
 }
 
 pub fn read_dir<'a>(ev: &Eval<'a>, args: &[Value<'a>]) -> R<'a> {
     let path = ev.coerce_to_path(args[0])?;
-    let entries = ev.ctx.io.read_dir(&path).map_err(io_err)?;
+    let entries = ev.ctx.io.read_dir(&path).map_err(anyhow_err)?;
     Ok(ev.attrs(
         entries
             .into_iter()
@@ -85,7 +82,7 @@ pub fn path_exists<'a>(ev: &Eval<'a>, args: &[Value<'a>]) -> R<'a> {
 pub fn hash_file<'a>(ev: &Eval<'a>, args: &[Value<'a>]) -> R<'a> {
     let algo = super::strings::hash_algo(ev.force_str_no_ctx(args[0])?)?;
     let path = ev.coerce_to_path(args[1])?;
-    let bytes = ev.ctx.io.read(&path).map_err(io_err)?;
+    let bytes = ev.ctx.io.read(&path).map_err(anyhow_err)?;
     Ok(ev.string(&hex::encode(algo.digest(&bytes))))
 }
 
@@ -121,7 +118,7 @@ pub fn find_file<'a>(ev: &Eval<'a>, args: &[Value<'a>]) -> R<'a> {
         ev.ctx
             .io
             .check_access(&crate::path::canon_path(&path))
-            .map_err(io_err)?;
+            .map_err(anyhow_err)?;
         let candidate = if rest.is_empty() {
             path
         } else {
@@ -159,12 +156,12 @@ pub fn to_file<'a>(ev: &Eval<'a>, args: &[Value<'a>]) -> R<'a> {
             }
         }
     }
-    crate::store::check_name(&name).map_err(io_err)?;
+    crate::store::check_name(&name).map_err(anyhow_err)?;
     let path = ev
         .ctx
         .io
         .add_text(&name, contents.s, &refs)
-        .map_err(io_err)?;
+        .map_err(anyhow_err)?;
     let path: &'a str = ev.bump.alloc_str(&path);
     Ok(ev.str_val(path.as_bytes(), &[Ctx::Opaque(path)]))
 }
@@ -203,7 +200,7 @@ fn add_path<'a>(
     let sp = match filter {
         None => io
             .add_filtered_to_store(path, &name, None)
-            .map_err(io_err)?,
+            .map_err(anyhow_err)?,
         Some(f) => {
             let err: Cell<Option<Box<crate::value::EvalError>>> = Cell::new(None);
             let keep = |p: &str, ty: crate::accessor::FileType| -> anyhow::Result<bool> {
@@ -221,7 +218,7 @@ fn add_path<'a>(
             };
             match io.add_filtered_to_store(path, &name, Some(&keep)) {
                 Ok(sp) => sp,
-                Err(e) => return Err(err.take().unwrap_or_else(|| io_err(e))),
+                Err(e) => return Err(err.take().unwrap_or_else(|| anyhow_err(e))),
             }
         }
     };

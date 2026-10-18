@@ -15,6 +15,7 @@ use crate::eval::Feature;
 use crate::store::HashAlgo;
 use crate::value::R;
 use crate::value::Value;
+use crate::value::anyhow_err;
 use crate::value::eval_err;
 
 pub fn to_string<'a>(ev: &Eval<'a>, args: &[Value<'a>]) -> R<'a> {
@@ -85,9 +86,7 @@ pub fn dir_of<'a>(ev: &Eval<'a>, args: &[Value<'a>]) -> R<'a> {
 
 /// The hash algorithm named `algo`.
 pub fn hash_algo<'a>(algo: &[u8]) -> R<'a, HashAlgo> {
-    String::from_utf8_lossy(algo)
-        .parse()
-        .or_else(|e| eval_err(format!("{e:#}")))
+    String::from_utf8_lossy(algo).parse().map_err(anyhow_err)
 }
 
 pub fn hash_string<'a>(ev: &Eval<'a>, args: &[Value<'a>]) -> R<'a> {
@@ -835,8 +834,5 @@ pub fn convert_hash<'a>(ev: &Eval<'a>, args: &[Value<'a>]) -> R<'a> {
         let (algo, bytes) = crate::store::parse_hash(&hash, algo)?;
         Ok(crate::store::format_hash(algo, &bytes, format))
     });
-    match result {
-        Ok(s) => Ok(ev.string(&s)),
-        Err(e) => eval_err(format!("{e:#}")),
-    }
+    result.map(|s| ev.string(&s)).map_err(anyhow_err)
 }

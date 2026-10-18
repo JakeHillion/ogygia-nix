@@ -196,6 +196,11 @@ pub fn eval_err<T>(msg: impl Into<String>) -> Result<T, Box<EvalError>> {
     Err(error(ErrorKind::Eval, msg))
 }
 
+/// An [`ErrorKind::Eval`] error whose message is `e` and its causes.
+pub fn anyhow_err(e: anyhow::Error) -> Box<EvalError> {
+    error(ErrorKind::Eval, format!("{e:#}"))
+}
+
 impl<'a> Value<'a> {
     /// The type name as returned by `builtins.typeOf`.
     pub fn type_of(&self) -> &'static str {
