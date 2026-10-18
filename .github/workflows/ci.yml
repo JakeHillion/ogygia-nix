@@ -86,12 +86,30 @@ jobs:
           # The host paths ogygia-macos declares in __impureHostDeps.
           allowed-impure-host-deps = /System/Library /bin/sh /dev /usr/lib /usr/share/firmlinks /Library/Developer/PrivateFrameworks /Library/Apple/System/Library/PrivateFrameworks /Library/Preferences/com.apple.dt.Xcode.plist /usr/bin/codesign /usr/bin/touch
 
-    # Xcode cannot be downloaded without an Apple ID, so the runner's copy
-    # is added under the hash nixpkgs pins. A runner image whose Xcode
-    # differs from the pin fails here rather than building with it.
+    # The Actions cache stands in for the S3 cache the nix job uses, as a
+    # stop-gap until this job fits into nix-s3-generations. It is readable
+    # only by this repository's workflows, which run on runners that
+    # already hold the same Xcode, so caching Xcode there exposes nothing
+    # new. diff-store also uploads paths that were added or substituted
+    # rather than built, which is how Xcode reaches the store.
+    - name: Cache the Nix store in GitHub Actions
+      uses: DeterminateSystems/magic-nix-cache-action@84c0677f58dcedf3b91f8223ce36a9ea5b3c84b7 # v15
+      with:
+        use-flakehub: false
+        diff-store: true
+        diagnostic-endpoint: ""
+
+    # Xcode cannot be downloaded without an Apple ID, so it comes from the
+    # Actions cache, or else the runner's copy is added under the hash
+    # nixpkgs pins. A runner image whose Xcode differs from the pin fails
+    # here rather than building with it.
     - name: Add Xcode to the Nix store
       run: |
         expected="$(nix eval --raw .#packages.aarch64-darwin.ogygia-macos.xcode.outPath)"
+        if nix-store --realise "$expected" > /dev/null; then
+          exit 0
+        fi
+        echo "Xcode is not cached; adding the runner's copy"
         cp -cR /Applications/Xcode_27.app "$RUNNER_TEMP/Xcode.app"
         added="$(nix-store --add-fixed --recursive sha256 "$RUNNER_TEMP/Xcode.app")"
         rm -rf "$RUNNER_TEMP/Xcode.app"
