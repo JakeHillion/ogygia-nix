@@ -64,17 +64,8 @@ jobs:
   macos-app:
     runs-on: xcode-27
 
-    # Pushes to main release, one at a time so the appcast cannot be
-    # overwritten by an older build finishing late; a newer queued release
-    # replaces an older pending one.
-    concurrency:
-      group: ${{ github.event_name == 'push' && 'macos-app-release' || format('macos-app-{0}', github.ref) }}
-      cancel-in-progress: false
-
     env:
       APP: ogygia-macos/Applications/Ogygia.app
-      ASSETS_BUCKET: ogygia-assets
-      ASSETS_URL: https://assets.ogygia.dev
 
     steps:
     - name: Checkout code
@@ -117,11 +108,95 @@ jobs:
     - name: Check the build number
       run: test "$(plutil -extract CFBundleVersion raw "$APP/Contents/Info.plist")" = "$(git rev-list --count HEAD)"
 
+    # ditto keeps the framework symlinks and code signatures, which the
+    # artifact upload would otherwise flatten.
+    - name: Archive the app for release
+      if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+      run: ditto -c -k --keepParent "$APP" "$RUNNER_TEMP/Ogygia.app.zip"
+
+    - name: Upload the app for release
+      if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+      uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+      with:
+        name: ogygia-macos
+        path: ${{ runner.temp }}/Ogygia.app.zip
+        compression-level: 0
+        retention-days: 1
+
+  macos-app-release:
+    needs: macos-app
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: xcode-27
+
+    # Releases run one at a time; a newer queued release replaces an older
+    # pending one. Builds finish in any order, so the first step also skips
+    # a release older than what the feed already offers.
+    concurrency:
+      group: macos-app-release
+      cancel-in-progress: false
+
+    env:
+      ASSETS_BUCKET: ogygia-assets
+      ASSETS_URL: https://assets.ogygia.dev
+      AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+      AWS_DEFAULT_REGION: auto
+      AWS_ENDPOINT_URL: https://28e45df51086264c6d9cf2b5e6ecc190.r2.cloudflarestorage.com
+      # R2 does not accept every checksum newer AWS clients send by default.
+      AWS_REQUEST_CHECKSUM_CALCULATION: when_required
+      AWS_RESPONSE_CHECKSUM_VALIDATION: when_required
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+
+    - name: Install Nix
+      uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24 # v31
+      with:
+        extra_nix_config: |
+          accept-flake-config = true
+          extra-substituters = https://nixcache.jakehillion.me
+          extra-trusted-public-keys = nixcache.jakehillion.me-1:HQsjYdrcs3ilS/ngtlbTQXU4Xfsm+va5NN7yoK0wKMg=
+          sandbox = true
+
+    - name: Download the app
+      uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
+      with:
+        name: ogygia-macos
+        path: ${{ runner.temp }}
+
+    - name: Unpack the app
+      run: |
+        mkdir -p "$RUNNER_TEMP/release"
+        ditto -x -k "$RUNNER_TEMP/Ogygia.app.zip" "$RUNNER_TEMP/release"
+        rm "$RUNNER_TEMP/Ogygia.app.zip"
+        chmod -R u+w "$RUNNER_TEMP/release/Ogygia.app"
+
+    # Read from the bucket rather than the CDN, whose copy may be stale.
+    # Only one release runs at a time, so nothing can publish between this
+    # check and the upload.
+    - name: Check the feed is older than this build
+      id: feed
+      run: |
+        build="$(plutil -extract CFBundleVersion raw "$RUNNER_TEMP/release/Ogygia.app/Contents/Info.plist")"
+        aws() { nix run --inputs-from . nixpkgs#awscli2 -- "$@"; }
+        if aws s3 cp "s3://$ASSETS_BUCKET/macos/appcast.xml" "$RUNNER_TEMP/published.xml"; then
+          published="$(sed -n 's:.*<sparkle\:version>\([0-9]*\)</sparkle\:version>.*:\1:p' "$RUNNER_TEMP/published.xml")"
+        else
+          published=0
+        fi
+        if [ "${published:-0}" -ge "$build" ]; then
+          echo "::notice::The feed already offers build $published; skipping build $build"
+          echo "release=false" >> "$GITHUB_OUTPUT"
+        else
+          echo "release=true" >> "$GITHUB_OUTPUT"
+        fi
+
     # Everything below runs outside the Nix sandbox: it needs the signing
     # identity, Apple's notary service and the asset bucket, none of which
     # belong in a derivation. It only signs and publishes what Nix built.
     - name: Import the Developer ID certificate
-      if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+      if: steps.feed.outputs.release == 'true'
       env:
         MACOS_CERT_P12_BASE64: ${{ secrets.MACOS_CERT_P12_BASE64 }}
         MACOS_CERT_PASSWORD: ${{ secrets.MACOS_CERT_PASSWORD }}
@@ -140,12 +215,8 @@ jobs:
         security list-keychains -d user -s "$keychain" $(security list-keychains -d user | tr -d '"')
 
     - name: Sign
-      if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+      if: steps.feed.outputs.release == 'true'
       run: |
-        # The store copy is read-only; sign a writable copy.
-        mkdir -p "$RUNNER_TEMP/release"
-        ditto "$APP" "$RUNNER_TEMP/release/Ogygia.app"
-        chmod -R u+w "$RUNNER_TEMP/release/Ogygia.app"
         app="$RUNNER_TEMP/release/Ogygia.app"
 
         if [ -z "$(plutil -extract SUPublicEDKey raw "$app/Contents/Info.plist")" ]; then
@@ -165,7 +236,7 @@ jobs:
         codesign --verify --deep --strict --verbose=2 "$app"
 
     - name: Notarise
-      if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+      if: steps.feed.outputs.release == 'true'
       env:
         ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
         ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
@@ -186,7 +257,7 @@ jobs:
     # own right, so Gatekeeper accepts it when opened, while the app
     # inside keeps its own ticket for when it runs from Applications.
     - name: Make the disk image
-      if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+      if: steps.feed.outputs.release == 'true'
       env:
         ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
         ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
@@ -216,16 +287,9 @@ jobs:
         spctl --assess --type open --context context:primary-signature --verbose=2 "$dmg"
 
     - name: Publish
-      if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+      if: steps.feed.outputs.release == 'true'
       env:
         SPARKLE_ED_PRIVATE_KEY: ${{ secrets.SPARKLE_ED_PRIVATE_KEY }}
-        AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
-        AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
-        AWS_DEFAULT_REGION: auto
-        AWS_ENDPOINT_URL: https://28e45df51086264c6d9cf2b5e6ecc190.r2.cloudflarestorage.com
-        # R2 does not accept every checksum newer AWS clients send by default.
-        AWS_REQUEST_CHECKSUM_CALCULATION: when_required
-        AWS_RESPONSE_CHECKSUM_VALIDATION: when_required
       run: |
         app="$RUNNER_TEMP/release/Ogygia.app"
         plist="$app/Contents/Info.plist"
