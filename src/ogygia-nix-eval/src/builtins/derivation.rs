@@ -168,7 +168,7 @@ pub fn derivation_strict<'a>(ev: &Eval<'a>, args: &[Value<'a>]) -> R<'a> {
             }
             continue;
         }
-        if structured {
+        let s = if structured {
             if !json_first {
                 json.push(b',');
             }
@@ -177,14 +177,8 @@ pub fn derivation_strict<'a>(ev: &Eval<'a>, args: &[Value<'a>]) -> R<'a> {
             json.push(b':');
             super::json::write_json(ev, e.value, &mut json, &mut ctx)?;
             match key {
-                "builder" => drv.builder = ev.force_str(e.value)?.s.to_vec(),
-                "system" => drv.platform = ev.force_str(e.value)?.s.to_vec(),
-                "outputHash" => output_hash = Some(to_str(ev.force_str(e.value)?.s)),
-                "outputHashAlgo" => {
-                    output_hash_algo = parse_hash_algo(&to_str(ev.force_str(e.value)?.s))?;
-                }
-                "outputHashMode" => {
-                    recursive = parse_hash_mode(&to_str(ev.force_str(e.value)?.s), &name)?;
+                "builder" | "system" | "outputHash" | "outputHashAlgo" | "outputHashMode" => {
+                    ev.force_str(e.value)?.s.to_vec()
                 }
                 "outputs" => {
                     let list = ev
@@ -193,28 +187,34 @@ pub fn derivation_strict<'a>(ev: &Eval<'a>, args: &[Value<'a>]) -> R<'a> {
                         .map(|o| Ok(to_str(ev.force_str(*o)?.s)))
                         .collect::<R<'a, Vec<_>>>()?;
                     set_outputs(list)?;
+                    continue;
                 }
-                _ => {}
+                _ => continue,
             }
-            continue;
-        }
-        let (s, c) = ev.coerce_to_string(e.value, more)?;
-        ctx.extend(c);
+        } else {
+            let (s, c) = ev.coerce_to_string(e.value, more)?;
+            ctx.extend(c);
+            if key == "outputs" {
+                set_outputs(
+                    to_str(&s)
+                        .split_ascii_whitespace()
+                        .map(str::to_owned)
+                        .collect(),
+                )?;
+            }
+            s
+        };
         match key {
             "builder" => drv.builder = s.clone(),
             "system" => drv.platform = s.clone(),
             "outputHash" => output_hash = Some(to_str(&s)),
             "outputHashAlgo" => output_hash_algo = parse_hash_algo(&to_str(&s))?,
             "outputHashMode" => recursive = parse_hash_mode(&to_str(&s), &name)?,
-            "outputs" => set_outputs(
-                to_str(&s)
-                    .split_ascii_whitespace()
-                    .map(str::to_owned)
-                    .collect(),
-            )?,
             _ => {}
         }
-        drv.env.insert(key.to_owned(), s);
+        if !structured {
+            drv.env.insert(key.to_owned(), s);
+        }
     }
     if structured {
         json.insert(0, b'{');
