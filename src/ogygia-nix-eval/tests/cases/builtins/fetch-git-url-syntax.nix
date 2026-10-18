@@ -28,4 +28,12 @@ map caught [
   "x:a b//"
   "a_b:x y"
   "git+foo:a b"
+  "[::1]:b"
+  "u@[::ffff:1.2.3.4]:b c"
+  "[::1]:b@c"
+  "a:b@c:"
+  "[x:b"
+  "x[a]:b"
+  "u[@a]:b"
+  "a:[x]"
 ]

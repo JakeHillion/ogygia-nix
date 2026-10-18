@@ -302,25 +302,57 @@ pub fn fetch_git<'a>(ev: &Eval<'a>, args: &[Value<'a>]) -> R<'a> {
     unsupported("fetchGit")
 }
 
-/// Rejects a `fetchGit` URL that is neither an absolute path nor has a
-/// scheme, an SCP-style `host:` with nothing after the colon, and
-/// invalid syntax in a URL that is not SCP-style.
+/// Rejects a `fetchGit` URL that is neither an absolute path, a valid
+/// URL, nor SCP-style `[user@]host:path` with a non-empty path, where a
+/// host in brackets must be an IPv6 address.
 fn check_git_url<'a>(url: &[u8]) -> R<'a, ()> {
     const SCHEMES: &[&[u8]] = &[b"file", b"git", b"ssh", b"http", b"https", b"ftp", b"ftps"];
     if url.first() == Some(&b'/') {
         return Ok(());
     }
     let shown = String::from_utf8_lossy(url);
+    let not_url = || {
+        if super::url::check(&[b"x:", url].concat()).is_ok() {
+            eval_err(format!("'{shown}' doesn't have a scheme"))
+        } else {
+            eval_err(format!("'{shown}' is not a valid URL"))
+        }
+    };
     let colon = url.iter().position(|&c| c == b':');
     let Some(scheme) = colon.map(|i| &url[..i]).filter(|s| !s.contains(&b'/')) else {
-        return eval_err(format!("'{shown}' doesn't have a scheme"));
+        return not_url();
     };
-    let known = SCHEMES.contains(&scheme.strip_prefix(b"git+").unwrap_or(scheme));
-    if scheme.len() + 1 == url.len() && !known {
-        return eval_err(format!("SCP-style Git URL '{shown}' has an empty path"));
+    if SCHEMES.contains(&scheme.strip_prefix(b"git+").unwrap_or(scheme))
+        || url.windows(3).any(|w| w == b"://")
+    {
+        return super::url::check(url).or_else(eval_err);
     }
-    if known || url.windows(3).any(|w| w == b"://") {
-        super::url::check(url).or_else(eval_err)?;
+    // A '[' at the start of the host, closed later by ']', makes the URL
+    // bracketed, which then takes the user up to the last '@' it can.
+    let host_starts = (0..url.len()).filter(|&i| i == 0 || url[i - 1] == b'@');
+    let path = if host_starts
+        .clone()
+        .any(|i| url[i] == b'[' && url[i + 1..].contains(&b']'))
+    {
+        let Some((host, path)) = host_starts.rev().find_map(|i| {
+            let rest = url[i..].strip_prefix(b"[")?;
+            let end = rest.iter().position(|&c| c == b']')?;
+            Some((&rest[..end], rest[end + 1..].strip_prefix(b":")?))
+        }) else {
+            return not_url();
+        };
+        if !super::url::ipv6(host) {
+            return eval_err(format!(
+                "Git SCP bracketed URL is not valid: '{}' is not a valid IPv6 address",
+                String::from_utf8_lossy(host)
+            ));
+        }
+        path
+    } else {
+        &url[scheme.len() + 1..]
+    };
+    if path.is_empty() {
+        return eval_err(format!("SCP-style Git URL '{shown}' has an empty path"));
     }
     Ok(())
 }
