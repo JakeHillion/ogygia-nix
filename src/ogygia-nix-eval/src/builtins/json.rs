@@ -128,8 +128,8 @@ pub fn write_json<'a>(
 }
 
 pub fn from_json<'a>(ev: &Eval<'a>, args: &[Value<'a>]) -> R<'a> {
-    let s = ev.force_str(args[0])?;
-    let Ok(text) = std::str::from_utf8(s.s) else {
+    let s = ev.force_str_no_ctx(args[0])?;
+    let Ok(text) = std::str::from_utf8(s) else {
         return eval_err("JSON parse error: invalid UTF-8");
     };
     JsonParser {
@@ -393,8 +393,8 @@ impl JsonParser<'_> {
 }
 
 pub fn from_toml<'a>(ev: &Eval<'a>, args: &[Value<'a>]) -> R<'a> {
-    let s = ev.force_str(args[0])?;
-    let text = String::from_utf8_lossy(s.s);
+    let s = ev.force_str_no_ctx(args[0])?;
+    let text = String::from_utf8_lossy(s);
     if let Some(e) = toml_1_1_syntax(&text) {
         return eval_err(format!("while parsing TOML: {e}"));
     }
