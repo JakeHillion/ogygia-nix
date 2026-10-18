@@ -469,15 +469,18 @@ impl<'a> Eval<'a> {
                 default,
                 pos,
             } => {
+                // Each name is evaluated before the value it selects from is
+                // forced.
                 let mut v = self.eval(expr, env)?;
                 for key in path.iter() {
                     let name = self.attr_key(key, env)?;
+                    v = self.force(v)?;
                     let found = match v {
                         Value::Attrs(a) => a.get(name),
                         _ => None,
                     };
                     match found {
-                        Some(x) => v = self.force(x)?,
+                        Some(x) => v = x,
                         None => {
                             if let Some(d) = default {
                                 return self.eval(d, env);
@@ -496,15 +499,17 @@ impl<'a> Eval<'a> {
                         }
                     }
                 }
-                Ok(v)
+                self.force(v)
             }
             Expr::HasAttr { expr, path } => {
                 // Only the sets along the path are forced, never the value of
-                // the last attribute.
+                // the last attribute, and each set is forced before the name
+                // looked up in it is evaluated.
                 let mut v = self.lazy(expr, env);
                 for key in path.iter() {
+                    let set = self.force(v)?;
                     let name = self.attr_key(key, env)?;
-                    match self.force(v)? {
+                    match set {
                         Value::Attrs(a) => match a.get(name) {
                             Some(x) => v = x,
                             None => return Ok(Value::Bool(false)),
