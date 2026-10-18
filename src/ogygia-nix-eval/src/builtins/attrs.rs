@@ -92,7 +92,8 @@ pub fn list_to_attrs<'a>(ev: &Eval<'a>, args: &[Value<'a>]) -> R<'a> {
     let list = ev.force_list(args[0])?;
     let s = &ev.ctx.syms;
     let mut seen: HashMap<Sym, ()> = HashMap::with_capacity(list.len());
-    let mut out = Vec::with_capacity(list.len());
+    let mut pairs = Vec::with_capacity(list.len());
+    // Every name is forced before any value is looked up.
     for item in list {
         let set = ev.force_attrs(*item)?;
         let Some(name) = set.get(s.name) else {
@@ -100,9 +101,12 @@ pub fn list_to_attrs<'a>(ev: &Eval<'a>, args: &[Value<'a>]) -> R<'a> {
         };
         let name = sym_arg(ev, name)?;
         // The first definition of a name wins.
-        if seen.insert(name, ()).is_some() {
-            continue;
+        if seen.insert(name, ()).is_none() {
+            pairs.push((name, set));
         }
+    }
+    let mut out = Vec::with_capacity(pairs.len());
+    for (name, set) in pairs {
         let Some(value) = set.get(s.value) else {
             return eval_err("attribute 'value' missing in a call to 'listToAttrs'");
         };
