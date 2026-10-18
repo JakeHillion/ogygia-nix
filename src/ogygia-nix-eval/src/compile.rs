@@ -285,19 +285,33 @@ fn match_nix_tokens(text: &str) -> (Cow<'_, str>, Vec<u32>) {
     loop {
         let mut start = 0;
         let mut prev = None;
+        // Whether each open interpolation is part of a path.
+        let mut interpols = Vec::new();
+        let mut closed_path = false;
         let insert = rnix::tokenize(&text).find_map(|(kind, s)| {
+            use rnix::SyntaxKind::*;
             let at = start;
             start += s.len();
             let before = prev.replace(kind);
-            let after_interpol = before == Some(rnix::SyntaxKind::TOKEN_INTERPOL_END);
-            split_division(kind, s, after_interpol)
+            let continues_path = before == Some(TOKEN_INTERPOL_END) && closed_path;
+            match kind {
+                TOKEN_INTERPOL_START => interpols.push(
+                    matches!(
+                        before,
+                        Some(TOKEN_PATH_ABS | TOKEN_PATH_REL | TOKEN_PATH_HOME)
+                    ) || continues_path,
+                ),
+                TOKEN_INTERPOL_END => closed_path = interpols.pop().unwrap_or(false),
+                _ => {}
+            }
+            split_division(kind, s, continues_path)
                 .or_else(|| split_number(kind, s))
                 .or_else(|| split_less(kind, s))
                 .or_else(|| split_home_path(kind, s, before))
                 .map(|i| (at + i, " "))
                 .or_else(|| ellipsis_path(kind, &text[at..]).then_some((at, "./")))
                 .or_else(|| {
-                    empty_path_segment(kind, s, after_interpol).map(|i| (at + i, "${\"\"}"))
+                    empty_path_segment(kind, s, continues_path).map(|i| (at + i, "${\"\"}"))
                 })
         });
         match insert {
@@ -460,8 +474,8 @@ fn path_segments_before_interpolation(path: &ast::Path) -> Option<rnix::TextSize
 /// but rnix lexes the rest of the path as one token, an error when it contains
 /// `//`. Returns the offset of the second `/` in such a token, where an empty
 /// interpolation makes rnix lex the same strings.
-fn empty_path_segment(kind: rnix::SyntaxKind, s: &str, after_interpol: bool) -> Option<usize> {
-    (kind == rnix::SyntaxKind::TOKEN_ERROR && after_interpol)
+fn empty_path_segment(kind: rnix::SyntaxKind, s: &str, continues_path: bool) -> Option<usize> {
+    (kind == rnix::SyntaxKind::TOKEN_ERROR && continues_path)
         .then(|| s.find("//"))
         .flatten()
         .map(|i| i + 1)
@@ -484,11 +498,12 @@ fn ellipsis_path(kind: rnix::SyntaxKind, rest: &str) -> bool {
 /// `a/(b)` or `a/"b"`, as a path with a trailing slash, but Nix only lexes a
 /// path when a path character or `${` follows the `/`, so this is `a / ...`.
 /// Returns the offset of that `/` in the token.
-fn split_division(kind: rnix::SyntaxKind, s: &str, after_interpol: bool) -> Option<usize> {
+fn split_division(kind: rnix::SyntaxKind, s: &str, continues_path: bool) -> Option<usize> {
     // A path continued after an interpolation, as in `./a${b}c/`, has a
-    // trailing slash in Nix too.
+    // trailing slash in Nix too. After any other interpolation, as in
+    // `a.${b}.c/(d)`, the token starts a new path, as `a/(b)` does.
     (kind == rnix::SyntaxKind::TOKEN_ERROR
-        && !after_interpol
+        && !continues_path
         && !s.starts_with('~')
         && s.find('/') == Some(s.len() - 1))
     .then_some(s.len() - 1)
