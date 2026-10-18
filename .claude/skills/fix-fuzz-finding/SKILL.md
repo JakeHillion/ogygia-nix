@@ -64,8 +64,8 @@ flake compares against, not whatever `nix-instantiate` is on `PATH`:
 
 ```sh
 nix run .#ogygia-nix-eval-fuzz -- check candidate.nix   # report and non-zero exit while it diverges
-nix shell --inputs-from . nixpkgs#nixVersions.latest --command nix-instantiate --parse --option pure-eval true -E '...'
-nix shell --inputs-from . nixpkgs#nixVersions.latest --command nix-instantiate --eval --strict --option pure-eval true -E '...'
+nix shell '.#reference-nix' --command nix-instantiate --parse --option pure-eval true -E '...'
+nix shell '.#reference-nix' --command nix-instantiate --eval --strict --option pure-eval true -E '...'
 ```
 
 Both evaluators run in pure mode in the fuzzer, so behaviour that only

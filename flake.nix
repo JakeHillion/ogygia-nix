@@ -27,9 +27,14 @@
 
     nix-fast-build.url = "github:Mic92/nix-fast-build";
     nix-fast-build.inputs.nixpkgs.follows = "nixpkgs";
+
+    # Nix master, pinned by rev so that `nix flake update` and Renovate's
+    # lock file maintenance leave it alone; Renovate moves it to master in a
+    # PR of its own. It builds with its own nixpkgs, as Nix's CI tests it.
+    nix.url = "github:NixOS/nix/ca82d934549cb96b5f3ba8d62b1ec97efa1cdda9";
   };
 
-  outputs = { self, nixpkgs, flake-utils, treefmt-nix, fenix, crane, advisory-db, nix-fast-build }:
+  outputs = { self, nixpkgs, flake-utils, treefmt-nix, fenix, crane, advisory-db, nix-fast-build, nix }:
     let
       # The macOS app is built for Apple silicon only.
       darwinOutputs = flake-utils.lib.eachSystem [ "aarch64-darwin" ] (system:
@@ -252,6 +257,7 @@
               env.OGYGIA_JJ_BIN = "${pkgs.jujutsu}/bin/jj";
               env.OGYGIA_NIX_INSTANTIATE_BIN = "${referenceNix}/bin/nix-instantiate";
               env.OGYGIA_NIX_EVAL_DEFAULT_INCLUDE_PATH = "${nixIncludePath}";
+              env.OGYGIA_NIX_EVAL_NIX_VERSION = referenceNix.version;
               nativeBuildInputs = commonArgs.nativeBuildInputs ++ [
                 pkgs.cargo-nextest
                 pkgs.zstd
@@ -288,6 +294,7 @@
               env = {
                 OGYGIA_NIX_INSTANTIATE_BIN = "${referenceNix}/bin/nix-instantiate";
                 OGYGIA_NIX_EVAL_DEFAULT_INCLUDE_PATH = "${nixIncludePath}";
+                OGYGIA_NIX_EVAL_NIX_VERSION = referenceNix.version;
                 OGYGIA_NIX_EVAL_FUZZ_SEEDS = "${fuzzSeeds}";
                 OGYGIA_NIX_EVAL_FUZZ_REV = self.rev or self.dirtyRev or "unknown";
               };
@@ -303,18 +310,15 @@
               meta.mainProgram = "ogygia-nix-eval-fuzz";
             });
 
-            referenceNix = pkgs.nixVersions.latest;
+            referenceNix = nix.packages.${system}.nix-cli;
 
             # The files Nix ships with itself, which `<nix/...>` paths find under
             # nix/. They are Nix's own (LGPL-2.1), so ogygia-nix-eval refers to
             # them by path rather than including them.
             nixIncludePath = pkgs.runCommand "nix-include-path" { meta.license = lib.licenses.lgpl21; } ''
               mkdir -p $out/nix
-              # Nix embeds the file as a raw string literal opened on the line
-              # before it (nix-meson-build-support/generate-header), so what it
-              # serves starts with a newline.
-              { echo; cat ${referenceNix.src}/src/libexpr/fetchurl.nix; } > $out/nix/fetchurl.nix
-              cp ${referenceNix.src}/COPYING $out/
+              cp ${nix}/src/libexpr/fetchurl.nix $out/nix/
+              cp ${nix}/COPYING $out/
             '';
 
             # Real Nix code for the fuzzer to start from: our equivalence cases,
@@ -349,6 +353,7 @@
           {
             packages = {
               inherit ogygia ogygia-nextest-archive;
+              reference-nix = referenceNix;
               default = ogygia;
             } // linuxOnly {
               inherit ogygia-irisd ogygia-hostinfod ogygia-dashboard ogygia-updated ogygia-clevis ogygia-nix-eval-fuzz;
@@ -358,6 +363,7 @@
               inputsFrom = [ cargoArtifacts ];
               OGYGIA_NIX_INSTANTIATE_BIN = "${referenceNix}/bin/nix-instantiate";
               OGYGIA_NIX_EVAL_DEFAULT_INCLUDE_PATH = "${nixIncludePath}";
+              OGYGIA_NIX_EVAL_NIX_VERSION = referenceNix.version;
               packages = with pkgs; [
                 etcd # for etcdctl
                 cargo-fuzz # for src/ogygia-nix-eval-fuzz
@@ -421,6 +427,7 @@
                 cargoTestExtraArgs = "-p ogygia-nix-eval -p ogygia-nix-eval-fuzz";
                 env.OGYGIA_NIX_INSTANTIATE_BIN = "${referenceNix}/bin/nix-instantiate";
                 env.OGYGIA_NIX_EVAL_DEFAULT_INCLUDE_PATH = "${nixIncludePath}";
+                env.OGYGIA_NIX_EVAL_NIX_VERSION = referenceNix.version;
                 env.OGYGIA_NIX_EVAL_NIXPKGS = "${nixpkgs}";
               });
 
