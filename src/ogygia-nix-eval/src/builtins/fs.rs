@@ -147,7 +147,6 @@ pub fn find_file<'a>(ev: &Eval<'a>, args: &[Value<'a>]) -> R<'a> {
 pub fn to_file<'a>(ev: &Eval<'a>, args: &[Value<'a>]) -> R<'a> {
     let name = ev.force_str_no_ctx(args[0])?;
     let name = String::from_utf8_lossy(name).into_owned();
-    crate::store::check_name(&name).map_err(io_err)?;
     let contents = ev.force_str(args[1])?;
     let mut refs = Vec::new();
     for c in contents.ctx {
@@ -160,6 +159,7 @@ pub fn to_file<'a>(ev: &Eval<'a>, args: &[Value<'a>]) -> R<'a> {
             }
         }
     }
+    crate::store::check_name(&name).map_err(io_err)?;
     let path = ev
         .ctx
         .io
