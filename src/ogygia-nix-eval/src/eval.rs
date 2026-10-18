@@ -300,6 +300,10 @@ impl<'a> Eval<'a> {
     }
 
     fn deep_force_inner(&self, v: Value<'a>, seen: &mut HashSet<*const ()>) -> R<'a> {
+        self.deeper(|| self.deep_force_level(v, seen))
+    }
+
+    fn deep_force_level(&self, v: Value<'a>, seen: &mut HashSet<*const ()>) -> R<'a> {
         let v = self.force(v)?;
         match v {
             Value::Attrs(a) => {
@@ -558,10 +562,11 @@ impl<'a> Eval<'a> {
                 Value::Bool(b) => Ok(Value::Bool(!b)),
                 other => self.type_error("a Boolean", other),
             },
-            Expr::Neg(e, pos) => {
+            // Nix desugars `-e` to `__sub 0 e`.
+            Expr::Neg(e, pos) => self.deeper(|| {
                 let v = self.eval(e, env)?;
                 self.arith(BinOp::Sub, Value::Int(0), v, *pos)
-            }
+            }),
             Expr::Bin(op, l, r, pos) => self.eval_bin(*op, l, r, env, *pos),
             Expr::InterpStr(parts, _) => {
                 let mut buf = Vec::new();
@@ -730,12 +735,20 @@ impl<'a> Eval<'a> {
 
     fn call_inner(&self, f: Value<'a>, arg: Value<'a>, pos: Option<Pos<'a>>) -> R<'a> {
         let f = self.force(f)?;
+        self.deeper(|| self.call_forced(f, arg, pos))
+    }
+
+    /// Run `f` one level deeper: in a call, or one level down a walk over a
+    /// value (deep forcing, comparison, coercion, serialisation). Each level
+    /// counts towards `max-call-depth`.
+    pub(crate) fn deeper<T>(&self, f: impl FnOnce() -> R<'a, T>) -> R<'a, T> {
         let depth = self.depth.get();
-        if depth >= MAX_CALL_DEPTH {
+        // Like Nix, fail only once the depth is already past the limit.
+        if depth > MAX_CALL_DEPTH {
             return eval_err("stack overflow; max-call-depth exceeded");
         }
         self.depth.set(depth + 1);
-        let r = self.call_forced(f, arg, pos);
+        let r = f();
         self.depth.set(depth);
         r
     }
@@ -893,26 +906,26 @@ impl<'a> Eval<'a> {
                 let (a, b) = operands()?;
                 Ok(Value::Bool(!self.eq(a, b)?))
             }
-            BinOp::Lt => {
+            // Nix desugars comparisons to calls of `__lessThan`, and `a > b`
+            // and `a <= b` to `__lessThan b a`, which evaluates `b` first.
+            BinOp::Lt => self.deeper(|| {
                 let (a, b) = operands()?;
                 Ok(Value::Bool(self.less_than(a, b)?))
-            }
-            // Nix desugars `a > b` and `a <= b` to `__lessThan b a`, which
-            // evaluates `b` first.
-            BinOp::Gt => {
+            }),
+            BinOp::Gt => self.deeper(|| {
                 let b = self.eval(r, env)?;
                 let a = self.eval(l, env)?;
                 Ok(Value::Bool(self.less_than(b, a)?))
-            }
-            BinOp::Le => {
+            }),
+            BinOp::Le => self.deeper(|| {
                 let b = self.eval(r, env)?;
                 let a = self.eval(l, env)?;
                 Ok(Value::Bool(!self.less_than(b, a)?))
-            }
-            BinOp::Ge => {
+            }),
+            BinOp::Ge => self.deeper(|| {
                 let (a, b) = operands()?;
                 Ok(Value::Bool(!self.less_than(a, b)?))
-            }
+            }),
             BinOp::Concat => {
                 let (a, b) = operands()?;
                 let a = self.force_list(a)?;
@@ -940,10 +953,11 @@ impl<'a> Eval<'a> {
                 let a = self.eval(l, env)?;
                 self.add(a, || self.eval(r, env), pos)
             }
-            BinOp::Sub | BinOp::Mul | BinOp::Div => {
+            // Nix desugars these to calls of `__sub`, `__mul` and `__div`.
+            BinOp::Sub | BinOp::Mul | BinOp::Div => self.deeper(|| {
                 let (a, b) = operands()?;
                 self.arith(op, a, b, pos)
-            }
+            }),
         }
     }
 
@@ -1074,8 +1088,14 @@ impl<'a> Eval<'a> {
 
     /// Structural equality, as `==`.
     pub fn eq(&self, a: Value<'a>, b: Value<'a>) -> R<'a, bool> {
-        let a = self.force(a)?;
-        let b = self.force(b)?;
+        self.deeper(|| {
+            let a = self.force(a)?;
+            let b = self.force(b)?;
+            self.eq_forced(a, b)
+        })
+    }
+
+    fn eq_forced(&self, a: Value<'a>, b: Value<'a>) -> R<'a, bool> {
         Ok(match (a, b) {
             (Value::Int(x), Value::Int(y)) => x == y,
             (Value::Int(_) | Value::Float(_), Value::Int(_) | Value::Float(_)) => {
@@ -1127,15 +1147,17 @@ impl<'a> Eval<'a> {
     /// Equality of values stored in a list or set: both are forced, then a
     /// stored value equals itself, even if it is a function.
     fn eq_elem(&self, a: Value<'a>, b: Value<'a>) -> R<'a, bool> {
-        let forced_a = self.force(a)?;
-        let forced_b = self.force(b)?;
-        if let (Some(p), Some(q)) = (a.ptr(), b.ptr())
-            && p == q
-            && std::mem::discriminant(&a) == std::mem::discriminant(&b)
-        {
-            return Ok(true);
-        }
-        self.eq(forced_a, forced_b)
+        self.deeper(|| {
+            let forced_a = self.force(a)?;
+            let forced_b = self.force(b)?;
+            if let (Some(p), Some(q)) = (a.ptr(), b.ptr())
+                && p == q
+                && std::mem::discriminant(&a) == std::mem::discriminant(&b)
+            {
+                return Ok(true);
+            }
+            self.eq_forced(forced_a, forced_b)
+        })
     }
 
     pub fn is_derivation(&self, a: &'a Attrs<'a>) -> R<'a, bool> {
@@ -1183,6 +1205,17 @@ impl<'a> Eval<'a> {
         buf: &mut Vec<u8>,
         ctx: &mut Vec<Ctx<'a>>,
     ) -> R<'a, ()> {
+        self.deeper(|| self.coerce_level(v, c, buf, ctx))
+    }
+
+    /// [`Self::coerce_into`] at the current level of a walk over a value.
+    pub(crate) fn coerce_level(
+        &self,
+        v: Value<'a>,
+        c: Coerce,
+        buf: &mut Vec<u8>,
+        ctx: &mut Vec<Ctx<'a>>,
+    ) -> R<'a, ()> {
         let v = self.force(v)?;
         match v {
             Value::Str(s) => {
@@ -1205,7 +1238,7 @@ impl<'a> Eval<'a> {
                     return self.coerce_into(r, c, buf, ctx);
                 }
                 if let Some(out) = a.get(s.out_path) {
-                    return self.coerce_into(out, c, buf, ctx);
+                    return self.coerce_level(out, c, buf, ctx);
                 }
                 return eval_err(format!(
                     "cannot coerce a set to a string: {}",
