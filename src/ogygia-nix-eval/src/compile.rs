@@ -951,15 +951,23 @@ impl<'a> Compiler<'a> {
 
     fn string(&mut self, s: &ast::Str, pos: Pos<'a>) -> CResult<Expr<'a>> {
         let mut out = Vec::new();
+        let mut lit: Option<String> = None;
         for part in str_parts(s) {
             match part {
-                InterpolPart::Literal(l) => {
-                    if !l.is_empty() {
+                InterpolPart::Literal(l) => match &mut lit {
+                    Some(prev) => prev.push_str(&l),
+                    None => lit = Some(l),
+                },
+                InterpolPart::Interpolation(i) => {
+                    if let Some(l) = lit.take().filter(|l| !l.is_empty()) {
                         out.push(self.leak(Expr::Str(self.lit_str(l.as_bytes()))));
                     }
+                    out.push(self.expr(&child(i.expr())?)?);
                 }
-                InterpolPart::Interpolation(i) => out.push(self.expr(&child(i.expr())?)?),
             }
+        }
+        if let Some(l) = lit.filter(|l| !l.is_empty()) {
+            out.push(self.leak(Expr::Str(self.lit_str(l.as_bytes()))));
         }
         Ok(match out.as_slice() {
             [] => Expr::Str(self.lit_str(b"")),
@@ -1384,7 +1392,8 @@ enum IndPart {
 /// The parts of an indented string with escapes resolved and indentation
 /// stripped as Nix's parser does: lines are found by the newlines in plain
 /// text when measuring indentation, but by every newline, escaped or not,
-/// when stripping it, and escaped text is stripped like any other.
+/// when stripping it, and escaped text is stripped like any other. Each
+/// token is its own part, and those left empty are dropped.
 fn indented_parts(s: &ast::Str) -> Vec<InterpolPart<String>> {
     let mut parts = Vec::new();
     for (i, part) in s.parts().enumerate() {
@@ -1480,9 +1489,8 @@ fn indented_parts(s: &ast::Str) -> Vec<InterpolPart<String>> {
         {
             s.truncate(p + 1);
         }
-        match out.last_mut() {
-            Some(InterpolPart::Literal(prev)) => prev.push_str(&s),
-            _ => out.push(InterpolPart::Literal(s)),
+        if !s.is_empty() {
+            out.push(InterpolPart::Literal(s));
         }
     }
     out
@@ -1552,16 +1560,13 @@ fn unescape_str(text: &str) -> String {
     out
 }
 
-/// The text of a string literal with no interpolation.
+/// The text of a string literal that is a single piece of text.
 fn static_str(s: &ast::Str) -> Option<String> {
-    let mut lit = String::new();
-    for part in str_parts(s) {
-        match part {
-            InterpolPart::Literal(l) => lit.push_str(&l),
-            InterpolPart::Interpolation(_) => return None,
-        }
+    match <[_; 1]>::try_from(str_parts(s)) {
+        Ok([InterpolPart::Literal(lit)]) => Some(lit),
+        Ok(_) => None,
+        Err(parts) => parts.is_empty().then(String::new),
     }
-    Some(lit)
 }
 
 fn child<T>(o: Option<T>) -> CResult<T> {
