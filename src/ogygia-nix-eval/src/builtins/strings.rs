@@ -36,11 +36,11 @@ pub fn string_length<'a>(ev: &Eval<'a>, args: &[Value<'a>]) -> R<'a> {
 
 pub fn substring<'a>(ev: &Eval<'a>, args: &[Value<'a>]) -> R<'a> {
     let start = ev.force_int(args[0])?;
-    let len = ev.force_int(args[1])?;
-    let (s, ctx) = ev.coerce_to_string(args[2], Coerce::INTERP)?;
     if start < 0 {
         return eval_err("negative start position in 'substring'");
     }
+    let len = ev.force_int(args[1])?;
+    let (s, ctx) = ev.coerce_to_string(args[2], Coerce::INTERP)?;
     let start = (start as usize).min(s.len());
     let end = if len < 0 {
         s.len()
