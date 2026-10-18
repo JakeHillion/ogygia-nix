@@ -3,10 +3,15 @@
 use std::ffi::CString;
 use std::ffi::c_char;
 use std::ffi::c_int;
+use std::fs::File;
+use std::io::Write;
+use std::os::fd::AsFd;
+use std::os::fd::AsRawFd;
 use std::path::Path;
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::sync::OnceLock;
+use std::time::Duration;
 
 use clap::Parser;
 use libfuzzer_sys::fuzz_crossover;
@@ -14,6 +19,7 @@ use libfuzzer_sys::fuzz_mutator;
 use libfuzzer_sys::fuzz_target;
 use ogygia_nix_eval_fuzz::Budget;
 use ogygia_nix_eval_fuzz::Outcome;
+use ogygia_nix_eval_fuzz::Summary;
 
 /// Differential fuzzing of ogygia-nix-eval against Nix. Arguments that are
 /// not a subcommand are passed to libFuzzer.
@@ -45,6 +51,21 @@ struct Options {
 }
 
 static OPTIONS: OnceLock<Options> = OnceLock::new();
+
+/// The original standard error, once `run` has pointed descriptor 2 at
+/// /dev/null.
+static LOG: OnceLock<File> = OnceLock::new();
+
+/// `eprintln!`, to [`LOG`] once it is set.
+macro_rules! report {
+    ($($arg:tt)*) => {
+        match LOG.get() {
+            Some(mut log) => writeln!(log, $($arg)*),
+            None => writeln!(std::io::stderr(), $($arg)*),
+        }
+        .expect("writing to standard error")
+    };
+}
 
 fuzz_target!(|data: &[u8]| {
     let Ok(src) = std::str::from_utf8(data) else {
@@ -112,17 +133,30 @@ fn recheck(findings: &Path) -> bool {
         ogygia_nix_eval_fuzz::check(src, Budget::Unlimited)
     }) {
         Ok(r) => {
-            eprintln!(
+            report!(
                 "rechecked findings: {} kept, {} removed, {} inconclusive",
-                r.kept, r.removed, r.inconclusive
+                r.kept,
+                r.removed,
+                r.inconclusive
             );
             true
         }
         Err(e) => {
-            eprintln!("rechecking {}: {e}", findings.display());
+            report!("rechecking {}: {e}", findings.display());
             false
         }
     }
+}
+
+/// Point descriptor 2 at /dev/null, returning the original standard error.
+fn silence_stderr() -> std::io::Result<File> {
+    let original = std::io::stderr().as_fd().try_clone_to_owned()?;
+    let null = File::options().write(true).open("/dev/null")?;
+    // SAFETY: dup2 only replaces descriptor 2, which stays open.
+    if unsafe { libc::dup2(null.as_raw_fd(), libc::STDERR_FILENO) } < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(original.into())
 }
 
 fn run(dir: &Path, jobs: Option<usize>) -> ExitCode {
@@ -136,19 +170,46 @@ fn run(dir: &Path, jobs: Option<usize>) -> ExitCode {
     let this_run = dir.join("runs").join(revision);
     for d in [&corpus, &this_run.join("artifacts")] {
         if let Err(e) = std::fs::create_dir_all(d) {
-            eprintln!("creating {}: {e}", d.display());
+            report!("creating {}: {e}", d.display());
+            return ExitCode::FAILURE;
+        }
+    }
+    // libFuzzer reports every job, and evaluation traces and warns with
+    // bytes of the input, so only our own lines go to standard error.
+    match silence_stderr() {
+        Ok(log) => {
+            LOG.set(log).expect("run starts once");
+            std::panic::set_hook(Box::new(|info| report!("{info}")));
+        }
+        Err(e) => {
+            eprintln!("silencing standard error: {e}");
             return ExitCode::FAILURE;
         }
     }
     if !recheck(&findings) {
         return ExitCode::FAILURE;
     }
+    let mut summary = match Summary::new(&this_run.join("stats"), &findings) {
+        Ok(summary) => summary,
+        Err(e) => {
+            report!("reading {}: {e}", dir.display());
+            return ExitCode::FAILURE;
+        }
+    };
+    std::thread::spawn(move || {
+        loop {
+            std::thread::sleep(Duration::from_secs(60));
+            for line in summary.update().expect("summarising the run") {
+                report!("{line}");
+            }
+        }
+    });
     let jobs = jobs
         .unwrap_or_else(|| std::thread::available_parallelism().map_or(1, std::num::NonZero::get));
     let exe = match std::env::current_exe() {
         Ok(exe) => exe,
         Err(e) => {
-            eprintln!("locating this program: {e}");
+            report!("locating this program: {e}");
             return ExitCode::FAILURE;
         }
     };

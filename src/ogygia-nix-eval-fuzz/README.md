@@ -83,6 +83,12 @@ keeps:
 - `DIR/runs/<revision>/artifacts/`: inputs that crashed, hung or ran out of
   memory in ogygia-nix-eval itself, as libFuzzer names them.
 
+Its standard error, meant for a journal, has the recheck's summary, then
+every minute a line `new finding: DIR/findings/<hash>` for each finding
+recorded since the last, and the outcome counts since `run` started with
+the number of findings. Apart from errors, nothing else reaches it: libFuzzer's own logging,
+and the traces and warnings of the inputs evaluated, are discarded.
+
 To follow new revisions, stop `run` and start the new revision's.
 
 ### Findings
