@@ -341,6 +341,7 @@ pub fn generic_closure<'a>(ev: &Eval<'a>, args: &[Value<'a>]) -> R<'a> {
     let Some(op) = set.get(s.operator) else {
         return eval_err("attribute 'operator' required");
     };
+    let op = ev.force_function(op)?;
     let mut queue: std::collections::VecDeque<Value<'a>> = start.iter().copied().collect();
     let mut seen = KeySet::default();
     let mut out = Vec::new();
