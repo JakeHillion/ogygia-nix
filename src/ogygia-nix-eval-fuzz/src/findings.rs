@@ -44,9 +44,15 @@ pub struct Recheck {
 }
 
 /// Run `check` on every finding in `findings` again, keeping only those
-/// that still diverge. Must not run while anything records findings there.
-pub fn recheck(findings: &Path, check: impl Fn(&str) -> Outcome) -> std::io::Result<Recheck> {
-    eprintln!("rechecking findings in {}", findings.display());
+/// that still diverge, and pass `log` progress lines that are printable
+/// ASCII apart from `findings`. Must not run while anything records
+/// findings there.
+pub fn recheck(
+    findings: &Path,
+    check: impl Fn(&str) -> Outcome,
+    mut log: impl FnMut(&str),
+) -> std::io::Result<Recheck> {
+    log(&format!("rechecking findings in {}", findings.display()));
     let mut summary = Recheck::default();
     let entries = match std::fs::read_dir(findings) {
         Ok(entries) => entries,
@@ -82,10 +88,10 @@ pub fn recheck(findings: &Path, check: impl Fn(&str) -> Outcome) -> std::io::Res
         }
         let processed = index + 1;
         if processed % 1000 == 0 {
-            eprintln!(
+            log(&format!(
                 "rechecked {processed}/{total} findings ({:.1}%)",
                 processed as f64 * 100.0 / total as f64
-            );
+            ));
         }
     }
     Ok(summary)
@@ -132,13 +138,17 @@ mod tests {
         std::fs::create_dir(findings.join("no-input")).unwrap();
         std::fs::create_dir(findings.join(".hidden")).unwrap();
 
-        let summary = recheck(findings, |src| match src {
-            "diverges" => Outcome::Diverged("new report".to_owned()),
-            "fixed" => Outcome::Value,
-            "too slow" => Outcome::Skipped,
-            "too big" => Outcome::Limited,
-            other => panic!("unexpected input {other}"),
-        })
+        let summary = recheck(
+            findings,
+            |src| match src {
+                "diverges" => Outcome::Diverged("new report".to_owned()),
+                "fixed" => Outcome::Value,
+                "too slow" => Outcome::Skipped,
+                "too big" => Outcome::Limited,
+                other => panic!("unexpected input {other}"),
+            },
+            |_| {},
+        )
         .unwrap();
 
         assert_eq!(
@@ -161,7 +171,31 @@ mod tests {
     #[test]
     fn recheck_without_findings_does_nothing() {
         let tmp = tempfile::tempdir().unwrap();
-        let summary = recheck(&tmp.path().join("findings"), |_| unreachable!()).unwrap();
+        let summary = recheck(&tmp.path().join("findings"), |_| unreachable!(), |_| {}).unwrap();
         assert_eq!(summary, Recheck::default());
+    }
+
+    #[test]
+    fn recheck_logs_progress_every_thousand_findings() {
+        let tmp = tempfile::tempdir().unwrap();
+        let findings = tmp.path();
+        for i in 0..2500 {
+            record(findings, &i.to_string(), "report").unwrap();
+        }
+        let mut lines = Vec::new();
+        recheck(
+            findings,
+            |src| Outcome::Diverged(src.to_owned()),
+            |line| lines.push(line.to_owned()),
+        )
+        .unwrap();
+        assert_eq!(
+            lines,
+            [
+                format!("rechecking findings in {}", findings.display()),
+                "rechecked 1000/2500 findings (40.0%)".to_owned(),
+                "rechecked 2000/2500 findings (80.0%)".to_owned(),
+            ]
+        );
     }
 }
