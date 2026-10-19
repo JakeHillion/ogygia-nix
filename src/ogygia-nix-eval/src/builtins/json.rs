@@ -1,5 +1,6 @@
 //! `toJSON` and `fromJSON`.
 
+use super::grisu2::grisu2;
 use crate::eval::Coerce;
 use crate::eval::Eval;
 use crate::value::Ctx;
@@ -33,8 +34,8 @@ pub fn json_string(out: &mut Vec<u8>, s: &[u8]) {
     out.push(b'"');
 }
 
-/// A float the way Nix's JSON writer prints it: the shortest representation
-/// that round-trips, always with a fraction or exponent. Values from 1e-4 up
+/// A float the way Nix's JSON writer prints it: digits that round-trip, as
+/// chosen by Grisu2, always with a fraction or exponent. Values from 1e-4 up
 /// to but excluding 1e15 are in fixed notation, others in exponent notation
 /// such as `1.5e+15` or `1e-05`.
 pub fn json_float(f: f64) -> String {
@@ -42,12 +43,15 @@ pub fn json_float(f: f64) -> String {
         return "null".to_owned();
     }
     let sign = if f.is_sign_negative() { "-" } else { "" };
-    let s = format!("{:e}", f.abs());
-    let (m, e) = s.split_once('e').expect("LowerExp has an exponent");
-    let e: i32 = e.parse().expect("LowerExp exponent is an integer");
-    let digits = m.replace('.', "");
+    let (digits, exp) = if f == 0.0 {
+        (vec![b'0'], 0)
+    } else {
+        grisu2(f.abs())
+    };
+    let digits = String::from_utf8(digits).expect("digits are ASCII");
     // The decimal point goes after `point` digits of `digits`.
-    let point = e + 1;
+    let point = exp + digits.len() as i32;
+    let e = point - 1;
     if !(-3..=15).contains(&point) {
         let (first, rest) = digits.split_at(1);
         let dot = if rest.is_empty() { "" } else { "." };
