@@ -906,25 +906,18 @@ impl<'a> Eval<'a> {
                 let (a, b) = operands()?;
                 Ok(Value::Bool(!self.eq(a, b)?))
             }
-            // Nix desugars comparisons to calls of `__lessThan`, and `a > b`
-            // and `a <= b` to `__lessThan b a`, which evaluates `b` first.
-            BinOp::Lt => self.deeper(|| {
-                let (a, b) = operands()?;
-                Ok(Value::Bool(self.less_than(a, b)?))
-            }),
-            BinOp::Gt => self.deeper(|| {
-                let b = self.eval(r, env)?;
-                let a = self.eval(l, env)?;
-                Ok(Value::Bool(self.less_than(b, a)?))
-            }),
-            BinOp::Le => self.deeper(|| {
-                let b = self.eval(r, env)?;
-                let a = self.eval(l, env)?;
-                Ok(Value::Bool(!self.less_than(b, a)?))
-            }),
-            BinOp::Ge => self.deeper(|| {
-                let (a, b) = operands()?;
-                Ok(Value::Bool(!self.less_than(a, b)?))
+            // Nix desugars `a < b` to `__lessThan a b` and `a >= b` to its
+            // negation, and `a > b` to `__lessThan b a`, which evaluates `b`
+            // first, and `a <= b` to its negation.
+            BinOp::Lt | BinOp::Gt | BinOp::Le | BinOp::Ge => self.deeper(|| {
+                let (x, y) = if matches!(op, BinOp::Lt | BinOp::Ge) {
+                    operands()?
+                } else {
+                    let b = self.eval(r, env)?;
+                    (b, self.eval(l, env)?)
+                };
+                let negate = matches!(op, BinOp::Le | BinOp::Ge);
+                Ok(Value::Bool(self.less_than(x, y)? != negate))
             }),
             BinOp::Concat => {
                 let (a, b) = operands()?;
