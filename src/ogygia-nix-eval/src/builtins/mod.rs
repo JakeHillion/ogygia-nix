@@ -5,6 +5,7 @@ mod context;
 mod derivation;
 mod flake;
 mod fs;
+mod grisu2;
 mod json;
 mod lists;
 mod misc;
