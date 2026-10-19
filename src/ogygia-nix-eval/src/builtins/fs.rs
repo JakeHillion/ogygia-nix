@@ -324,30 +324,33 @@ fn check_git_url<'a>(url: &[u8]) -> R<'a, ()> {
     {
         return super::url::check(url).or_else(eval_err);
     }
-    // A '[' at the start of the host, closed later by ']', makes the URL
-    // bracketed, which then takes the user up to the last '@' it can.
-    let host_starts = (0..url.len()).filter(|&i| i == 0 || url[i - 1] == b'@');
-    let path = if host_starts
-        .clone()
-        .any(|i| url[i] == b'[' && url[i + 1..].contains(&b']'))
+    // The first "@[", or else a leading '[', opens a bracket. When a ']'
+    // closes it, the path starts after that ']', which must be followed by
+    // ':'; otherwise it starts after the first ':'.
+    let open = url
+        .windows(2)
+        .position(|w| w == b"@[")
+        .map(|i| i + 1)
+        .or((url[0] == b'[').then_some(0));
+    let colon = match open.and_then(|o| url[o..].iter().position(|&c| c == b']').map(|e| o + e + 1))
     {
-        let Some((host, path)) = host_starts.rev().find_map(|i| {
-            let rest = url[i..].strip_prefix(b"[")?;
-            let end = rest.iter().position(|&c| c == b']')?;
-            Some((&rest[..end], rest[end + 1..].strip_prefix(b":")?))
-        }) else {
-            return not_url();
-        };
-        if !super::url::ipv6(host) {
-            return eval_err(format!(
-                "Git SCP bracketed URL is not valid: '{}' is not a valid IPv6 address",
-                String::from_utf8_lossy(host)
-            ));
-        }
-        path
-    } else {
-        &url[scheme.len() + 1..]
+        Some(end) if url.get(end) == Some(&b':') => end,
+        Some(_) => return not_url(),
+        None => scheme.len(),
     };
+    let (prefix, path) = (&url[..colon], &url[colon + 1..]);
+    let host = prefix
+        .iter()
+        .position(|&c| c == b'@')
+        .map_or(prefix, |i| &prefix[i + 1..]);
+    if let Some(host) = host.strip_prefix(b"[").and_then(|h| h.strip_suffix(b"]"))
+        && !super::url::ipv6(host)
+    {
+        return eval_err(format!(
+            "Git SCP bracketed URL is not valid: '{}' is not a valid IPv6 address",
+            String::from_utf8_lossy(host)
+        ));
+    }
     if path.is_empty() {
         return eval_err(format!("SCP-style Git URL '{shown}' has an empty path"));
     }
