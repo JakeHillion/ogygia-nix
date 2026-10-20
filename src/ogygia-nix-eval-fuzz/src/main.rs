@@ -5,6 +5,7 @@ use std::ffi::c_char;
 use std::ffi::c_int;
 use std::fs::File;
 use std::io::Write;
+use std::num::NonZero;
 use std::os::fd::AsFd;
 use std::os::fd::AsRawFd;
 use std::path::Path;
@@ -34,13 +35,19 @@ enum Command {
     /// Recheck the findings in DIR, then fuzz until stopped.
     Run {
         dir: PathBuf,
-        /// Fuzzing processes to run; defaults to one per CPU.
+        /// Findings to recheck and fuzzing processes to run at once;
+        /// defaults to one per CPU.
         #[arg(long)]
-        jobs: Option<usize>,
+        jobs: Option<NonZero<usize>>,
     },
     /// Check every finding in DIR/findings again, keeping only those that
     /// still diverge. Must not run while DIR is being fuzzed.
-    Recheck { dir: PathBuf },
+    Recheck {
+        dir: PathBuf,
+        /// Findings to recheck at once; defaults to one per CPU.
+        #[arg(long)]
+        jobs: Option<NonZero<usize>>,
+    },
     /// Compare ogygia-nix-eval with Nix on the Nix expression in FILE.
     Check { file: PathBuf },
 }
@@ -128,9 +135,10 @@ fn fuzz(args: Vec<String>) -> ExitCode {
     ExitCode::from(u8::try_from(code).unwrap_or(1))
 }
 
-fn recheck(findings: &Path) -> bool {
+fn recheck(findings: &Path, jobs: NonZero<usize>) -> bool {
     match ogygia_nix_eval_fuzz::recheck(
         findings,
+        jobs,
         |src| ogygia_nix_eval_fuzz::check(src, Budget::Unlimited),
         |line| report!("{line}"),
     ) {
@@ -161,7 +169,7 @@ fn silence_stderr() -> std::io::Result<File> {
     Ok(original.into())
 }
 
-fn run(dir: &Path, jobs: Option<usize>) -> ExitCode {
+fn run(dir: &Path, jobs: NonZero<usize>) -> ExitCode {
     let Some(seeds) = option_env!("OGYGIA_NIX_EVAL_FUZZ_SEEDS") else {
         eprintln!("this build has no seed inputs; build it with Nix");
         return ExitCode::FAILURE;
@@ -188,7 +196,7 @@ fn run(dir: &Path, jobs: Option<usize>) -> ExitCode {
             return ExitCode::FAILURE;
         }
     }
-    if !recheck(&findings) {
+    if !recheck(&findings, jobs) {
         return ExitCode::FAILURE;
     }
     let mut summary = match Summary::new(&this_run.join("stats"), &findings) {
@@ -206,8 +214,6 @@ fn run(dir: &Path, jobs: Option<usize>) -> ExitCode {
             }
         }
     });
-    let jobs = jobs
-        .unwrap_or_else(|| std::thread::available_parallelism().map_or(1, std::num::NonZero::get));
     let exe = match std::env::current_exe() {
         Ok(exe) => exe,
         Err(e) => {
@@ -231,6 +237,11 @@ fn run(dir: &Path, jobs: Option<usize>) -> ExitCode {
         path(&corpus),
         format!("{seeds}/seeds"),
     ])
+}
+
+/// `jobs`, defaulting to one per CPU.
+fn or_cpus(jobs: Option<NonZero<usize>>) -> NonZero<usize> {
+    jobs.unwrap_or_else(|| std::thread::available_parallelism().unwrap_or(NonZero::<usize>::MIN))
 }
 
 fn check(file: &Path) -> ExitCode {
@@ -271,9 +282,9 @@ fn main() -> ExitCode {
         return fuzz(args);
     }
     match Cli::parse().command {
-        Command::Run { dir, jobs } => run(&dir, jobs),
-        Command::Recheck { dir } => {
-            if recheck(&dir.join("findings")) {
+        Command::Run { dir, jobs } => run(&dir, or_cpus(jobs)),
+        Command::Recheck { dir, jobs } => {
+            if recheck(&dir.join("findings"), or_cpus(jobs)) {
                 ExitCode::SUCCESS
             } else {
                 ExitCode::FAILURE
