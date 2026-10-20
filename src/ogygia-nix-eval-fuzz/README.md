@@ -63,7 +63,7 @@ nix run .#ogygia-nix-eval-fuzz -- run DIR
 ```
 
 `run DIR` rechecks the findings in `DIR` (see below), then fuzzes until
-stopped, with one process per CPU unless `--jobs N` says otherwise. It
+stopped. Both run one job per CPU unless `--jobs N` says otherwise. It
 keeps:
 
 - `DIR/corpus/`: libFuzzer's corpus. It is plain Nix source, so it stays
@@ -96,8 +96,9 @@ To follow new revisions, stop `run` and start the new revision's.
 ### Findings
 
 Findings are owned by this tool, not by whoever fixes them. `recheck DIR`
-runs every finding again with the current build, using the same check that
-found it but with no limit on Nix:
+runs every finding again with the current build, one per CPU at a time
+unless `--jobs N` says otherwise, using the same check that found it but
+with no limit on Nix:
 
 - if it still diverges, it is kept and its report refreshed;
 - if the evaluators now agree, it is deleted;
