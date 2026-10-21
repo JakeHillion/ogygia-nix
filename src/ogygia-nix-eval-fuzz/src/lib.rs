@@ -2,6 +2,7 @@
 
 mod check;
 mod findings;
+mod minimise;
 mod mutate;
 mod stats;
 
@@ -12,6 +13,8 @@ pub use check::check;
 pub use findings::Recheck;
 pub use findings::recheck;
 pub use findings::record;
+pub use minimise::Minimised;
+pub use minimise::minimise;
 pub use mutate::crossover;
 pub use mutate::mutate;
 pub use stats::Summary;

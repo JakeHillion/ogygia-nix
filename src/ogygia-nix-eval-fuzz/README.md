@@ -62,12 +62,15 @@ seeds and the source revision:
 nix run .#ogygia-nix-eval-fuzz -- run DIR
 ```
 
-`run DIR` rechecks the findings in `DIR` (see below), then fuzzes until
-stopped. Both run one job per CPU unless `--jobs N` says otherwise. It
-keeps:
+`run DIR` rechecks the findings in `DIR` and minimises its corpus (see
+below), then fuzzes until stopped. All three run one job per CPU unless
+`--jobs N` says otherwise. It keeps:
 
 - `DIR/corpus/`: libFuzzer's corpus. It is plain Nix source, so it stays
   useful across revisions.
+- `DIR/crashed/`: inputs that crashed, hung or ran out of memory in
+  ogygia-nix-eval when the corpus was last minimised, kept out of the
+  corpus until they no longer do.
 - `DIR/findings/<hash>/`: one directory per input on which the evaluators
   disagree, named by a hash of the input, holding the input as `input.nix`
   and a `report` of the step that diverged, the expression evaluated, and
@@ -84,7 +87,8 @@ keeps:
   memory in ogygia-nix-eval itself, as libFuzzer names them.
 
 Its standard error, meant for a journal, has the recheck's progress every
-1000 findings and its summary, then every minute a line
+1000 findings and its summary, the minimisation's summary, a line
+`fuzzing with N jobs` once fuzzing starts, and every minute a line
 `new finding: DIR/findings/<hash>` for each finding recorded since the
 last, and the outcome counts since `run` started with the number of
 findings. Apart from errors, nothing else reaches it: libFuzzer's own
@@ -117,6 +121,22 @@ nix run .#ogygia-nix-eval-fuzz -- check DIR/findings/<hash>/input.nix
 
 It prints the input's outcome, or the report and a non-zero exit status if
 the evaluators still disagree.
+
+### Corpus
+
+`minimise DIR` merges the inputs in `DIR/corpus`, `DIR/crashed` and the
+seeds with libFuzzer's `-merge=1`, split at random into up to one shard
+per CPU unless `--jobs N` says otherwise, all at once. It keeps in the
+corpus the inputs that add coverage within their shard, and moves to
+`DIR/crashed` those that crashed, hung or ran out of memory, so that a
+broken revision cannot shrink the corpus and fuzzing is not handed inputs
+that kill it. A fresh split each time catches inputs whose coverage
+duplicates another's in a different shard. It uses `DIR/minimise/` for
+scratch space, and leaves the corpus as it was if anything fails.
+
+`run` does this after the recheck, then fuzzes with `-keep_seed=1`, so
+that libFuzzer does not first replay the whole corpus in one process.
+`minimise` must not run while something is fuzzing the same directory.
 
 ### From the dev shell
 
