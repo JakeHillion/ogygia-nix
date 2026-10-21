@@ -81,7 +81,14 @@ pub fn recheck(
             let Some(dir) = dirs.get(next.fetch_add(1, Ordering::Relaxed)) else {
                 break;
             };
-            let result = recheck_one(dir, &check);
+            let result =
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| recheck_one(dir, &check)))
+                    .unwrap_or_else(|panic| {
+                        // Stop the others too, rather than finishing every finding
+                        // before the panic gets out.
+                        failed.store(true, Ordering::Relaxed);
+                        std::panic::resume_unwind(panic)
+                    });
             let mut progress = progress.lock().unwrap();
             let (summary, processed, log) = &mut *progress;
             match result {
@@ -249,6 +256,34 @@ mod tests {
                 "rechecked 2000/2500 findings (80.0%)".to_owned(),
             ]
         );
+    }
+
+    #[test]
+    fn recheck_stops_at_a_panic() {
+        let tmp = tempfile::tempdir().unwrap();
+        let findings = tmp.path();
+        for i in 0..1000 {
+            record(findings, &i.to_string(), "report").unwrap();
+        }
+        let checked = AtomicUsize::new(0);
+        let result = std::panic::catch_unwind(|| {
+            recheck(
+                findings,
+                JOBS,
+                |src| {
+                    if checked.fetch_add(1, Ordering::Relaxed) == 0 {
+                        panic!("check failed");
+                    }
+                    // Far longer than the panic takes to stop the others.
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                    Outcome::Diverged(src.to_owned())
+                },
+                |_| {},
+            )
+        });
+        assert!(result.is_err());
+        // The panicking check, and at most one more per other job.
+        assert!(checked.into_inner() <= JOBS.get());
     }
 
     #[test]

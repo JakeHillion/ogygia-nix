@@ -59,7 +59,7 @@ struct Options {
 
 static OPTIONS: OnceLock<Options> = OnceLock::new();
 
-/// The original standard error, once `run` has pointed descriptor 2 at
+/// The original standard error, once [`quiet`] has pointed descriptor 2 at
 /// /dev/null.
 static LOG: OnceLock<File> = OnceLock::new();
 
@@ -169,6 +169,23 @@ fn silence_stderr() -> std::io::Result<File> {
     Ok(original.into())
 }
 
+/// Send standard error to [`LOG`], and descriptor 2 to /dev/null:
+/// libFuzzer reports every job, and evaluation traces and warns with bytes
+/// of the input, so only our own lines go to standard error.
+fn quiet() -> bool {
+    match silence_stderr() {
+        Ok(log) => {
+            LOG.set(log).expect("standard error is silenced once");
+            std::panic::set_hook(Box::new(|info| report!("{info}")));
+            true
+        }
+        Err(e) => {
+            eprintln!("silencing standard error: {e}");
+            false
+        }
+    }
+}
+
 fn run(dir: &Path, jobs: NonZero<usize>) -> ExitCode {
     let Some(seeds) = option_env!("OGYGIA_NIX_EVAL_FUZZ_SEEDS") else {
         eprintln!("this build has no seed inputs; build it with Nix");
@@ -184,20 +201,38 @@ fn run(dir: &Path, jobs: NonZero<usize>) -> ExitCode {
             return ExitCode::FAILURE;
         }
     }
-    // libFuzzer reports every job, and evaluation traces and warns with
-    // bytes of the input, so only our own lines go to standard error.
-    match silence_stderr() {
-        Ok(log) => {
-            LOG.set(log).expect("run starts once");
-            std::panic::set_hook(Box::new(|info| report!("{info}")));
-        }
+    if !quiet() {
+        return ExitCode::FAILURE;
+    }
+    let exe = match std::env::current_exe() {
+        Ok(exe) => exe,
         Err(e) => {
-            eprintln!("silencing standard error: {e}");
+            report!("locating this program: {e}");
             return ExitCode::FAILURE;
         }
-    }
-    if !recheck(&findings, jobs) {
-        return ExitCode::FAILURE;
+    };
+    // libFuzzer limits the peak memory use of this process, which every
+    // process it starts inherits, so the recheck, which can use far more,
+    // runs in a process of its own.
+    let rechecked = LOG
+        .get()
+        .expect("standard error is silenced")
+        .try_clone()
+        .and_then(|log| {
+            std::process::Command::new(&exe)
+                .arg("recheck")
+                .arg(dir)
+                .arg(format!("--jobs={jobs}"))
+                .stderr(log)
+                .status()
+        });
+    match rechecked {
+        Ok(status) if status.success() => {}
+        Ok(_) => return ExitCode::FAILURE,
+        Err(e) => {
+            report!("running the recheck: {e}");
+            return ExitCode::FAILURE;
+        }
     }
     let mut summary = match Summary::new(&this_run.join("stats"), &findings) {
         Ok(summary) => summary,
@@ -214,13 +249,6 @@ fn run(dir: &Path, jobs: NonZero<usize>) -> ExitCode {
             }
         }
     });
-    let exe = match std::env::current_exe() {
-        Ok(exe) => exe,
-        Err(e) => {
-            report!("locating this program: {e}");
-            return ExitCode::FAILURE;
-        }
-    };
     let path = |p: &Path| p.display().to_string();
     fuzz(vec![
         path(&exe),
@@ -284,7 +312,7 @@ fn main() -> ExitCode {
     match Cli::parse().command {
         Command::Run { dir, jobs } => run(&dir, or_cpus(jobs)),
         Command::Recheck { dir, jobs } => {
-            if recheck(&dir.join("findings"), or_cpus(jobs)) {
+            if quiet() && recheck(&dir.join("findings"), or_cpus(jobs)) {
                 ExitCode::SUCCESS
             } else {
                 ExitCode::FAILURE
