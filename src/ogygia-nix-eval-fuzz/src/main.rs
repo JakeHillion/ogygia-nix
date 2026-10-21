@@ -14,6 +14,7 @@ use std::process::ExitCode;
 use std::process::Stdio;
 use std::sync::OnceLock;
 use std::time::Duration;
+use std::time::Instant;
 
 use clap::Parser;
 use libfuzzer_sys::fuzz_crossover;
@@ -33,11 +34,12 @@ struct Cli {
 
 #[derive(clap::Subcommand)]
 enum Command {
-    /// Recheck the findings in DIR, then fuzz until stopped.
+    /// Recheck the findings in DIR and minimise its corpus, then fuzz until
+    /// stopped.
     Run {
         dir: PathBuf,
-        /// Findings to recheck and fuzzing processes to run at once;
-        /// defaults to one per CPU.
+        /// Findings to recheck, corpus shards to minimise and fuzzing
+        /// processes to run at once; defaults to one per CPU.
         #[arg(long)]
         jobs: Option<NonZero<usize>>,
     },
@@ -46,6 +48,14 @@ enum Command {
     Recheck {
         dir: PathBuf,
         /// Findings to recheck at once; defaults to one per CPU.
+        #[arg(long)]
+        jobs: Option<NonZero<usize>>,
+    },
+    /// Shrink DIR/corpus to the inputs that add coverage, keeping those that
+    /// crash. Must not run while DIR is being fuzzed.
+    Minimise {
+        dir: PathBuf,
+        /// Corpus shards to minimise at once; defaults to one per CPU.
         #[arg(long)]
         jobs: Option<NonZero<usize>>,
     },
@@ -202,6 +212,85 @@ fn check_in_child(exe: &Path, src: &str) -> std::io::Result<Outcome> {
     outcome.ok_or_else(|| std::io::Error::other(format!("check {}", output.status)))
 }
 
+/// Nix gets 10 seconds, so a timeout means ours is far slower.
+const TIMEOUT: &str = "-timeout=60";
+
+/// The seed inputs this build was made with.
+const SEEDS: Option<&str> = option_env!("OGYGIA_NIX_EVAL_FUZZ_SEEDS");
+
+fn minimise(dir: &Path, jobs: NonZero<usize>) -> bool {
+    let corpus = dir.join("corpus");
+    let crashed = dir.join("crashed");
+    let this_run = this_run(dir);
+    let artifacts = this_run.join("artifacts");
+    // The merges write statistics there.
+    if let Err(e) = std::fs::create_dir_all(&artifacts) {
+        report!("creating {}: {e}", artifacts.display());
+        return false;
+    }
+    let exe = match std::env::current_exe() {
+        Ok(exe) => exe,
+        Err(e) => {
+            report!("locating this program: {e}");
+            return false;
+        }
+    };
+    let seeds = SEEDS.map(|s| Path::new(s).join("seeds"));
+    let findings = format!("--findings={}", dir.join("findings").display());
+    let stats = format!("--stats={}", this_run.join("stats").display());
+    report!("minimising corpus in {}", corpus.display());
+    let start = Instant::now();
+    match ogygia_nix_eval_fuzz::minimise(
+        &corpus,
+        &crashed,
+        seeds.as_deref().as_slice(),
+        &dir.join("minimise"),
+        &artifacts,
+        jobs,
+        |inputs, kept, artifacts, control| {
+            let status = std::process::Command::new(&exe)
+                .args(["-merge=1", TIMEOUT, &findings, &stats])
+                .arg(format!("-artifact_prefix={}/", artifacts.display()))
+                .arg(format!("-merge_control_file={}", control.display()))
+                .arg(kept)
+                .arg(inputs)
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status()?;
+            if status.success() {
+                Ok(())
+            } else {
+                Err(std::io::Error::other(format!(
+                    "merging {}: {status}",
+                    inputs.display()
+                )))
+            }
+        },
+    ) {
+        Ok(m) => {
+            report!(
+                "minimised {} inputs in {}s: {} kept in the corpus, {} that crashed set aside in {}",
+                m.inputs,
+                start.elapsed().as_secs(),
+                m.kept,
+                m.crashed,
+                crashed.display()
+            );
+            true
+        }
+        Err(e) => {
+            report!("minimising {}: {e}", corpus.display());
+            false
+        }
+    }
+}
+
+/// Where this revision's statistics and artifacts go.
+fn this_run(dir: &Path) -> PathBuf {
+    let revision = option_env!("OGYGIA_NIX_EVAL_FUZZ_REV").unwrap_or("unknown");
+    dir.join("runs").join(revision)
+}
+
 /// Point descriptor 2 at /dev/null, returning the original standard error.
 fn silence_stderr() -> std::io::Result<File> {
     let original = std::io::stderr().as_fd().try_clone_to_owned()?;
@@ -231,14 +320,13 @@ fn quiet() -> bool {
 }
 
 fn run(dir: &Path, jobs: NonZero<usize>) -> ExitCode {
-    let Some(seeds) = option_env!("OGYGIA_NIX_EVAL_FUZZ_SEEDS") else {
+    let Some(seeds) = SEEDS else {
         eprintln!("this build has no seed inputs; build it with Nix");
         return ExitCode::FAILURE;
     };
-    let revision = option_env!("OGYGIA_NIX_EVAL_FUZZ_REV").unwrap_or("unknown");
     let findings = dir.join("findings");
     let corpus = dir.join("corpus");
-    let this_run = dir.join("runs").join(revision);
+    let this_run = this_run(dir);
     for d in [&corpus, &this_run.join("artifacts")] {
         if let Err(e) = std::fs::create_dir_all(d) {
             report!("creating {}: {e}", d.display());
@@ -293,22 +381,35 @@ fn run(dir: &Path, jobs: NonZero<usize>) -> ExitCode {
             }
         }
     });
+    let minimised = minimise(dir, jobs);
+    if !minimised {
+        report!("fuzzing the corpus and seeds as they were");
+    }
+    report!("fuzzing with {jobs} jobs");
     let path = |p: &Path| p.display().to_string();
-    fuzz(vec![
+    let mut args = vec![
         path(&exe),
         format!("-fork={jobs}"),
         "-ignore_crashes=1".to_owned(),
         "-ignore_timeouts=1".to_owned(),
         "-ignore_ooms=1".to_owned(),
-        // Nix gets 10 seconds, so a timeout means ours is far slower.
-        "-timeout=60".to_owned(),
+        TIMEOUT.to_owned(),
         format!("-artifact_prefix={}/", path(&this_run.join("artifacts"))),
         format!("-dict={seeds}/nix.dict"),
         format!("--findings={}", path(&findings)),
         format!("--stats={}", path(&this_run.join("stats"))),
         path(&corpus),
-        format!("{seeds}/seeds"),
-    ])
+    ];
+    if minimised {
+        // Fuzz the inputs as they are, rather than first replaying them,
+        // one at a time, to learn which add coverage: the minimisation did
+        // that in parallel, set aside those that crash, and kept every seed
+        // that adds coverage.
+        args.push("-keep_seed=1".to_owned());
+    } else {
+        args.push(format!("{seeds}/seeds"));
+    }
+    fuzz(args)
 }
 
 /// `jobs`, defaulting to one per CPU.
@@ -349,7 +450,7 @@ fn main() -> ExitCode {
     let subcommand = args.get(1).map(String::as_str);
     if !matches!(
         subcommand,
-        Some("run" | "recheck" | "check" | "help" | "-h" | "--help")
+        Some("run" | "recheck" | "minimise" | "check" | "help" | "-h" | "--help")
     ) {
         return fuzz(args);
     }
@@ -357,6 +458,13 @@ fn main() -> ExitCode {
         Command::Run { dir, jobs } => run(&dir, or_cpus(jobs)),
         Command::Recheck { dir, jobs } => {
             if quiet() && recheck(&dir.join("findings"), or_cpus(jobs)) {
+                ExitCode::SUCCESS
+            } else {
+                ExitCode::FAILURE
+            }
+        }
+        Command::Minimise { dir, jobs } => {
+            if minimise(&dir, or_cpus(jobs)) {
                 ExitCode::SUCCESS
             } else {
                 ExitCode::FAILURE
