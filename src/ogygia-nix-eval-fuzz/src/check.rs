@@ -126,6 +126,21 @@ impl Outcome {
             Outcome::Diverged(_) => 7,
         }
     }
+
+    /// The outcome named `name` in [`Outcome::NAMES`], other than
+    /// [`Outcome::Diverged`], which holds a report.
+    pub fn from_name(name: &str) -> Option<Outcome> {
+        Some(match name {
+            "ignored" => Outcome::Ignored,
+            "parse-rejected" => Outcome::ParseRejected,
+            "skipped" => Outcome::Skipped,
+            "limited" => Outcome::Limited,
+            "values" => Outcome::Value,
+            "caught" => Outcome::Caught,
+            "uncaught" => Outcome::Uncaught,
+            _ => return None,
+        })
+    }
 }
 
 /// Standard output on success, standard error on failure.
@@ -600,6 +615,18 @@ mod tests {
     #[test]
     fn skips_what_nix_cannot_finish() {
         assert_eq!(outcome("let f = x: f x; in f 1"), "skipped");
+    }
+
+    #[test]
+    fn names_round_trip() {
+        for (i, name) in Outcome::NAMES.iter().enumerate() {
+            match Outcome::from_name(name) {
+                Some(outcome) => assert_eq!(outcome.index(), i),
+                None => assert_eq!(*name, "diverged"),
+            }
+        }
+        assert!(Outcome::from_name("diverged").is_none());
+        assert!(Outcome::from_name("nonsense").is_none());
     }
 
     #[test]
