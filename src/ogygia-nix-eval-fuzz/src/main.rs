@@ -11,6 +11,7 @@ use std::os::fd::AsRawFd;
 use std::path::Path;
 use std::path::PathBuf;
 use std::process::ExitCode;
+use std::process::Stdio;
 use std::sync::OnceLock;
 use std::time::Duration;
 
@@ -136,10 +137,23 @@ fn fuzz(args: Vec<String>) -> ExitCode {
 }
 
 fn recheck(findings: &Path, jobs: NonZero<usize>) -> bool {
+    let exe = match std::env::current_exe() {
+        Ok(exe) => exe,
+        Err(e) => {
+            report!("locating this program: {e}");
+            return false;
+        }
+    };
     match ogygia_nix_eval_fuzz::recheck(
         findings,
         jobs,
-        |src| ogygia_nix_eval_fuzz::check(src, Budget::Unlimited),
+        |src| {
+            check_in_child(&exe, src).unwrap_or_else(|e| {
+                // Left as it was, as when Nix cannot finish.
+                report!("rechecking a finding: {e}");
+                Outcome::Skipped
+            })
+        },
         |line| report!("{line}"),
     ) {
         Ok(r) => {
@@ -156,6 +170,36 @@ fn recheck(findings: &Path, jobs: NonZero<usize>) -> bool {
             false
         }
     }
+}
+
+/// [`ogygia_nix_eval_fuzz::check`] `src` with no limit on Nix, in a `check`
+/// process of its own: the coverage instrumentation this program is built
+/// with has every thread of a process update the same counters, so checks
+/// on threads of one process slow each other down rather than running in
+/// parallel.
+fn check_in_child(exe: &Path, src: &str) -> std::io::Result<Outcome> {
+    let mut child = std::process::Command::new(exe)
+        .args(["check", "/dev/stdin"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()?;
+    // The child reads all of its input before it writes anything.
+    child
+        .stdin
+        .take()
+        .expect("standard input is piped")
+        .write_all(src.as_bytes())?;
+    let output = child.wait_with_output()?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let outcome = if output.status.success() {
+        Outcome::from_name(stdout.trim_end())
+    } else if stdout.starts_with("step: ") {
+        Some(Outcome::Diverged(stdout.into_owned()))
+    } else {
+        None
+    };
+    outcome.ok_or_else(|| std::io::Error::other(format!("check {}", output.status)))
 }
 
 /// Point descriptor 2 at /dev/null, returning the original standard error.
