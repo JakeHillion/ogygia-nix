@@ -419,6 +419,16 @@ impl<'a> Eval<'a> {
         }
     }
 
+    /// [`Self::lazy`] for `e` filling in a slot of `env` while other slots of
+    /// `env` may not be filled in yet.
+    fn lazy_slot(&self, e: ExprRef<'a>, env: &'a Env<'a>) -> Value<'a> {
+        match e {
+            // A variable of this frame may name a slot not filled in yet.
+            Expr::Var(0, _) => self.thunk(ThunkState::Expr(e, env)),
+            _ => self.lazy(e, env),
+        }
+    }
+
     pub fn eval(&self, e: ExprRef<'a>, env: &'a Env<'a>) -> R<'a> {
         match e {
             Expr::Null => Ok(Value::Null),
@@ -653,12 +663,7 @@ impl<'a> Eval<'a> {
         });
         for (slot, init) in slots.iter().zip(inits) {
             match init {
-                // A slot aliasing another slot of this frame may refer to one
-                // that is not filled in yet.
-                SlotInit::Expr(e @ Expr::Var(0, _)) => {
-                    slot.set(self.thunk(ThunkState::Expr(e, env)))
-                }
-                SlotInit::Expr(e) => slot.set(self.lazy(e, env)),
+                SlotInit::Expr(e) => slot.set(self.lazy_slot(e, env)),
                 SlotInit::Select(..) => {}
             }
         }
@@ -828,12 +833,7 @@ impl<'a> Eval<'a> {
                             slot.set(v);
                         }
                         None => match formal.default {
-                            // A default aliasing another slot of this frame
-                            // may refer to one that is not filled in yet.
-                            Some(d @ Expr::Var(0, _)) => {
-                                slot.set(self.thunk(ThunkState::Expr(d, env)))
-                            }
-                            Some(d) => slot.set(self.lazy(d, env)),
+                            Some(d) => slot.set(self.lazy_slot(d, env)),
                             None => {
                                 return eval_err(format!(
                                     "function '{}' called without required argument '{}' at {}",
