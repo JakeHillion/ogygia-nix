@@ -828,6 +828,11 @@ impl<'a> Eval<'a> {
                             slot.set(v);
                         }
                         None => match formal.default {
+                            // A default aliasing another slot of this frame
+                            // may refer to one that is not filled in yet.
+                            Some(d @ Expr::Var(0, _)) => {
+                                slot.set(self.thunk(ThunkState::Expr(d, env)))
+                            }
                             Some(d) => slot.set(self.lazy(d, env)),
                             None => {
                                 return eval_err(format!(
