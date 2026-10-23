@@ -142,10 +142,11 @@ pub fn partition<'a>(ev: &Eval<'a>, args: &[Value<'a>]) -> R<'a> {
     let mut right = Vec::new();
     let mut wrong = Vec::new();
     for item in ev.force_list(args[1])? {
-        if ev.force_bool(ev.call(f, *item)?)? {
-            right.push(*item);
+        let item = ev.force(*item)?;
+        if ev.force_bool(ev.call(f, item)?)? {
+            right.push(item);
         } else {
-            wrong.push(*item);
+            wrong.push(item);
         }
     }
     Ok(ev.attrs(vec![
