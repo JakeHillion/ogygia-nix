@@ -151,6 +151,13 @@ pub fn compile<'a>(
     if let Some(at) = parse
         .syntax()
         .descendants()
+        .find_map(|n| interpolation_after_path_trivia(&n))
+    {
+        return err(format!("syntax error: unexpected '${{' at {}", pos(at)));
+    }
+    if let Some(at) = parse
+        .syntax()
+        .descendants()
         .filter_map(ast::Path::cast)
         .find_map(|p| path_segments_before_interpolation(&p))
     {
@@ -468,6 +475,21 @@ fn insert_parens<'a>(
     }
     inserted.sort_unstable();
     (Cow::Owned(text), inserted)
+}
+
+/// Nix only continues a path with an interpolation directly after it, so
+/// `./a ${b}` is a syntax error, but rnix parses whitespace and comments
+/// between them as part of the path. Returns where such an interpolation
+/// starts.
+fn interpolation_after_path_trivia(node: &rnix::SyntaxNode) -> Option<rnix::TextSize> {
+    use rnix::SyntaxKind::*;
+    if !matches!(node.kind(), NODE_PATH_ABS | NODE_PATH_REL | NODE_PATH_HOME) {
+        return None;
+    }
+    node.children_with_tokens()
+        .skip_while(|c| !c.kind().is_trivia())
+        .find(|c| c.kind() == NODE_INTERPOL)
+        .map(|c| c.text_range().start())
 }
 
 /// Nix lexes a path followed by an interpolation as the longest prefix that
