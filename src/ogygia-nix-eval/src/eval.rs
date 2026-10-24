@@ -19,6 +19,7 @@ use crate::ir::Param;
 use crate::ir::Pos;
 use crate::ir::SlotInit;
 use crate::path::canon_path;
+use crate::store::StorePath;
 use crate::symbol::Sym;
 use crate::value::Attrs;
 use crate::value::Closure;
@@ -1281,16 +1282,61 @@ impl<'a> Eval<'a> {
     /// Coerce to a filesystem path: a path value, or a string holding an
     /// absolute path.
     pub fn coerce_to_path(&self, v: Value<'a>) -> R<'a, String> {
+        self.coerce_to_path_realising(v, false)
+    }
+
+    /// [`Eval::coerce_to_path`] for a path to read. Nix first builds the
+    /// derivation outputs the string refers to; this evaluator cannot build,
+    /// so it fails unless they are already in the store.
+    pub fn realise_path(&self, v: Value<'a>) -> R<'a, String> {
+        self.coerce_to_path_realising(v, true)
+    }
+
+    fn coerce_to_path_realising(&self, v: Value<'a>, realise: bool) -> R<'a, String> {
         let v = self.force(v)?;
         if let Value::Path(p) = v {
             return Ok(p.0.to_owned());
         }
-        let (buf, _) = self.coerce_to_string(v, Coerce::PLAIN)?;
+        let (buf, ctx) = self.coerce_to_string(v, Coerce::PLAIN)?;
+        if realise {
+            self.realise(&ctx)?;
+        }
         let s = String::from_utf8_lossy(&buf).into_owned();
         if !s.starts_with('/') {
             return eval_err(format!("string '{s}' doesn't represent an absolute path"));
         }
         Ok(canon_path(&s))
+    }
+
+    /// Fail unless every derivation output in `ctx` is in the store, as
+    /// [`Eval::realise_path`] requires.
+    pub fn realise(&self, ctx: &[Ctx<'a>]) -> R<'a, ()> {
+        for c in ctx {
+            let Ctx::Built { drv, output } = *c else {
+                continue;
+            };
+            let path = match self.ctx.drvs.borrow().get(drv) {
+                Some((d, _)) => match d.outputs.get(output) {
+                    Some(o) => Some(o.path.clone()),
+                    None => {
+                        return eval_err(format!(
+                            "derivation '{drv}' does not have wanted outputs '{output}'"
+                        ));
+                    }
+                },
+                None => None,
+            };
+            let valid = match path.as_deref().and_then(StorePath::parse) {
+                Some(sp) => self.ctx.io.is_valid(&sp).map_err(anyhow_err)?,
+                None => false,
+            };
+            if !valid {
+                return eval_err(format!(
+                    "cannot build '{drv}': this evaluator does not build derivations"
+                ));
+            }
+        }
+        Ok(())
     }
 
     pub fn copy_path_to_store(&self, p: &str) -> R<'a, &'a str> {

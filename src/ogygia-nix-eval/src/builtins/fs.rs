@@ -15,12 +15,12 @@ use crate::value::error;
 use crate::value::eval_err;
 
 pub fn import<'a>(ev: &Eval<'a>, args: &[Value<'a>]) -> R<'a> {
-    let path = ev.coerce_to_path(args[0])?;
+    let path = ev.realise_path(args[0])?;
     ev.import(&path)
 }
 
 pub fn scoped_import<'a>(ev: &Eval<'a>, args: &[Value<'a>]) -> R<'a> {
-    let path = ev.coerce_to_path(args[1])?;
+    let path = ev.realise_path(args[1])?;
     let scope = ev.force_attrs(args[0])?;
     let file = ev.ctx.io.resolve_import(&path).map_err(anyhow_err)?;
     let names: Vec<_> = scope.entries.iter().map(|e| e.name).collect();
@@ -39,13 +39,13 @@ pub fn scoped_import<'a>(ev: &Eval<'a>, args: &[Value<'a>]) -> R<'a> {
 }
 
 pub fn read_file<'a>(ev: &Eval<'a>, args: &[Value<'a>]) -> R<'a> {
-    let path = ev.coerce_to_path(args[0])?;
+    let path = ev.realise_path(args[0])?;
     let bytes = ev.ctx.io.read(&path).map_err(anyhow_err)?;
     Ok(ev.str_val(&bytes, &[]))
 }
 
 pub fn read_dir<'a>(ev: &Eval<'a>, args: &[Value<'a>]) -> R<'a> {
-    let path = ev.coerce_to_path(args[0])?;
+    let path = ev.realise_path(args[0])?;
     let entries = ev.ctx.io.read_dir(&path).map_err(anyhow_err)?;
     Ok(ev.attrs(
         entries
@@ -60,7 +60,7 @@ pub fn read_dir<'a>(ev: &Eval<'a>, args: &[Value<'a>]) -> R<'a> {
 }
 
 pub fn read_file_type<'a>(ev: &Eval<'a>, args: &[Value<'a>]) -> R<'a> {
-    let path = ev.coerce_to_path(args[0])?;
+    let path = ev.realise_path(args[0])?;
     match ev.ctx.io.file_type(&path) {
         Some(t) => Ok(ev.string(t.name())),
         None => eval_err(format!("path '{path}' does not exist")),
@@ -70,7 +70,7 @@ pub fn read_file_type<'a>(ev: &Eval<'a>, args: &[Value<'a>]) -> R<'a> {
 pub fn path_exists<'a>(ev: &Eval<'a>, args: &[Value<'a>]) -> R<'a> {
     let v = ev.force(args[0])?;
     let (raw, _) = ev.coerce_to_string(v, Coerce::PLAIN)?;
-    let path = ev.coerce_to_path(v)?;
+    let path = ev.realise_path(v)?;
     let io = &ev.ctx.io;
     // A trailing slash requires a directory.
     if raw.ends_with(b"/") && path != "/" {
@@ -81,7 +81,7 @@ pub fn path_exists<'a>(ev: &Eval<'a>, args: &[Value<'a>]) -> R<'a> {
 
 pub fn hash_file<'a>(ev: &Eval<'a>, args: &[Value<'a>]) -> R<'a> {
     let algo = super::strings::hash_algo(ev.force_str_no_ctx(args[0])?)?;
-    let path = ev.coerce_to_path(args[1])?;
+    let path = ev.realise_path(args[1])?;
     let bytes = ev.ctx.io.read(&path).map_err(anyhow_err)?;
     Ok(ev.string(&hex::encode(algo.digest(&bytes))))
 }
@@ -100,7 +100,8 @@ pub fn find_file<'a>(ev: &Eval<'a>, args: &[Value<'a>]) -> R<'a> {
             let Some(path) = entry.get(syms.path) else {
                 return eval_err("attribute 'path' missing in a search path entry");
             };
-            let (path, _) = ev.coerce_to_string(path, Coerce::PLAIN)?;
+            let (path, ctx) = ev.coerce_to_string(path, Coerce::PLAIN)?;
+            ev.realise(&ctx)?;
             Ok((prefix, String::from_utf8_lossy(&path).into_owned()))
         })
         .collect::<Result<Vec<_>, _>>()?;
@@ -231,7 +232,7 @@ pub fn path<'a>(ev: &Eval<'a>, args: &[Value<'a>]) -> R<'a> {
     let (mut path, mut name, mut filter, mut recursive) = (None, None, None, true);
     for e in set.entries {
         match ev.ctx.name(e.name) {
-            "path" => path = Some(ev.coerce_to_path(e.value)?),
+            "path" => path = Some(ev.realise_path(e.value)?),
             "name" => {
                 name = Some(String::from_utf8_lossy(ev.force_str_no_ctx(e.value)?).into_owned());
             }
@@ -255,7 +256,7 @@ pub fn path<'a>(ev: &Eval<'a>, args: &[Value<'a>]) -> R<'a> {
 }
 
 pub fn filter_source<'a>(ev: &Eval<'a>, args: &[Value<'a>]) -> R<'a> {
-    let path = ev.coerce_to_path(args[1])?;
+    let path = ev.realise_path(args[1])?;
     let filter = ev.force_function(args[0])?;
     add_path(ev, &path, None, Some(filter))
 }
