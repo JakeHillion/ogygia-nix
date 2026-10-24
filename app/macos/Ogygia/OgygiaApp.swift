@@ -45,7 +45,8 @@ struct OgygiaApp: App {
         }
 
         Settings {
-            SettingsView(nebula: nebula)
+            SettingsView(nebula: nebula, updater: updater)
         }
+        .windowResizability(.contentMinSize)
     }
 }

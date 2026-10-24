@@ -1,67 +1,48 @@
 import SwiftUI
 
-/// Which fleet this Mac follows. The daemon stores the values in the
-/// `dev.ogygia.macos` defaults domain, where nix-darwin or a configuration
-/// profile can set them instead.
+/// The settings window: a sidebar of panes, like System Settings. What comes
+/// from the fleet repository sits under Fleet; each service the app runs
+/// gets its own section below it.
 struct SettingsView: View {
     let nebula: NebulaModel
+    let updater: UpdaterModel
 
-    @State private var repositoryURL = ""
-    @State private var branch = ""
-    @State private var device = ""
-    @State private var loaded = false
-    @State private var saving = false
-    @State private var message: String?
+    @State private var pane: Pane = .general
+
+    enum Pane: Hashable {
+        case general
+        case fleet
+        case nebulaOverview
+    }
 
     var body: some View {
-        Form {
-            TextField("Repository URL", text: $repositoryURL, prompt: Text("https://git.example.com/fleet.git"))
-            TextField("Branch", text: $branch, prompt: Text("The repository's default branch"))
-            TextField("Device", text: $device, prompt: Text("Name in ogygiaConfigurations"))
-            if managed {
-                Text("These settings are managed by a configuration profile.")
-                    .foregroundStyle(.secondary)
+        NavigationSplitView {
+            List(selection: $pane) {
+                Label("General", systemImage: "gearshape")
+                    .tag(Pane.general)
+                Label("Fleet", systemImage: "server.rack")
+                    .tag(Pane.fleet)
+                Section("Nebula") {
+                    Label("Overview", systemImage: "point.3.connected.trianglepath.dotted")
+                        .tag(Pane.nebulaOverview)
+                }
             }
-            if let message {
-                Text(message)
-                    .foregroundStyle(.red)
-                    .textSelection(.enabled)
-            }
-            HStack {
-                Spacer()
-                Button("Save") { save() }
-                    .keyboardShortcut(.defaultAction)
-                    .disabled(saving || managed || nebula.status == nil)
+            .navigationSplitViewColumnWidth(190)
+            .toolbar(removing: .sidebarToggle)
+        } detail: {
+            switch pane {
+            case .general:
+                GeneralSettingsView(updater: updater)
+            case .fleet:
+                FleetSettingsView(nebula: nebula)
+            case .nebulaOverview:
+                NebulaOverviewView(nebula: nebula)
             }
         }
-        .disabled(managed)
-        .padding()
-        .frame(width: 460)
+        .frame(minWidth: 680, minHeight: 440)
         .onAppear {
             // A menu bar app is never frontmost on its own.
             NSApplication.shared.activate()
-            load()
-        }
-        .onChange(of: nebula.status) { load() }
-    }
-
-    private var managed: Bool { nebula.status?.settingsManaged ?? false }
-
-    /// Fill the fields from the daemon once it has answered.
-    private func load() {
-        guard !loaded, let status = nebula.status else { return }
-        repositoryURL = status.repositoryURL ?? ""
-        branch = status.branch ?? ""
-        device = status.device ?? ""
-        loaded = true
-    }
-
-    private func save() {
-        saving = true
-        message = nil
-        Task {
-            message = await nebula.save(repositoryURL: repositoryURL, branch: branch, device: device)
-            saving = false
         }
     }
 }

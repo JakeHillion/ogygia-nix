@@ -16,6 +16,9 @@
 		214D8B1D7BB447699ECD4B93 /* DaemonProtocol.swift in Sources */ = {isa = PBXBuildFile; fileRef = E6236370BE094D94D9FF0204 /* DaemonProtocol.swift */; };
 		3E402633F76177DC1811AF1D /* NebulaModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1B34E99816B0B3FEE1195D6E /* NebulaModel.swift */; };
 		B66D1B35B2E070D51D8CE8F9 /* SettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = D766984E6F0FBC22CAB82AB7 /* SettingsView.swift */; };
+		4B1E7D2A9C3F5E8A1D6B0C47 /* GeneralSettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8E5A2F1C7D4B9E3A6C0F2D58 /* GeneralSettingsView.swift */; };
+		2C9F4A7E1B5D8C3F6A0E9B61 /* FleetSettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6D3B8E2A5F1C9D7E4B0A3C72 /* FleetSettingsView.swift */; };
+		9A4E1C7F3B6D2A8E5C1F0D83 /* NebulaOverviewView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1F7C3A9E5D2B8F4A6E0C1B94 /* NebulaOverviewView.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -30,6 +33,9 @@
 		E6236370BE094D94D9FF0204 /* DaemonProtocol.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DaemonProtocol.swift; sourceTree = "<group>"; };
 		1B34E99816B0B3FEE1195D6E /* NebulaModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NebulaModel.swift; sourceTree = "<group>"; };
 		D766984E6F0FBC22CAB82AB7 /* SettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsView.swift; sourceTree = "<group>"; };
+		8E5A2F1C7D4B9E3A6C0F2D58 /* GeneralSettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GeneralSettingsView.swift; sourceTree = "<group>"; };
+		6D3B8E2A5F1C9D7E4B0A3C72 /* FleetSettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FleetSettingsView.swift; sourceTree = "<group>"; };
+		1F7C3A9E5D2B8F4A6E0C1B94 /* NebulaOverviewView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NebulaOverviewView.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -51,8 +57,11 @@
 				992C159458F3D61149AFBE26 /* BuildInfo.swift */,
 				E0CD5529C5673750FE73D20A /* DaemonClient.swift */,
 				E6236370BE094D94D9FF0204 /* DaemonProtocol.swift */,
+				6D3B8E2A5F1C9D7E4B0A3C72 /* FleetSettingsView.swift */,
+				8E5A2F1C7D4B9E3A6C0F2D58 /* GeneralSettingsView.swift */,
 				770B0B90849FD8EB2458677A /* Info.plist */,
 				1B34E99816B0B3FEE1195D6E /* NebulaModel.swift */,
+				1F7C3A9E5D2B8F4A6E0C1B94 /* NebulaOverviewView.swift */,
 				414372295F5BD72756A7616C /* Ogygia.entitlements */,
 				653E548688CDC08A29F68437 /* OgygiaApp.swift */,
 				D766984E6F0FBC22CAB82AB7 /* SettingsView.swift */,
@@ -158,6 +167,9 @@
 				3E402633F76177DC1811AF1D /* NebulaModel.swift in Sources */,
 				AB067466CB473BA874815C0D /* OgygiaApp.swift in Sources */,
 				B66D1B35B2E070D51D8CE8F9 /* SettingsView.swift in Sources */,
+				9A4E1C7F3B6D2A8E5C1F0D83 /* NebulaOverviewView.swift in Sources */,
+				2C9F4A7E1B5D8C3F6A0E9B61 /* FleetSettingsView.swift in Sources */,
+				4B1E7D2A9C3F5E8A1D6B0C47 /* GeneralSettingsView.swift in Sources */,
 				43FFC07A5FBEFBEFD3B05B85 /* UpdaterModel.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
