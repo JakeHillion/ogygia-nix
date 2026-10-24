@@ -12,9 +12,13 @@ use core_foundation_sys::preferences::CFPreferencesSynchronize;
 use core_foundation_sys::preferences::kCFPreferencesAnyHost;
 use core_foundation_sys::preferences::kCFPreferencesAnyUser;
 
+use crate::config::ConfigMode;
+use crate::config::LocalConfig;
 use crate::settings::DOMAIN;
 use crate::settings::KEY_BRANCH;
+use crate::settings::KEY_CONFIG_MODE;
 use crate::settings::KEY_DEVICE;
+use crate::settings::KEY_LOCAL_CONFIG;
 use crate::settings::KEY_REPOSITORY_URL;
 use crate::settings::Settings;
 
@@ -32,32 +36,74 @@ pub fn load() -> Settings {
     }
 }
 
-/// Whether a configuration profile forces either setting.
+/// Whether a configuration profile forces any of the settings.
 pub fn managed() -> bool {
-    let domain = CFString::new(DOMAIN);
     [KEY_REPOSITORY_URL, KEY_BRANCH, KEY_DEVICE]
         .iter()
-        .any(|key| {
-            let key = CFString::new(key);
-            unsafe {
-                CFPreferencesAppValueIsForced(
-                    key.as_concrete_TypeRef(),
-                    domain.as_concrete_TypeRef(),
-                ) != 0
+        .any(|key| forced(key))
+}
+
+/// Whether to follow the fleet's Nebula config, and the local one, which a
+/// value that does not parse leaves at its defaults.
+pub fn load_config() -> (ConfigMode, LocalConfig) {
+    let domain = CFString::new(DOMAIN);
+    unsafe { CFPreferencesAppSynchronize(domain.as_concrete_TypeRef()) };
+    let mode = match string(&domain, KEY_CONFIG_MODE).as_deref() {
+        Some("local") => ConfigMode::Local,
+        _ => ConfigMode::Fleet,
+    };
+    let local = string(&domain, KEY_LOCAL_CONFIG)
+        .and_then(|json| match serde_json::from_str(&json) {
+            Ok(local) => Some(local),
+            Err(e) => {
+                tracing::warn!(error = %e, "ignoring a local config that does not parse");
+                None
             }
         })
+        .unwrap_or_default();
+    (mode, local)
+}
+
+/// Whether a configuration profile forces the config mode or the local
+/// config.
+pub fn config_mode_managed() -> bool {
+    forced(KEY_CONFIG_MODE) || forced(KEY_LOCAL_CONFIG)
+}
+
+fn forced(key: &str) -> bool {
+    let domain = CFString::new(DOMAIN);
+    let key = CFString::new(key);
+    unsafe {
+        CFPreferencesAppValueIsForced(key.as_concrete_TypeRef(), domain.as_concrete_TypeRef()) != 0
+    }
 }
 
 /// Store the settings for every user of this Mac, in
 /// `/Library/Preferences/dev.ogygia.macos.plist`, removing any that are
 /// unset. Only root may write there.
 pub fn store(settings: &Settings) -> anyhow::Result<()> {
+    write([
+        (KEY_REPOSITORY_URL, settings.repository_url.clone()),
+        (KEY_BRANCH, settings.branch.clone()),
+        (KEY_DEVICE, settings.device.clone()),
+    ])
+}
+
+/// Store the config mode and the local config beside the settings.
+pub fn store_config(mode: ConfigMode, local: &LocalConfig) -> anyhow::Result<()> {
+    let mode = match mode {
+        ConfigMode::Fleet => "fleet",
+        ConfigMode::Local => "local",
+    };
+    write([
+        (KEY_CONFIG_MODE, Some(mode.to_owned())),
+        (KEY_LOCAL_CONFIG, Some(serde_json::to_string(local)?)),
+    ])
+}
+
+fn write<const N: usize>(values: [(&str, Option<String>); N]) -> anyhow::Result<()> {
     let domain = CFString::new(DOMAIN);
-    for (key, value) in [
-        (KEY_REPOSITORY_URL, &settings.repository_url),
-        (KEY_BRANCH, &settings.branch),
-        (KEY_DEVICE, &settings.device),
-    ] {
+    for (key, value) in values {
         let key = CFString::new(key);
         let value = value.as_deref().map(CFString::new);
         unsafe {

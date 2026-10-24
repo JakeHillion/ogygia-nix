@@ -15,7 +15,6 @@ use chrono::Utc;
 use core_foundation::bundle::CFBundle;
 use core_foundation::string::CFString;
 use ogygia_nixutils::Nix;
-use serde_json::Value;
 use tokio::io::AsyncBufReadExt;
 use tokio::io::AsyncWriteExt;
 use tokio::io::BufReader;
@@ -27,18 +26,26 @@ use tokio::signal::unix::signal;
 use tokio::sync::Notify;
 use tokio::sync::watch;
 
+use crate::config::ConfigMode;
+use crate::config::Fleet;
+use crate::config::LocalConfig;
+use crate::debug::Debug;
+use crate::mesh;
+use crate::mesh::Mesh;
 use crate::peer;
 use crate::prefs;
+use crate::protocol::Nebula;
 use crate::protocol::Request;
 use crate::protocol::Response;
 use crate::protocol::SOCKET_PATH;
 use crate::protocol::Status;
 use crate::render;
+use crate::render::Sshd;
 use crate::report;
 use crate::settings;
 use crate::supervisor::Supervisor;
 
-/// Root-only state: the key, and the last config that evaluated.
+/// Root-only state: the keys, and the last config that evaluated.
 const STATE_DIR: &str = "/Library/Application Support/Ogygia/Nebula";
 /// How often to look for a new config, as `ogygia-updated` polls on NixOS.
 const UPDATE_INTERVAL: Duration = Duration::from_secs(15 * 60);
@@ -53,6 +60,7 @@ struct Paths {
     public_key: PathBuf,
     config: PathBuf,
     cert: PathBuf,
+    fleet: PathBuf,
     nebula: PathBuf,
     nebula_cert: PathBuf,
 }
@@ -70,6 +78,7 @@ impl Paths {
             public_key: state.join("host.pub"),
             config: state.join("config.yml"),
             cert: state.join("host.crt"),
+            fleet: state.join("fleet.json"),
             nebula: bin.join("nebula"),
             nebula_cert: bin.join("nebula-cert"),
         })
@@ -79,6 +88,14 @@ impl Paths {
 struct Daemon {
     paths: Paths,
     nix: Nix,
+    debug: Debug,
+    sshd: Sshd,
+    /// The last fleet config that evaluated, which a local config is applied
+    /// to.
+    fleet: Mutex<Option<Fleet>>,
+    /// Held while choosing and writing the config, which both the update
+    /// loop and the app's changes do.
+    applying: tokio::sync::Mutex<()>,
     status: Arc<Mutex<Status>>,
     refresh: Notify,
     changes: watch::Sender<u64>,
@@ -90,9 +107,19 @@ pub async fn run() -> Result<()> {
     std::fs::set_permissions(STATE_DIR, std::fs::Permissions::from_mode(0o700))?;
 
     let public_key = ensure_key(&paths).await?;
+    let debug = Debug::new(Path::new(STATE_DIR));
+    let sshd = debug.ensure().await?;
+    let fleet = load_fleet(&paths.fleet);
+    let (config_mode, local_config) = prefs::load_config();
     let mut status = Status {
         build: build(),
         public_key: Some(public_key),
+        config_mode,
+        config_mode_managed: prefs::config_mode_managed(),
+        fleet_config: fleet
+            .as_ref()
+            .map(|f| LocalConfig::from_settings(&f.settings)),
+        local_config,
         ..Status::default()
     };
     if let Ok(info) = cert_info(&paths).await {
@@ -113,11 +140,21 @@ pub async fn run() -> Result<()> {
             ]
             .map(String::from),
         ),
+        debug,
+        sshd,
+        fleet: Mutex::new(fleet),
+        applying: tokio::sync::Mutex::new(()),
         status: Arc::new(Mutex::new(status)),
         refresh: Notify::new(),
         changes,
         paths,
     });
+
+    // Render the last fleet config again, in case the daemon's part of it,
+    // such as its sshd, has changed since it was written.
+    if let Err(e) = daemon.apply_fleet().await {
+        daemon.status.lock().unwrap().update_error = Some(format!("{e:#}"));
+    }
 
     // The last good config starts at once, so the mesh is up at boot even
     // when the repository cannot be reached.
@@ -226,12 +263,19 @@ impl Daemon {
             status.branch = settings.branch.clone();
             status.device = settings.device.clone();
             status.settings_managed = prefs::managed();
+            // A `defaults write` or a profile may have changed these too.
+            (status.config_mode, status.local_config) = prefs::load_config();
+            status.config_mode_managed = prefs::config_mode_managed();
         }
 
         let installable = match settings.installable() {
             Ok(Some(installable)) => installable,
             Ok(None) => {
                 // Unconfigured means off: nothing says what to trust.
+                *self.fleet.lock().unwrap() = None;
+                let _ = std::fs::remove_file(&self.paths.fleet);
+                self.status.lock().unwrap().fleet_config = None;
+                let _applying = self.applying.lock().await;
                 self.set_config(None).await;
                 self.status.lock().unwrap().update_error = None;
                 return;
@@ -260,11 +304,40 @@ impl Daemon {
     }
 
     async fn evaluate(&self, installable: &str) -> Result<()> {
-        let settings: Value =
-            tokio::time::timeout(EVAL_TIMEOUT, self.nix.eval_json(installable, None))
-                .await
-                .context("nix eval timed out")??;
-        let config = render::render(settings, &self.paths.key)?;
+        let fleet: Fleet = tokio::time::timeout(
+            EVAL_TIMEOUT,
+            self.nix.eval_json(installable, Some(settings::APPLY)),
+        )
+        .await
+        .context("nix eval timed out")??;
+        // Check it renders before keeping it.
+        render::render(fleet.settings.clone(), None, &self.paths.key, &self.sshd)?;
+        write_atomically(&self.paths.fleet, &serde_json::to_vec(&fleet)?)?;
+        *self.fleet.lock().unwrap() = Some(fleet);
+        self.apply_fleet().await
+    }
+
+    /// Run the last fleet config that evaluated, with the local config in
+    /// place of the fleet's when managing locally. Without one, there is
+    /// nothing to run until an evaluation succeeds.
+    async fn apply_fleet(&self) -> Result<()> {
+        let _applying = self.applying.lock().await;
+        let Some(settings) = self
+            .fleet
+            .lock()
+            .unwrap()
+            .as_ref()
+            .map(|f| f.settings.clone())
+        else {
+            return Ok(());
+        };
+        let (mode, local) = {
+            let status = self.status.lock().unwrap();
+            (status.config_mode, status.local_config.clone())
+        };
+        self.status.lock().unwrap().fleet_config = Some(LocalConfig::from_settings(&settings));
+        let local = (mode == ConfigMode::Local).then_some(&local);
+        let config = render::render(settings, local, &self.paths.key, &self.sshd)?;
         self.set_config(Some(config)).await;
         Ok(())
     }
@@ -298,6 +371,18 @@ impl Daemon {
             status.cert_expires = info.map(|i| i.not_after);
         }
         self.changes.send_modify(|generation| *generation += 1);
+    }
+}
+
+/// The fleet config kept from the last evaluation, if it is still readable.
+fn load_fleet(path: &Path) -> Option<Fleet> {
+    let json = std::fs::read(path).ok()?;
+    match serde_json::from_slice(&json) {
+        Ok(fleet) => Some(fleet),
+        Err(e) => {
+            tracing::warn!(error = %e, path = %path.display(), "ignoring a saved fleet config that does not parse");
+            None
+        }
     }
 }
 
@@ -360,7 +445,7 @@ impl Daemon {
         let mut lines = BufReader::new(read).lines();
         while let Ok(Some(line)) = lines.next_line().await {
             let response = match serde_json::from_str::<Request>(&line) {
-                Ok(request) => self.respond(request, admin),
+                Ok(request) => self.respond(request, admin).await,
                 Err(e) => Response::Error(format!("bad request: {e}")),
             };
             let mut out = match serde_json::to_vec(&response) {
@@ -374,9 +459,20 @@ impl Daemon {
         }
     }
 
-    fn respond(&self, request: Request, admin: bool) -> Response {
+    async fn respond(&self, request: Request, admin: bool) -> Response {
         match request {
             Request::Status => {}
+            Request::Mesh => {
+                return match self.mesh(admin).await {
+                    Ok(mesh) => Response::Mesh(mesh),
+                    Err(e) => Response::Error(format!("{e:#}")),
+                };
+            }
+            Request::SetConfig { mode, local } => {
+                if let Err(e) = self.set_local_config(mode, local, admin).await {
+                    return Response::Error(format!("{e:#}"));
+                }
+            }
             Request::Refresh => self.refresh.notify_one(),
             Request::SetSettings {
                 repository_url,
@@ -396,7 +492,7 @@ impl Daemon {
                 self.refresh.notify_one();
             }
         }
-        Response::Status(self.status.lock().unwrap().clone())
+        Response::Status(Box::new(self.status.lock().unwrap().clone()))
     }
 
     fn set_settings(&self, settings: settings::Settings, admin: bool) -> Result<()> {
@@ -414,6 +510,63 @@ impl Daemon {
         status.branch = settings.branch;
         status.device = settings.device;
         Ok(())
+    }
+
+    async fn set_local_config(
+        &self,
+        mode: ConfigMode,
+        local: LocalConfig,
+        admin: bool,
+    ) -> Result<()> {
+        if !admin {
+            bail!("only an administrator can change this Mac's Nebula config");
+        }
+        if prefs::config_mode_managed() {
+            bail!("this Mac's Nebula config is managed by a configuration profile");
+        }
+        local.validate()?;
+        prefs::store_config(mode, &local)?;
+        {
+            let mut status = self.status.lock().unwrap();
+            status.config_mode = mode;
+            status.local_config = local;
+        }
+        self.apply_fleet().await
+    }
+
+    /// Ask Nebula for its tunnels and name them from the topology.
+    async fn mesh(&self, admin: bool) -> Result<Mesh> {
+        if !admin {
+            bail!("only an administrator can see the mesh, as it shows where every peer is");
+        }
+        let own_address = {
+            let status = self.status.lock().unwrap();
+            if !matches!(status.nebula, Nebula::Running { .. }) {
+                bail!("Nebula is not running");
+            }
+            status.address.clone()
+        };
+        let (hostmap, pending, relays) = tokio::try_join!(
+            self.debug.run("list-hostmap -json"),
+            self.debug.run("list-pending-hostmap -json"),
+            self.debug.run("print-relays"),
+        )?;
+        let topology = self
+            .fleet
+            .lock()
+            .unwrap()
+            .as_ref()
+            .map(|f| f.topology.clone())
+            .unwrap_or_default();
+        mesh::assemble(
+            mesh::Output {
+                hostmap: &hostmap,
+                pending: &pending,
+                relays: &relays,
+            },
+            &topology,
+            own_address.as_deref(),
+        )
     }
 }
 
