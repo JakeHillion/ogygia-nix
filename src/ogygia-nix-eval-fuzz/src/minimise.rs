@@ -29,9 +29,8 @@ pub struct Minimised {
 /// The inputs are those in `corpus`, `crashed` and each of `extra`, by
 /// file name. They are split at random into up to `jobs` shards, and
 /// `merge` is called on each at once with the shard's directory, an empty
-/// directory to write the shard's inputs that add coverage to, an empty
-/// directory to write libFuzzer's artifacts to, which are linked into
-/// `artifacts`, and the path to write libFuzzer's merge control file to.
+/// directory to write the shard's inputs that add coverage to, and the
+/// path to write libFuzzer's merge control file to.
 /// The inputs the control file shows as started but not finished are those
 /// that crashed, hung or ran out of memory.
 ///
@@ -45,16 +44,15 @@ pub fn minimise(
     crashed: &Path,
     extra: &[&Path],
     work: &Path,
-    artifacts: &Path,
     jobs: NonZero<usize>,
-    merge: impl Fn(&Path, &Path, &Path, &Path) -> std::io::Result<()> + Sync,
+    merge: impl Fn(&Path, &Path, &Path) -> std::io::Result<()> + Sync,
 ) -> std::io::Result<Minimised> {
     match std::fs::remove_dir_all(work) {
         Ok(()) => {}
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
         Err(e) => return Err(e),
     }
-    let result = minimise_in(corpus, crashed, extra, work, artifacts, jobs, merge);
+    let result = minimise_in(corpus, crashed, extra, work, jobs, merge);
     let cleaned = std::fs::remove_dir_all(work);
     let summary = result?;
     cleaned?;
@@ -66,9 +64,8 @@ fn minimise_in(
     crashed: &Path,
     extra: &[&Path],
     work: &Path,
-    artifacts: &Path,
     jobs: NonZero<usize>,
-    merge: impl Fn(&Path, &Path, &Path, &Path) -> std::io::Result<()> + Sync,
+    merge: impl Fn(&Path, &Path, &Path) -> std::io::Result<()> + Sync,
 ) -> std::io::Result<Minimised> {
     std::fs::create_dir_all(work)?;
     std::fs::create_dir_all(crashed)?;
@@ -111,9 +108,7 @@ fn minimise_in(
     std::thread::scope(|s| {
         let merges: Vec<_> = shards
             .iter()
-            .map(|shard| {
-                s.spawn(|| merge(&shard.inputs, &shard.kept, &shard.artifacts, &shard.control))
-            })
+            .map(|shard| s.spawn(|| merge(&shard.inputs, &shard.kept, &shard.control)))
             .collect();
         merges
             .into_iter()
@@ -124,16 +119,12 @@ fn minimise_in(
     let new_crashed = work.join("crashed");
     std::fs::create_dir(&new_corpus)?;
     std::fs::create_dir(&new_crashed)?;
-    std::fs::create_dir_all(artifacts)?;
     for shard in &shards {
         for input in files(&shard.kept)? {
             link_or_copy(&input, &new_corpus.join(input.file_name().unwrap()))?;
         }
         for name in unfinished(&shard.control)? {
             link_or_copy(&shard.inputs.join(&name), &new_crashed.join(&name))?;
-        }
-        for artifact in files(&shard.artifacts)? {
-            link_or_copy(&artifact, &artifacts.join(artifact.file_name().unwrap()))?;
         }
     }
     let summary = Minimised {
@@ -204,7 +195,6 @@ fn unfinished(control: &Path) -> std::io::Result<Vec<OsString>> {
 struct Shard {
     inputs: PathBuf,
     kept: PathBuf,
-    artifacts: PathBuf,
     control: PathBuf,
 }
 
@@ -214,10 +204,9 @@ impl Shard {
         let shard = Shard {
             inputs: dir.join("inputs"),
             kept: dir.join("kept"),
-            artifacts: dir.join("artifacts"),
             control: dir.join("control"),
         };
-        for d in [&shard.inputs, &shard.kept, &shard.artifacts] {
+        for d in [&shard.inputs, &shard.kept] {
             std::fs::create_dir_all(d)?;
         }
         Ok(shard)
@@ -277,7 +266,6 @@ mod tests {
         corpus: PathBuf,
         crashed: PathBuf,
         work: PathBuf,
-        artifacts: PathBuf,
     }
 
     /// A corpus holding an input named after each of `inputs`, holding its
@@ -290,7 +278,6 @@ mod tests {
             corpus,
             crashed: tmp.path().join("crashed"),
             work: tmp.path().join("work"),
-            artifacts: tmp.path().join("artifacts"),
             tmp,
         }
     }
@@ -305,17 +292,9 @@ mod tests {
     fn run(
         d: &Dirs,
         extra: &[&Path],
-        merge: impl Fn(&Path, &Path, &Path, &Path) -> std::io::Result<()> + Sync,
+        merge: impl Fn(&Path, &Path, &Path) -> std::io::Result<()> + Sync,
     ) -> std::io::Result<Minimised> {
-        minimise(
-            &d.corpus,
-            &d.crashed,
-            extra,
-            &d.work,
-            &d.artifacts,
-            JOBS,
-            merge,
-        )
+        minimise(&d.corpus, &d.crashed, extra, &d.work, JOBS, merge)
     }
 
     fn names(dir: &Path) -> Vec<String> {
@@ -328,15 +307,8 @@ mod tests {
         names
     }
 
-    /// Keeps the inputs named `keep*`, crashes on those named `crash*`,
-    /// leaving an artifact, and is killed by those named `kill*`, leaving
-    /// none.
-    fn fake_merge(
-        inputs: &Path,
-        kept: &Path,
-        artifacts: &Path,
-        control: &Path,
-    ) -> std::io::Result<()> {
+    /// Keeps the inputs named `keep*` and crashes on those named `crash*`.
+    fn fake_merge(inputs: &Path, kept: &Path, control: &Path) -> std::io::Result<()> {
         let inputs = files(inputs)?;
         let mut text = format!("{}\n0\n", inputs.len());
         for input in &inputs {
@@ -345,9 +317,7 @@ mod tests {
         for (i, input) in inputs.iter().enumerate() {
             let name = input.file_name().unwrap().to_str().unwrap();
             text += &format!("STARTED {i} {}\n", name.len());
-            if name.starts_with("crash") {
-                std::fs::copy(input, artifacts.join(format!("crash-{name}")))?;
-            } else if !name.starts_with("kill") {
+            if !name.starts_with("crash") {
                 text += &format!("FT {i} 1 2\nCOV {i} 3\n");
                 if name.starts_with("keep") {
                     std::fs::copy(input, kept.join(name))?;
@@ -375,25 +345,14 @@ mod tests {
             std::fs::read_to_string(d.crashed.join("crash1")).unwrap(),
             "crash1"
         );
-        assert_eq!(names(&d.artifacts), ["crash-crash1"]);
         assert!(!d.work.exists());
-    }
-
-    #[test]
-    fn sets_aside_what_killed_a_merge_without_an_artifact() {
-        let d = dirs(&["keep1", "drop1", "kill1"]);
-        let summary = run(&d, &[], fake_merge).unwrap();
-        assert_eq!(summary.crashed, 1);
-        assert_eq!(names(&d.corpus), ["keep1"]);
-        assert_eq!(names(&d.crashed), ["kill1"]);
-        assert_eq!(names(&d.artifacts), Vec::<String>::new());
     }
 
     #[test]
     fn unfinished_merge_leaves_both() {
         let d = dirs(&["keep1", "drop1"]);
         write(&d.crashed, &["crash1"]);
-        let err = run(&d, &[], |inputs, _, _, control| {
+        let err = run(&d, &[], |inputs, _, control| {
             let n = files(inputs)?.len();
             std::fs::write(control, format!("{n}\n0\n{}\n", "x\n".repeat(n)))
         })
@@ -411,9 +370,9 @@ mod tests {
         // Five inputs in four shards at random often leave one empty.
         for _ in 0..20 {
             let d = dirs(&["keep1", "keep2", "keep3", "keep4", "keep5"]);
-            let summary = run(&d, &[], |inputs, kept, artifacts, control| {
+            let summary = run(&d, &[], |inputs, kept, control| {
                 assert!(!files(inputs)?.is_empty(), "merged an empty shard");
-                fake_merge(inputs, kept, artifacts, control)
+                fake_merge(inputs, kept, control)
             })
             .unwrap();
             assert_eq!(summary.kept, 5);
@@ -444,7 +403,7 @@ mod tests {
     fn failed_merge_leaves_both() {
         let d = dirs(&["keep1", "drop1", "drop2", "drop3", "drop4"]);
         write(&d.crashed, &["crash1"]);
-        let err = run(&d, &[], |_, _, _, _| {
+        let err = run(&d, &[], |_, _, _| {
             Err(std::io::Error::other("merge failed"))
         })
         .unwrap_err();
@@ -461,7 +420,7 @@ mod tests {
     fn refuses_a_corpus_holding_more_than_files() {
         let d = dirs(&["keep1"]);
         std::fs::create_dir(d.corpus.join("sub")).unwrap();
-        let err = run(&d, &[], |_, _, _, _| unreachable!()).unwrap_err();
+        let err = run(&d, &[], |_, _, _| unreachable!()).unwrap_err();
         assert!(err.to_string().ends_with("sub is not a file"), "{err}");
         assert_eq!(names(&d.corpus.join("sub")), Vec::<String>::new());
         assert!(!d.work.exists());
@@ -479,7 +438,7 @@ mod tests {
     #[test]
     fn empty_corpus_runs_no_merge() {
         let d = dirs(&[]);
-        let summary = run(&d, &[], |_, _, _, _| unreachable!()).unwrap();
+        let summary = run(&d, &[], |_, _, _| unreachable!()).unwrap();
         assert_eq!(summary, Minimised::default());
     }
 
@@ -491,9 +450,9 @@ mod tests {
         // Each merge waits for all the others, so this only returns if
         // they all run at once.
         let barrier = std::sync::Barrier::new(JOBS.get());
-        let summary = run(&d, &[], |i, k, a, c| {
+        let summary = run(&d, &[], |i, k, c| {
             barrier.wait();
-            fake_merge(i, k, a, c)
+            fake_merge(i, k, c)
         })
         .unwrap();
         assert_eq!(summary.kept, 100);

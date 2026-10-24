@@ -2,8 +2,6 @@
 
 use std::collections::BTreeSet;
 use std::ffi::OsString;
-use std::io::Read;
-use std::io::Seek;
 use std::io::Write;
 use std::path::Path;
 use std::path::PathBuf;
@@ -79,38 +77,33 @@ impl std::fmt::Display for Totals {
     }
 }
 
-/// A run, as seen through the stats file its processes report to and the
+/// A run, as seen through the outcome counts its processes report and the
 /// findings directory they record in.
 pub struct Summary {
-    stats: PathBuf,
-    read: u64,
     totals: Totals,
     findings: PathBuf,
     known: BTreeSet<OsString>,
 }
 
 impl Summary {
-    /// Start from what `stats` and `findings` hold now; neither need exist
-    /// yet.
-    pub fn new(stats: &Path, findings: &Path) -> std::io::Result<Self> {
-        let read = match std::fs::metadata(stats) {
-            Ok(m) => m.len(),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => 0,
-            Err(e) => return Err(e),
-        };
+    /// Start from what `findings` holds now, which need not exist yet.
+    pub fn new(findings: &Path) -> std::io::Result<Self> {
         Ok(Summary {
-            stats: stats.to_owned(),
-            read,
             totals: Totals::default(),
             findings: findings.to_owned(),
             known: finding_names(findings)?,
         })
     }
 
+    /// Add the counts in `line`, a line [`count`] reports.
+    pub fn add(&mut self, line: &str) {
+        self.totals.add(line);
+    }
+
     /// Lines that are printable ASCII apart from the paths given to
     /// [`Summary::new`]: `new finding: <dir>` for each finding recorded
-    /// since the last update, then the outcome counts reported since
-    /// [`Summary::new`] and the number of findings.
+    /// since the last update, then the outcome counts
+    /// [added](Summary::add) so far and the number of findings.
     pub fn update(&mut self) -> std::io::Result<Vec<String>> {
         let current = finding_names(&self.findings)?;
         let mut lines: Vec<String> = current
@@ -118,18 +111,6 @@ impl Summary {
             .map(|name| format!("new finding: {}", self.findings.join(name).display()))
             .collect();
         self.known = current;
-        match std::fs::File::open(&self.stats) {
-            Ok(mut f) => {
-                f.seek(std::io::SeekFrom::Start(self.read))?;
-                let mut text = String::new();
-                f.read_to_string(&mut text)?;
-                let whole = text.rfind('\n').map_or(0, |i| i + 1);
-                text[..whole].lines().for_each(|l| self.totals.add(l));
-                self.read += whole as u64;
-            }
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-            Err(e) => return Err(e),
-        }
         lines.push(format!(
             "since start: {}; {} findings",
             self.totals,
@@ -170,22 +151,11 @@ mod tests {
     #[test]
     fn summary_reports_only_what_is_new() {
         let tmp = tempfile::tempdir().unwrap();
-        let stats = tmp.path().join("stats");
         let findings = tmp.path().join("findings");
-        let append = |text: &str| {
-            std::fs::OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(&stats)
-                .and_then(|mut f| f.write_all(text.as_bytes()))
-                .unwrap()
-        };
-        append(&line(1, &[9; 8]));
         crate::record(&findings, "old", "report").unwrap();
-        let mut summary = Summary::new(&stats, &findings).unwrap();
+        let mut summary = Summary::new(&findings).unwrap();
 
-        append(&line(2, &[1, 0, 0, 0, 0, 0, 0, 1]));
-        append("3 ignored 2 diverged");
+        summary.add(line(2, &[1, 0, 0, 0, 0, 0, 0, 1]).trim_end());
         crate::record(&findings, "new", "report").unwrap();
         let new = findings.join("11507a0e2f5e69d5dfa40a62a1bd7b6e");
         assert!(new.exists());
@@ -197,7 +167,7 @@ mod tests {
             ]
         );
 
-        append(" 1\n");
+        summary.add("3 ignored 2 diverged 1");
         crate::record(&findings, "new", "again").unwrap();
         assert_eq!(
             summary.update().unwrap(),

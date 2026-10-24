@@ -22,14 +22,11 @@ what Nix does and why it should not be matched.
 The user gives the directory (`DIR`). It holds:
 
 - `DIR/findings/<hash>/input.nix`: an input on which the evaluators
-  disagree, and `report`: the step that diverged (`parse`, `eval` or
-  `catch`), the expression run, and both sides' output.
-- `DIR/runs/<revision>/artifacts/`: inputs that crashed (`crash-*`) or
-  ran out of memory (`oom-*`) in ogygia-nix-eval itself. A crash is a
-  bug. An OOM only means the input passed libFuzzer's default 2 GiB RSS
-  limit, which a complex but valid expression can need; if it evaluates
-  correctly given more memory, it is low priority.
-- `DIR/runs/<revision>/stats` and `DIR/corpus/`: not findings; ignore.
+  disagree or ogygia-nix-eval panics, and `report`: the step that
+  diverged (`parse`, `eval` or `catch`), the expression run, and both
+  sides' output. For a panic the step is `panic`, and the output is ours
+  alone: where it panicked, and the message. A panic is always a bug.
+- `DIR/corpus/`: not findings; ignore.
 
 Findings are owned by the fuzzer. Never edit or delete them, and never
 run `recheck` on them yourself (it must not run while a fuzzer is using

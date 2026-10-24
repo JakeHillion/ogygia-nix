@@ -24,6 +24,12 @@ mode:
 Error messages and stack traces are never compared: two failures that
 `tryEval` treats alike count as agreement, whatever they say.
 
+A panic in ogygia-nix-eval is a bug whatever Nix does, so it needs no
+comparison: it is a finding by itself, at whichever step it happens, and
+the check stops there. ogygia-nix-eval parses before Nix does, so a panic
+while parsing runs no Nix at all. A panic in the fuzzer itself still
+crashes it.
+
 Nix runs first at each step. On a new input it has 10 seconds and 1 GiB of
 address space; on a finding, which has already finished within those once,
 it has no limit, so the result does not depend on how busy the machine is.
@@ -55,8 +61,8 @@ the name of every builtin of the pinned Nix.
 
 ## Running it
 
-The package built by the flake bakes in the pinned `nix-instantiate`, the
-seeds and the source revision:
+The package built by the flake bakes in the pinned `nix-instantiate` and
+the seeds:
 
 ```sh
 nix run .#ogygia-nix-eval-fuzz -- run DIR
@@ -72,19 +78,16 @@ below), then fuzzes until stopped. All three run one job per CPU unless
   ogygia-nix-eval when the corpus was last minimised, kept out of the
   corpus until they no longer do.
 - `DIR/findings/<hash>/`: one directory per input on which the evaluators
-  disagree, named by a hash of the input, holding the input as `input.nix`
-  and a `report` of the step that diverged, the expression evaluated, and
-  both sides' full output.
-- `DIR/runs/<revision>/stats`: how many inputs had each outcome, reported
-  by every process every 15 seconds as a Unix time followed by name and
-  count pairs. To sum the last hour:
+  disagree or ogygia-nix-eval panics, named by a hash of the input,
+  holding the input as `input.nix` and a `report` of the step that
+  diverged, the expression evaluated, and both sides' full output. For a
+  panic the step is `panic`, and the output is only ours: where it
+  panicked, and the message.
 
-  ```sh
-  awk -v t=$(($(date +%s)-3600)) '$1>t {for(i=2;i<NF;i+=2) s[$i]+=$(i+1)} END{for(k in s) print k, s[k]}' stats
-  ```
-
-- `DIR/runs/<revision>/artifacts/`: inputs that crashed, hung or ran out of
-  memory in ogygia-nix-eval itself, as libFuzzer names them.
+Nothing else is kept: an input that crashes ogygia-nix-eval other than by
+a panic (overflowing its stack, say), hangs it or runs it out of memory is
+dropped, as is one libFuzzer finds slow, and the outcome counts go only to
+standard error.
 
 Its standard error, meant for a journal, has the recheck's progress every
 1000 findings and its summary, the minimisation's summary, a line
@@ -109,6 +112,9 @@ with no limit on Nix:
 - if Nix runs out of memory or stack, it is left as it was;
 - if Nix hits a fixed limit, it is deleted, as Nix will hit it on every run.
 
+A finding on which ogygia-nix-eval panics still diverges for as long as it
+panics; once it no longer does, it is compared like any other input.
+
 `run` does this before it starts fuzzing, so the findings shrink as fixes
 land. `recheck` must not run while something is fuzzing the same
 directory.
@@ -120,7 +126,7 @@ nix run .#ogygia-nix-eval-fuzz -- check DIR/findings/<hash>/input.nix
 ```
 
 It prints the input's outcome, or the report and a non-zero exit status if
-the evaluators still disagree.
+the evaluators still disagree or ogygia-nix-eval still panics.
 
 ### Corpus
 

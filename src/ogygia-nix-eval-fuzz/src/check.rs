@@ -5,11 +5,16 @@ use std::io::Write;
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::process::CommandExt;
 use std::os::unix::process::ExitStatusExt;
+use std::panic::AssertUnwindSafe;
 use std::path::Path;
 use std::path::PathBuf;
 use std::process::Command;
 use std::process::Stdio;
+use std::sync::Mutex;
+use std::sync::MutexGuard;
+use std::sync::Once;
 use std::sync::OnceLock;
+use std::sync::PoisonError;
 use std::time::Duration;
 use std::time::Instant;
 
@@ -96,8 +101,9 @@ pub enum Outcome {
     Caught,
     /// Both sides fail, and `builtins.tryEval` catches it on neither.
     Uncaught,
-    /// The two disagree; holds a report of the step that diverged, the
-    /// input, and both sides' full output.
+    /// The two disagree, or ogygia-nix-eval panicked; holds a report of the
+    /// step that diverged, the input, and both sides' full output, or of
+    /// the panic.
     Diverged(String),
 }
 
@@ -352,13 +358,72 @@ fn diverged(step: &str, src: &str, expr: &str, theirs: &Run, ours: &Run) -> Outc
     ))
 }
 
+fn panicked(src: &str, expr: &str, panic: &str) -> Outcome {
+    Outcome::Diverged(format!(
+        "step: panic\n--- input\n{src}\n--- expression\n{expr}\n--- ours\n{panic}\n"
+    ))
+}
+
+/// The name ogygia-nix-eval gives the threads it runs on, in
+/// [`run_with_stack`].
+const EVAL_THREAD: &str = "nix-eval";
+
+/// Held while [`catch_ours`] runs ogygia-nix-eval, so that a panic on one of
+/// its threads belongs to that call.
+static CATCHING: Mutex<()> = Mutex::new(());
+
+/// `Some` while [`catch_ours`] runs ogygia-nix-eval, holding the first panic
+/// on one of its threads.
+static PANIC: Mutex<Option<Option<String>>> = Mutex::new(None);
+
+fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// Run `f`, which runs ogygia-nix-eval, failing with the location and
+/// message of a panic on one of ogygia-nix-eval's threads, which is neither
+/// reported nor, under libFuzzer, an abort. Any other panic is the
+/// fuzzer's own, and propagates as it would without this.
+fn catch_ours<T>(f: impl FnOnce() -> T) -> Result<T, String> {
+    static HOOK: Once = Once::new();
+    HOOK.call_once(|| {
+        // Set after libFuzzer's hook, which reports a panic and aborts, so
+        // that a panic of ours never reaches that.
+        let next = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |info| {
+            let ours = std::thread::current().name() == Some(EVAL_THREAD)
+                && lock(&PANIC)
+                    .as_mut()
+                    .map(|panic| panic.get_or_insert_with(|| info.to_string()))
+                    .is_some();
+            if !ours {
+                next(info);
+            }
+        }));
+    });
+    let _catching = lock(&CATCHING);
+    *lock(&PANIC) = Some(None);
+    let result = std::panic::catch_unwind(AssertUnwindSafe(f));
+    let panic = lock(&PANIC).take().flatten();
+    match (result, panic) {
+        (Ok(out), _) => Ok(out),
+        (Err(_), Some(panic)) => Err(panic),
+        (Err(payload), None) => std::panic::resume_unwind(payload),
+    }
+}
+
 /// Fails with [`Outcome::Ignored`] when evaluation reached a disabled
-/// feature.
-fn run_ours(eval: impl Fn(&str) -> Result<String, Error>, expr: &str) -> Result<Run, Outcome> {
-    match eval(expr) {
-        Ok(out) => Ok(Ok(out)),
-        Err(Error::Disabled(_)) => Err(Outcome::Ignored),
-        Err(Error::Eval(e)) => Ok(Err(e)),
+/// feature, and with a [divergence](Outcome::Diverged) when it panicked.
+fn run_ours(
+    eval: impl Fn(&str) -> Result<String, Error>,
+    src: &str,
+    expr: &str,
+) -> Result<Run, Outcome> {
+    match catch_ours(|| eval(expr)) {
+        Ok(Ok(out)) => Ok(Ok(out)),
+        Ok(Err(Error::Disabled(_))) => Err(Outcome::Ignored),
+        Ok(Err(Error::Eval(e))) => Ok(Err(e)),
+        Err(panic) => Err(panicked(src, expr, &panic)),
     }
 }
 
@@ -388,26 +453,45 @@ fn agree(theirs: &Run, ours: &Run) -> bool {
 /// stops reading at the first one outside a string, so it evaluates a
 /// prefix of the input rather than the input. So is one on which
 /// ogygia-nix-eval reaches a feature the fuzzer disables.
+///
+/// A panic in ogygia-nix-eval diverges by itself, at whichever step it
+/// happens, ending the check there. ogygia-nix-eval runs before Nix in the
+/// parse step, so a panic there runs no Nix at all. A panic in the fuzzer
+/// itself propagates.
 pub fn check(src: &str, budget: Budget) -> Outcome {
     check_with(
+        compile,
         |expr| ogygia_nix_eval::eval_to_string(expr, "/", settings()),
+        |mode, expr| run_nix(mode, expr, budget),
         src,
-        budget,
     )
 }
 
-/// [`check`], with `eval` standing in for ogygia-nix-eval's evaluation.
-fn check_with(eval: impl Fn(&str) -> Result<String, Error>, src: &str, budget: Budget) -> Outcome {
-    if src.contains('\0') {
-        return Outcome::Ignored;
-    }
-    let ours: Run = run_with_stack(|| {
+fn compile(src: &str) -> Run {
+    run_with_stack(|| {
         Context::new(Io::pure())
             .compile_str(src, "/", true)
             .map(|_| String::new())
             .map_err(|e| e.msg)
-    });
-    let theirs = match run_nix(&["--parse"], src, budget) {
+    })
+}
+
+/// [`check`], with `compile` and `eval` standing in for ogygia-nix-eval's
+/// parsing and evaluation, and `nix` for running `nix-instantiate`.
+fn check_with(
+    compile: impl Fn(&str) -> Run,
+    eval: impl Fn(&str) -> Result<String, Error>,
+    nix: impl Fn(&[&str], &str) -> Result<Run, Outcome>,
+    src: &str,
+) -> Outcome {
+    if src.contains('\0') {
+        return Outcome::Ignored;
+    }
+    let ours = match catch_ours(|| compile(src)) {
+        Ok(ours) => ours,
+        Err(panic) => return panicked(src, src, &panic),
+    };
+    let theirs = match nix(&["--parse"], src) {
         Ok(theirs) => theirs,
         Err(outcome) => return outcome,
     };
@@ -421,11 +505,11 @@ fn check_with(eval: impl Fn(&str) -> Result<String, Error>, src: &str, budget: B
     // The input parses on its own, so parenthesised on lines of its own it
     // is the same expression.
     let expr = format!("{DEEP_COPY} (\n{src}\n)");
-    let theirs = match run_nix(&["--eval", "--strict"], &expr, budget) {
+    let theirs = match nix(&["--eval", "--strict"], &expr) {
         Ok(theirs) => theirs,
         Err(outcome) => return outcome,
     };
-    let ours = match run_ours(&eval, &expr) {
+    let ours = match run_ours(&eval, src, &expr) {
         Ok(ours) => ours,
         Err(outcome) => return outcome,
     };
@@ -437,11 +521,11 @@ fn check_with(eval: impl Fn(&str) -> Result<String, Error>, src: &str, budget: B
     }
 
     let expr = format!("builtins.tryEval (builtins.deepSeq (\n{src}\n) null)");
-    let theirs = match run_nix(&["--eval", "--strict"], &expr, budget) {
+    let theirs = match nix(&["--eval", "--strict"], &expr) {
         Ok(theirs) => theirs,
         Err(outcome) => return outcome,
     };
-    let ours = match run_ours(&eval, &expr) {
+    let ours = match run_ours(&eval, src, &expr) {
         Ok(ours) => ours,
         Err(outcome) => return outcome,
     };
@@ -631,11 +715,96 @@ mod tests {
 
     #[test]
     fn reports_a_divergence() {
-        let Outcome::Diverged(report) = check_with(|_| Ok("2".to_owned()), "1", Budget::Fuzzing)
-        else {
-            panic!("expected a divergence");
-        };
+        let report = report(check_with(
+            compile,
+            |_| Ok("2".to_owned()),
+            |mode, expr| run_nix(mode, expr, Budget::Fuzzing),
+            "1",
+        ));
         assert!(report.starts_with("step: eval\n"), "{report}");
         assert!(report.contains("--- nix\n1\n--- ours\n2\n"), "{report}");
+    }
+
+    fn report(outcome: Outcome) -> String {
+        let Outcome::Diverged(report) = outcome else {
+            panic!("expected a divergence");
+        };
+        report
+    }
+
+    #[test]
+    fn a_panic_in_parsing_diverges_without_nix() {
+        let report = report(check_with(
+            |_| run_with_stack(|| -> Run { panic!("parse failed") }),
+            |_| unreachable!("evaluated"),
+            |_, _| unreachable!("ran Nix"),
+            "1",
+        ));
+        let ours = format!("--- ours\npanicked at {}:", file!());
+        assert!(
+            report.starts_with(&format!(
+                "step: panic\n--- input\n1\n--- expression\n1\n{ours}"
+            )),
+            "{report}"
+        );
+        assert!(report.ends_with(":\nparse failed\n"), "{report}");
+    }
+
+    #[test]
+    fn a_panic_in_evaluation_ends_the_check() {
+        let report = report(check_with(
+            |_| Ok(String::new()),
+            |_| run_with_stack(|| -> Result<String, Error> { panic!("eval failed") }),
+            |mode, expr| match mode {
+                ["--parse"] => Ok(Ok(String::new())),
+                _ if expr.starts_with(DEEP_COPY) => Ok(Ok("1".to_owned())),
+                _ => unreachable!("ran Nix after the panic"),
+            },
+            "1",
+        ));
+        let ours = format!("--- ours\npanicked at {}:", file!());
+        assert!(
+            report.starts_with(&format!(
+                "step: panic\n--- input\n1\n--- expression\n{DEEP_COPY} (\n1\n)\n{ours}"
+            )),
+            "{report}"
+        );
+        assert!(report.ends_with(":\neval failed\n"), "{report}");
+    }
+
+    #[test]
+    fn a_panic_in_the_fuzzer_propagates() {
+        // After a panic of ours, which must not be blamed for the others.
+        check_with(
+            |_| run_with_stack(|| -> Run { panic!("parse failed") }),
+            |_| unreachable!("evaluated"),
+            |_, _| unreachable!("ran Nix"),
+            "1",
+        );
+        let nix = std::panic::catch_unwind(|| {
+            check_with(
+                |_| Ok(String::new()),
+                |_| unreachable!("evaluated"),
+                |_, _| panic!("Nix failed"),
+                "1",
+            )
+        });
+        assert_eq!(
+            nix.map(drop).unwrap_err().downcast_ref::<&str>(),
+            Some(&"Nix failed")
+        );
+        // Not on one of ogygia-nix-eval's threads.
+        let eval = std::panic::catch_unwind(|| {
+            check_with(
+                |_| Ok(String::new()),
+                |_| panic!("eval failed"),
+                |_, _| Ok(Ok(String::new())),
+                "1",
+            )
+        });
+        assert_eq!(
+            eval.map(drop).unwrap_err().downcast_ref::<&str>(),
+            Some(&"eval failed")
+        );
     }
 }
