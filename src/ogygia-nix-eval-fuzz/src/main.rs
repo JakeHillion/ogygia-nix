@@ -4,6 +4,10 @@ use std::ffi::CString;
 use std::ffi::c_char;
 use std::ffi::c_int;
 use std::fs::File;
+use std::io::BufRead;
+use std::io::BufReader;
+use std::io::PipeReader;
+use std::io::PipeWriter;
 use std::io::Write;
 use std::num::NonZero;
 use std::os::fd::AsFd;
@@ -12,6 +16,8 @@ use std::path::Path;
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::process::Stdio;
+use std::sync::Arc;
+use std::sync::Mutex;
 use std::sync::OnceLock;
 use std::time::Duration;
 use std::time::Instant;
@@ -218,16 +224,16 @@ const TIMEOUT: &str = "-timeout=60";
 /// The seed inputs this build was made with.
 const SEEDS: Option<&str> = option_env!("OGYGIA_NIX_EVAL_FUZZ_SEEDS");
 
-fn minimise(dir: &Path, jobs: NonZero<usize>) -> bool {
+/// libFuzzer writes every crashing, slow, timed-out or memory-hungry input
+/// here, so none is kept: a panic of ours is a finding, and the rest say
+/// nothing about equivalence.
+const NO_ARTIFACTS: &str = "-exact_artifact_path=/dev/null";
+
+/// Minimise `dir`'s corpus, the merges reporting their outcome counts to
+/// `stats`.
+fn minimise(dir: &Path, jobs: NonZero<usize>, stats: &Path) -> bool {
     let corpus = dir.join("corpus");
     let crashed = dir.join("crashed");
-    let this_run = this_run(dir);
-    let artifacts = this_run.join("artifacts");
-    // The merges write statistics there.
-    if let Err(e) = std::fs::create_dir_all(&artifacts) {
-        report!("creating {}: {e}", artifacts.display());
-        return false;
-    }
     let exe = match std::env::current_exe() {
         Ok(exe) => exe,
         Err(e) => {
@@ -237,7 +243,7 @@ fn minimise(dir: &Path, jobs: NonZero<usize>) -> bool {
     };
     let seeds = SEEDS.map(|s| Path::new(s).join("seeds"));
     let findings = format!("--findings={}", dir.join("findings").display());
-    let stats = format!("--stats={}", this_run.join("stats").display());
+    let stats = format!("--stats={}", stats.display());
     report!("minimising corpus in {}", corpus.display());
     let start = Instant::now();
     match ogygia_nix_eval_fuzz::minimise(
@@ -245,12 +251,10 @@ fn minimise(dir: &Path, jobs: NonZero<usize>) -> bool {
         &crashed,
         seeds.as_deref().as_slice(),
         &dir.join("minimise"),
-        &artifacts,
         jobs,
-        |inputs, kept, artifacts, control| {
+        |inputs, kept, control| {
             let status = std::process::Command::new(&exe)
-                .args(["-merge=1", TIMEOUT, &findings, &stats])
-                .arg(format!("-artifact_prefix={}/", artifacts.display()))
+                .args(["-merge=1", TIMEOUT, NO_ARTIFACTS, &findings, &stats])
                 .arg(format!("-merge_control_file={}", control.display()))
                 .arg(kept)
                 .arg(inputs)
@@ -283,12 +287,6 @@ fn minimise(dir: &Path, jobs: NonZero<usize>) -> bool {
             false
         }
     }
-}
-
-/// Where this revision's statistics and artifacts go.
-fn this_run(dir: &Path) -> PathBuf {
-    let revision = option_env!("OGYGIA_NIX_EVAL_FUZZ_REV").unwrap_or("unknown");
-    dir.join("runs").join(revision)
 }
 
 /// Point descriptor 2 at /dev/null, returning the original standard error.
@@ -326,12 +324,9 @@ fn run(dir: &Path, jobs: NonZero<usize>) -> ExitCode {
     };
     let findings = dir.join("findings");
     let corpus = dir.join("corpus");
-    let this_run = this_run(dir);
-    for d in [&corpus, &this_run.join("artifacts")] {
-        if let Err(e) = std::fs::create_dir_all(d) {
-            report!("creating {}: {e}", d.display());
-            return ExitCode::FAILURE;
-        }
+    if let Err(e) = std::fs::create_dir_all(&corpus) {
+        report!("creating {}: {e}", corpus.display());
+        return ExitCode::FAILURE;
     }
     if !quiet() {
         return ExitCode::FAILURE;
@@ -366,22 +361,42 @@ fn run(dir: &Path, jobs: NonZero<usize>) -> ExitCode {
             return ExitCode::FAILURE;
         }
     }
-    let mut summary = match Summary::new(&this_run.join("stats"), &findings) {
-        Ok(summary) => summary,
+    let summary = match Summary::new(&findings) {
+        Ok(summary) => Arc::new(Mutex::new(summary)),
         Err(e) => {
             report!("reading {}: {e}", dir.display());
             return ExitCode::FAILURE;
         }
     };
+    // Every process the run starts inherits the pipe's write end and
+    // reports its outcome counts to it.
+    let (counts, writer) = match outcome_pipe() {
+        Ok(pipe) => pipe,
+        Err(e) => {
+            report!("creating the outcome pipe: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let stats = PathBuf::from(format!("/dev/fd/{}", writer.as_raw_fd()));
+    std::thread::spawn({
+        let summary = Arc::clone(&summary);
+        move || {
+            for line in BufReader::new(counts).lines() {
+                let line = line.expect("reading outcome counts");
+                summary.lock().unwrap().add(&line);
+            }
+        }
+    });
     std::thread::spawn(move || {
         loop {
             std::thread::sleep(Duration::from_secs(60));
-            for line in summary.update().expect("summarising the run") {
+            let lines = summary.lock().unwrap().update();
+            for line in lines.expect("summarising the run") {
                 report!("{line}");
             }
         }
     });
-    let minimised = minimise(dir, jobs);
+    let minimised = minimise(dir, jobs, &stats);
     if !minimised {
         report!("fuzzing the corpus and seeds as they were");
     }
@@ -394,10 +409,10 @@ fn run(dir: &Path, jobs: NonZero<usize>) -> ExitCode {
         "-ignore_timeouts=1".to_owned(),
         "-ignore_ooms=1".to_owned(),
         TIMEOUT.to_owned(),
-        format!("-artifact_prefix={}/", path(&this_run.join("artifacts"))),
+        NO_ARTIFACTS.to_owned(),
         format!("-dict={seeds}/nix.dict"),
         format!("--findings={}", path(&findings)),
-        format!("--stats={}", path(&this_run.join("stats"))),
+        format!("--stats={}", path(&stats)),
         path(&corpus),
     ];
     if minimised {
@@ -410,6 +425,17 @@ fn run(dir: &Path, jobs: NonZero<usize>) -> ExitCode {
         args.push(format!("{seeds}/seeds"));
     }
     fuzz(args)
+}
+
+/// A pipe whose write end, unlike the read end, is inherited by the
+/// processes this one starts.
+fn outcome_pipe() -> std::io::Result<(PipeReader, PipeWriter)> {
+    let (reader, writer) = std::io::pipe()?;
+    // SAFETY: F_SETFD only changes the flags of a descriptor we own.
+    if unsafe { libc::fcntl(writer.as_raw_fd(), libc::F_SETFD, 0) } < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok((reader, writer))
 }
 
 /// `jobs`, defaulting to one per CPU.
@@ -464,7 +490,7 @@ fn main() -> ExitCode {
             }
         }
         Command::Minimise { dir, jobs } => {
-            if minimise(&dir, or_cpus(jobs)) {
+            if minimise(&dir, or_cpus(jobs), Path::new("/dev/null")) {
                 ExitCode::SUCCESS
             } else {
                 ExitCode::FAILURE

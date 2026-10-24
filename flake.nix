@@ -313,7 +313,6 @@
                 OGYGIA_NIX_EVAL_DEFAULT_INCLUDE_PATH = "${nixIncludePath}";
                 OGYGIA_NIX_EVAL_NIX_VERSION = referenceNix.version;
                 OGYGIA_NIX_EVAL_FUZZ_SEEDS = "${fuzzSeeds}";
-                OGYGIA_NIX_EVAL_FUZZ_REV = self.rev or self.dirtyRev or "unknown";
               };
               nativeBuildInputs = commonArgs.nativeBuildInputs ++ [ pkgs.cargo-fuzz ];
               buildPhaseCargoCommand = ''
