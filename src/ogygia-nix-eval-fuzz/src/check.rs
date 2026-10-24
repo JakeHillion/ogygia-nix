@@ -635,6 +635,41 @@ mod tests {
     }
 
     #[test]
+    fn reading_a_path_needs_its_derivation_outputs() {
+        let d = r#"let d = derivation { name = "d"; system = "s"; builder = "/bin/sh"; };
+            k = builtins.unsafeDiscardStringContext d.drvPath;
+            t = builtins.toFile "t" "t";
+            c = builtins.substring 0 0 "${d}";
+            in"#;
+        for expr in [
+            "builtins.pathExists d",
+            "builtins.pathExists (\"/nonexistent\" + c)",
+            "builtins.readFile (t + c)",
+            "builtins.readFileType (t + c)",
+            "builtins.hashFile \"sha256\" (t + c)",
+            "builtins.readDir (\"/\" + c)",
+            "import d",
+            "scopedImport { } d",
+            "builtins.path { path = t + c; }",
+            "builtins.filterSource (p: t: true) (t + c)",
+            "builtins.findFile [ { path = \"/x\" + c; prefix = \"q\"; } ] \"nix/fetchurl.nix\"",
+            "builtins.readFile (builtins.appendContext t { ${k} = { outputs = [ \"x\" ]; }; })",
+        ] {
+            assert_eq!(outcome(&format!("{d} {expr}")), "uncaught", "{expr}");
+        }
+        assert_eq!(
+            outcome(&format!("{d} builtins.pathExists d.drvPath")),
+            "values"
+        );
+        assert_eq!(
+            outcome(&format!(
+                "{d} builtins.readFile (builtins.appendContext t {{ ${{k}} = {{ allOutputs = true; }}; }})"
+            )),
+            "values"
+        );
+    }
+
+    #[test]
     fn ignores_the_store_root() {
         assert_eq!(outcome("/nix/store/."), "values");
         assert_eq!(
