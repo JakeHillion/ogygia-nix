@@ -58,6 +58,67 @@
             buildNumber = self.revCount or 0;
             gitRevision = self.shortRev or self.dirtyShortRev or "unknown";
           };
+
+          # The macOS app's tests beyond `cargo test`, run from a checkout;
+          # see app/macos/TESTING.md. They run outside the sandbox, as they
+          # need the system's Xcode, ssh and window server.
+          apps =
+            let
+              test = name: text: {
+                type = "app";
+                program = nixpkgs.lib.getExe (pkgs.writeShellApplication {
+                  inherit name;
+                  runtimeInputs = [ pkgs.git ];
+                  text = ''
+                    if [ ! -d src/ogygia-macos-nebulad ] || [ ! -d app/macos ]; then
+                      echo "${name}: run this from the root of an ogygia-nix checkout" >&2
+                      exit 1
+                    fi
+                    export OGYGIA_TEST_NIXPKGS=${nixpkgs}
+                    ${text}
+                  '';
+                });
+              };
+            in
+            {
+              # Layer 2: the daemon unprivileged, beside the Mac's own.
+              test-macos-daemon = test "test-macos-daemon" ''
+                export OGYGIA_TEST_NEBULA=${pkgs.nebula}/bin
+                exec nix develop --command cargo test -p ogygia-macos-nebulad --test daemon -- --ignored "$@"
+              '';
+
+              # Layer 3: every settings pane rendered from fixtures, into the
+              # directory given (target/macos-snapshots by default). Builds
+              # the app with the system's Xcode unless OGYGIA_TEST_APP names
+              # one already built.
+              test-macos-ui = test "test-macos-ui" ''
+                out="''${1:-target/macos-snapshots}"
+                case "$out" in /*) ;; *) out="$(pwd)/$out" ;; esac
+                app="''${OGYGIA_TEST_APP:-}"
+                if [ -z "$app" ]; then
+                  derived="$(pwd)/target/macos-ui"
+                  xcodebuild -quiet -project app/macos/Ogygia.xcodeproj -scheme Ogygia \
+                    -configuration Debug -derivedDataPath "$derived" CODE_SIGNING_ALLOWED=NO build
+                  app="$derived/Build/Products/Debug/Ogygia.app"
+                fi
+                rm -rf "$out"
+                "$app/Contents/MacOS/Ogygia" --snapshots "$out" >/dev/null
+                echo "Rendered $(find "$out" -name '*.png' | wc -l | tr -d ' ') panes into $out"
+              '';
+
+              # Layer 4: the built app installed and run as root. It refuses
+              # to run outside a virtual machine.
+              test-macos-system = test "test-macos-system" ''
+                if [ $# -lt 1 ]; then
+                  echo "usage: test-macos-system <Ogygia.app>" >&2
+                  exit 1
+                fi
+                OGYGIA_TEST_APP="$(cd "$1" && pwd)"
+                export OGYGIA_TEST_APP
+                export OGYGIA_TEST_OUTPUT="''${OGYGIA_TEST_OUTPUT:-$(pwd)/target/macos-system}"
+                exec nix develop --command cargo test -p ogygia-macos-nebulad --test system -- --ignored --nocapture
+              '';
+            };
         });
     in
     nixpkgs.lib.recursiveUpdate darwinOutputs

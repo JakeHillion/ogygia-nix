@@ -22,6 +22,16 @@ pub struct Sshd {
     pub sandbox_dir: PathBuf,
 }
 
+/// What the daemon adds to every config it renders.
+pub struct Additions {
+    /// This Mac's key, which never leaves it.
+    pub key: PathBuf,
+    pub sshd: Sshd,
+    /// Run Nebula with no tun device, which needs no root: only a test
+    /// running the daemon unprivileged sets this.
+    pub tun_disabled: bool,
+}
+
 /// The user the daemon signs in to the sshd as.
 pub const SSHD_USER: &str = "ogygia-macos-nebulad";
 
@@ -40,9 +50,9 @@ pub const SSHD_USER: &str = "ogygia-macos-nebulad";
 pub fn render(
     mut settings: Value,
     local: Option<&LocalConfig>,
-    key: &Path,
-    sshd: &Sshd,
+    additions: &Additions,
 ) -> Result<Vec<u8>> {
+    let sshd = &additions.sshd;
     if settings.get("sshd").is_some() {
         bail!("the evaluated settings enable Nebula's sshd, which a device does not run");
     }
@@ -58,7 +68,10 @@ pub fn render(
     if pki.contains_key("key") {
         bail!("the evaluated settings carry a key; a device's key must stay on the device");
     }
-    let key = key.to_str().context("the key path is not UTF-8")?;
+    let key = additions
+        .key
+        .to_str()
+        .context("the key path is not UTF-8")?;
     pki.insert("key".into(), Value::String(key.into()));
 
     let path = |p: &Path| {
@@ -76,6 +89,9 @@ pub fn render(
             "authorized_users": [{ "user": SSHD_USER, "keys": [sshd.authorized_key] }],
         }),
     );
+    if additions.tun_disabled {
+        root.insert("tun".into(), json!({ "disabled": true }));
+    }
 
     let mut out = serde_json::to_vec_pretty(&settings)?;
     out.push(b'\n');
@@ -105,8 +121,16 @@ mod tests {
         }
     }
 
+    fn additions(key: &Path) -> Additions {
+        Additions {
+            key: key.to_owned(),
+            sshd: sshd(),
+            tun_disabled: false,
+        }
+    }
+
     fn render(settings: Value, key: &Path) -> Result<Vec<u8>> {
-        super::render(settings, None, key, &sshd())
+        super::render(settings, None, &additions(key))
     }
 
     #[test]
@@ -143,7 +167,7 @@ mod tests {
             }],
             ..LocalConfig::default()
         };
-        let out = super::render(settings, Some(&local), Path::new("/k"), &sshd()).unwrap();
+        let out = super::render(settings, Some(&local), &additions(Path::new("/k"))).unwrap();
         let out: Value = serde_json::from_slice(&out).unwrap();
         assert_eq!(
             out["lighthouse"],

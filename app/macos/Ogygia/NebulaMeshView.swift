@@ -7,6 +7,7 @@ struct NebulaMeshView: View {
     let nebula: NebulaModel
 
     @State private var feed = MeshModel()
+    @Environment(\.meshSource) private var meshSource
     @State private var selection: String?
 
     var body: some View {
@@ -27,7 +28,7 @@ struct NebulaMeshView: View {
             }
         }
         .navigationTitle("Mesh")
-        .task { await feed.watch() }
+        .task { await feed.watch(meshSource) }
     }
 
     private func summary(_ mesh: DaemonProtocol.Mesh) -> some View {

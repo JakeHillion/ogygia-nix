@@ -20,14 +20,13 @@ use tokio::process::Command;
 use crate::render::SSHD_USER;
 use crate::render::Sshd;
 
-/// Loopback only. Nebula refuses port 22, and this one sits beside its usual
-/// 4242.
+/// Loopback only.
 const LISTEN_HOST: &str = "127.0.0.1";
-const LISTEN_PORT: u16 = 4243;
 /// A command that takes longer than this has hung.
 const COMMAND_TIMEOUT: Duration = Duration::from_secs(10);
 
 pub struct Debug {
+    port: u16,
     host_key: PathBuf,
     client_key: PathBuf,
     known_hosts: PathBuf,
@@ -35,8 +34,9 @@ pub struct Debug {
 }
 
 impl Debug {
-    pub fn new(state: &Path) -> Self {
+    pub fn new(state: &Path, port: u16) -> Self {
         Self {
+            port,
             host_key: state.join("sshd_host_key"),
             client_key: state.join("sshd_client_key"),
             known_hosts: state.join("sshd_known_hosts"),
@@ -51,14 +51,14 @@ impl Debug {
         let client = ensure_key(&self.client_key).await?;
         std::fs::write(
             &self.known_hosts,
-            format!("[{LISTEN_HOST}]:{LISTEN_PORT} {host}\n"),
+            format!("[{LISTEN_HOST}]:{} {host}\n", self.port),
         )
         .with_context(|| format!("could not write {}", self.known_hosts.display()))?;
         std::fs::create_dir_all(&self.sandbox_dir)
             .with_context(|| format!("could not create {}", self.sandbox_dir.display()))?;
         std::fs::set_permissions(&self.sandbox_dir, std::fs::Permissions::from_mode(0o700))?;
         Ok(Sshd {
-            listen: format!("{LISTEN_HOST}:{LISTEN_PORT}"),
+            listen: format!("{LISTEN_HOST}:{}", self.port),
             host_key: self.host_key.clone(),
             authorized_key: client,
             sandbox_dir: self.sandbox_dir.clone(),
@@ -88,7 +88,7 @@ impl Debug {
                 "LogLevel=ERROR",
                 "-p",
             ])
-            .arg(LISTEN_PORT.to_string())
+            .arg(self.port.to_string())
             .arg(format!("{SSHD_USER}@{LISTEN_HOST}"))
             .arg(command)
             .stdin(std::process::Stdio::null())

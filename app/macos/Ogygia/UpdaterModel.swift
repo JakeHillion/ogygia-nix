@@ -12,10 +12,11 @@ final class UpdaterModel {
     private(set) var lastUpdateCheckDate: Date?
 
     var automaticallyChecksForUpdates: Bool {
-        didSet { updater.automaticallyChecksForUpdates = automaticallyChecksForUpdates }
+        didSet { updater?.automaticallyChecksForUpdates = automaticallyChecksForUpdates }
     }
 
-    @ObservationIgnored private let updater: SPUUpdater
+    /// None when rendering the settings window from fixtures.
+    @ObservationIgnored private let updater: SPUUpdater?
     @ObservationIgnored private var observation: NSKeyValueObservation?
 
     init(updater: SPUUpdater) {
@@ -32,7 +33,15 @@ final class UpdaterModel {
         }
     }
 
+    /// An updater that never checks, for rendering from fixtures.
+    init(fixtureLastCheck: Date?) {
+        updater = nil
+        automaticallyChecksForUpdates = true
+        canCheckForUpdates = true
+        lastUpdateCheckDate = fixtureLastCheck
+    }
+
     func checkForUpdates() {
-        updater.checkForUpdates()
+        updater?.checkForUpdates()
     }
 }

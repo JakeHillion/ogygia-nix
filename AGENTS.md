@@ -41,6 +41,10 @@ Test plan:
 - Unable to run tests in this environment. Developer must verify.
 ```
 
+That fallback is for tests the environment truly cannot run, and never for the
+macOS app: its tests run without a person (see below). A test plan names the
+commands that were run and what they showed.
+
 ### One–commit rule
 
 This repository strictly follows a **one commit per branch / one commit per PR** model.
@@ -65,3 +69,28 @@ change without iteration noise.
 - Do **not** include unrelated files in a commit.  
 - Keep commit text concise, accurate, and human-readable.  
 - Prefer crate-level `CRATE_OR_AREA` names unless the change spans multiple areas.
+
+## Testing the macOS app
+
+Changes to `app/macos/`, `src/ogygia-macos-nebulad/` or
+`nixos/nebula/device.nix` are tested in the layers `app/macos/TESTING.md`
+describes, by the agent, before committing:
+
+- `nix run .#test-macos-daemon` for any change to the daemon or what it
+  evaluates.
+- `nix run .#test-macos-ui` for any change to the app. Open and look at the
+  PNG of every pane the change touches; add a fixture scenario in
+  `app/macos/Ogygia/Snapshots.swift` for any new state the change adds.
+- The system test, through CI on a `test/` branch, for any change to the
+  daemon's launchd handling, Nebula supervision, the utun, relays, the admin
+  check or update handling, when pushing has been allowed.
+
+Never run the daemon as root, install the app, register or load its launchd
+job, or change the firewall on a Mac where `sysctl kern.hv_vmm_present` is 0.
+The system test refuses to; do not work around it. Everything else these
+layers run is safe on any Mac.
+
+The only steps a test plan may leave to the developer are those
+`app/macos/TESTING.md` lists under "What stays manual". Anything else that
+cannot yet be tested gets a test, or a change to these layers, in the same
+commit.

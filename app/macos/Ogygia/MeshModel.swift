@@ -1,5 +1,18 @@
 import Foundation
 import Observation
+import SwiftUI
+
+/// Where the mesh panes get the mesh: the daemon, or a fixture. A window
+/// sets it once, so it needs no comparing.
+struct MeshSource: Sendable {
+    var fetch: @Sendable () async throws -> DaemonProtocol.Mesh
+
+    static let daemon = MeshSource { try await DaemonClient.mesh() }
+}
+
+extension EnvironmentValues {
+    @Entry var meshSource = MeshSource.daemon
+}
 
 /// The mesh as the daemon last reported it, refreshed while a pane showing
 /// it is on screen. Nebula logs every query, so nothing asks otherwise.
@@ -11,10 +24,10 @@ final class MeshModel {
 
     /// Poll until the calling task is cancelled, as `.task` does when its
     /// view goes away.
-    func watch() async {
+    func watch(_ source: MeshSource) async {
         while !Task.isCancelled {
             do {
-                mesh = try await DaemonClient.mesh()
+                mesh = try await source.fetch()
                 error = nil
             } catch {
                 self.error = error.localizedDescription

@@ -23,6 +23,8 @@
 		7E4B2D9A1C6F3E8B5A0D4C27 /* NebulaMeshView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9B1F6C3E7A4D2B8F5E0A6D38 /* NebulaMeshView.swift */; };
 		2D8A5F1E9C3B7D4A6F0E8B49 /* NebulaPeersView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4F6C2A8E1D5B9F3C7A0E2D5A /* NebulaPeersView.swift */; };
 		8C3E7B1A5D9F2C6E4B0A9F6B /* NebulaConfigView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6A9D4F2C8E1B7A5D3F0C4B7C /* NebulaConfigView.swift */; };
+		A1B2C3D4E5F60718293A4B5C /* Main.swift in Sources */ = {isa = PBXBuildFile; fileRef = B2C3D4E5F60718293A4B5C6D /* Main.swift */; };
+		C3D4E5F60718293A4B5C6D7E /* Snapshots.swift in Sources */ = {isa = PBXBuildFile; fileRef = D4E5F60718293A4B5C6D7E8F /* Snapshots.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -44,6 +46,8 @@
 		9B1F6C3E7A4D2B8F5E0A6D38 /* NebulaMeshView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NebulaMeshView.swift; sourceTree = "<group>"; };
 		4F6C2A8E1D5B9F3C7A0E2D5A /* NebulaPeersView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NebulaPeersView.swift; sourceTree = "<group>"; };
 		6A9D4F2C8E1B7A5D3F0C4B7C /* NebulaConfigView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NebulaConfigView.swift; sourceTree = "<group>"; };
+		B2C3D4E5F60718293A4B5C6D /* Main.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Main.swift; sourceTree = "<group>"; };
+		D4E5F60718293A4B5C6D7E8F /* Snapshots.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Snapshots.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -68,6 +72,7 @@
 				6D3B8E2A5F1C9D7E4B0A3C72 /* FleetSettingsView.swift */,
 				8E5A2F1C7D4B9E3A6C0F2D58 /* GeneralSettingsView.swift */,
 				770B0B90849FD8EB2458677A /* Info.plist */,
+				B2C3D4E5F60718293A4B5C6D /* Main.swift */,
 				5C2E9A7D3F1B8E4A6D0C2E16 /* MeshModel.swift */,
 				6A9D4F2C8E1B7A5D3F0C4B7C /* NebulaConfigView.swift */,
 				9B1F6C3E7A4D2B8F5E0A6D38 /* NebulaMeshView.swift */,
@@ -77,6 +82,7 @@
 				414372295F5BD72756A7616C /* Ogygia.entitlements */,
 				653E548688CDC08A29F68437 /* OgygiaApp.swift */,
 				D766984E6F0FBC22CAB82AB7 /* SettingsView.swift */,
+				D4E5F60718293A4B5C6D7E8F /* Snapshots.swift */,
 				3FA409058B3891BDC32CC85B /* UpdaterModel.swift */,
 			);
 			path = Ogygia;
@@ -179,6 +185,8 @@
 				3E402633F76177DC1811AF1D /* NebulaModel.swift in Sources */,
 				AB067466CB473BA874815C0D /* OgygiaApp.swift in Sources */,
 				B66D1B35B2E070D51D8CE8F9 /* SettingsView.swift in Sources */,
+				C3D4E5F60718293A4B5C6D7E /* Snapshots.swift in Sources */,
+				A1B2C3D4E5F60718293A4B5C /* Main.swift in Sources */,
 				8C3E7B1A5D9F2C6E4B0A9F6B /* NebulaConfigView.swift in Sources */,
 				2D8A5F1E9C3B7D4A6F0E8B49 /* NebulaPeersView.swift in Sources */,
 				7E4B2D9A1C6F3E8B5A0D4C27 /* NebulaMeshView.swift in Sources */,

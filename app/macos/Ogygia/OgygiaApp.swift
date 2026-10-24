@@ -1,7 +1,6 @@
 import Sparkle
 import SwiftUI
 
-@main
 struct OgygiaApp: App {
     private let updaterController: SPUStandardUpdaterController
     @State private var updater: UpdaterModel

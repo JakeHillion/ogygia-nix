@@ -17,9 +17,32 @@ final class NebulaModel {
     private(set) var status: DaemonProtocol.Status?
     private(set) var unreachable: String?
 
-    init() {
-        register()
+    /// Whether this model registers the daemon with launchd and reports its
+    /// registration, rather than taking the daemon as already running.
+    @ObservationIgnored private let managesRegistration: Bool
+
+    /// Register the daemon and poll it, or, with `register` false, only poll
+    /// a daemon something else started, as the end-to-end test does.
+    init(register: Bool = true) {
+        managesRegistration = register
+        if register {
+            self.register()
+        } else {
+            registration = .enabled
+        }
         Task { await poll() }
+    }
+
+    /// A model that shows `status` and never talks to a daemon, for
+    /// rendering the settings window from fixtures.
+    init(
+        fixture status: DaemonProtocol.Status?, registration: SMAppService.Status = .enabled,
+        unreachable: String? = nil
+    ) {
+        managesRegistration = false
+        self.status = status
+        self.registration = registration
+        self.unreachable = unreachable
     }
 
     /// The first line of the menu.
@@ -139,7 +162,9 @@ final class NebulaModel {
 
     private func poll() async {
         while true {
-            registration = service.status
+            if managesRegistration {
+                registration = service.status
+            }
             if registration == .enabled {
                 await send(.status)
             }

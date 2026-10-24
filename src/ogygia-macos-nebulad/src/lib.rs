@@ -14,6 +14,7 @@
 
 pub mod config;
 pub mod mesh;
+pub mod preferences;
 pub mod protocol;
 pub mod render;
 pub mod report;

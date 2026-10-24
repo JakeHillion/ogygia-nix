@@ -33,20 +33,24 @@ use crate::debug::Debug;
 use crate::mesh;
 use crate::mesh::Mesh;
 use crate::peer;
-use crate::prefs;
+use crate::preferences::Preferences;
+use crate::prefs::SystemPreferences;
 use crate::protocol::Nebula;
 use crate::protocol::Request;
 use crate::protocol::Response;
 use crate::protocol::SOCKET_PATH;
 use crate::protocol::Status;
 use crate::render;
-use crate::render::Sshd;
+use crate::render::Additions;
 use crate::report;
 use crate::settings;
 use crate::supervisor::Supervisor;
 
 /// Root-only state: the keys, and the last config that evaluated.
 const STATE_DIR: &str = "/Library/Application Support/Ogygia/Nebula";
+/// Where the daemon's own Nebula sshd listens on loopback. Nebula refuses
+/// port 22, and this one sits beside its usual 4242.
+const SSHD_PORT: u16 = 4243;
 /// How often to look for a new config, as `ogygia-updated` polls on NixOS.
 const UPDATE_INTERVAL: Duration = Duration::from_secs(15 * 60);
 /// A first evaluation fetches nixpkgs, so allow it a while.
@@ -65,15 +69,44 @@ struct Paths {
     nebula_cert: PathBuf,
 }
 
-impl Paths {
+/// Everything the daemon takes from the machine it runs on. The launchd job
+/// uses [`Env::system`]; a test builds one in a temporary directory, so the
+/// daemon runs unprivileged beside a Mac's own without touching it.
+pub struct Env {
+    pub state_dir: PathBuf,
+    pub socket: PathBuf,
+    /// Where `nebula` and `nebula-cert` are.
+    pub bin_dir: PathBuf,
+    pub sshd_port: u16,
+    pub preferences: Box<dyn Preferences>,
+    /// Run Nebula with no tun device. Only a test sets this.
+    pub tun_disabled: bool,
+}
+
+impl Env {
     /// Nebula ships in the app bundle beside the daemon, so the app's version
     /// of Nebula is always the one that runs.
-    fn new() -> Result<Self> {
+    pub fn system() -> Result<Self> {
         let exe = std::env::current_exe().context("could not find the daemon's own path")?;
         let bin = exe.parent().context("the daemon has no parent directory")?;
-        let state = Path::new(STATE_DIR);
         Ok(Self {
-            exe: exe.clone(),
+            state_dir: STATE_DIR.into(),
+            socket: SOCKET_PATH.into(),
+            bin_dir: bin.to_owned(),
+            sshd_port: SSHD_PORT,
+            preferences: Box::new(SystemPreferences),
+            tun_disabled: false,
+        })
+    }
+}
+
+impl Paths {
+    fn new(env: &Env) -> Result<Self> {
+        let exe = std::env::current_exe().context("could not find the daemon's own path")?;
+        let bin = &env.bin_dir;
+        let state = &env.state_dir;
+        Ok(Self {
+            exe,
             key: state.join("host.key"),
             public_key: state.join("host.pub"),
             config: state.join("config.yml"),
@@ -87,9 +120,10 @@ impl Paths {
 
 struct Daemon {
     paths: Paths,
+    preferences: Box<dyn Preferences>,
     nix: Nix,
     debug: Debug,
-    sshd: Sshd,
+    additions: Additions,
     /// The last fleet config that evaluated, which a local config is applied
     /// to.
     fleet: Mutex<Option<Fleet>>,
@@ -101,21 +135,38 @@ struct Daemon {
     changes: watch::Sender<u64>,
 }
 
-pub async fn run() -> Result<()> {
-    let paths = Paths::new()?;
-    std::fs::create_dir_all(STATE_DIR).with_context(|| format!("could not create {STATE_DIR}"))?;
-    std::fs::set_permissions(STATE_DIR, std::fs::Permissions::from_mode(0o700))?;
+/// Run until SIGTERM or SIGINT, or until an update replaces the daemon.
+pub async fn run(env: Env) -> Result<()> {
+    let mut term = signal(SignalKind::terminate())?;
+    let mut int = signal(SignalKind::interrupt())?;
+    run_until(env, async move {
+        tokio::select! {
+            _ = term.recv() => {}
+            _ = int.recv() => {}
+        }
+    })
+    .await
+}
+
+/// Run until `stop` resolves, or until an update replaces the daemon.
+pub async fn run_until(env: Env, stop: impl Future<Output = ()>) -> Result<()> {
+    let paths = Paths::new(&env)?;
+    let state = &env.state_dir;
+    std::fs::create_dir_all(state)
+        .with_context(|| format!("could not create {}", state.display()))?;
+    std::fs::set_permissions(state, std::fs::Permissions::from_mode(0o700))?;
 
     let public_key = ensure_key(&paths).await?;
-    let debug = Debug::new(Path::new(STATE_DIR));
+    let debug = Debug::new(state, env.sshd_port);
     let sshd = debug.ensure().await?;
     let fleet = load_fleet(&paths.fleet);
-    let (config_mode, local_config) = prefs::load_config();
+    let preferences = env.preferences;
+    let (config_mode, local_config) = preferences.load_config();
     let mut status = Status {
         build: build(),
         public_key: Some(public_key),
         config_mode,
-        config_mode_managed: prefs::config_mode_managed(),
+        config_mode_managed: preferences.config_mode_managed(),
         fleet_config: fleet
             .as_ref()
             .map(|f| LocalConfig::from_settings(&f.settings)),
@@ -141,7 +192,12 @@ pub async fn run() -> Result<()> {
             .map(String::from),
         ),
         debug,
-        sshd,
+        additions: Additions {
+            key: paths.key.clone(),
+            sshd,
+            tun_disabled: env.tun_disabled,
+        },
+        preferences,
         fleet: Mutex::new(fleet),
         applying: tokio::sync::Mutex::new(()),
         status: Arc::new(Mutex::new(status)),
@@ -167,24 +223,23 @@ pub async fn run() -> Result<()> {
         .run(changes_rx, shutdown_rx),
     );
 
-    let listener = listen()?;
-    tokio::spawn(serve(daemon.clone(), listener));
-    tokio::spawn(update_loop(daemon.clone()));
+    let listener = listen(&env.socket)?;
+    let server = tokio::spawn(serve(daemon.clone(), listener));
+    let updates = tokio::spawn(update_loop(daemon.clone()));
 
-    let mut term = signal(SignalKind::terminate())?;
-    let mut int = signal(SignalKind::interrupt())?;
     tokio::select! {
-        _ = term.recv() => tracing::info!("stopping"),
-        _ = int.recv() => tracing::info!("stopping"),
+        _ = stop => tracing::info!("stopping"),
         // launchd keeps running the old binary after Sparkle replaces the
         // app, so exit and let KeepAlive start the new one from the bundle.
         _ = replaced(daemon.paths.exe.clone()) => {
             tracing::info!("an update replaced the daemon; exiting so launchd starts the new one");
         }
     }
+    server.abort();
+    updates.abort();
     let _ = shutdown.send(true);
     let _ = supervisor.await;
-    let _ = std::fs::remove_file(SOCKET_PATH);
+    let _ = std::fs::remove_file(&env.socket);
     Ok(())
 }
 
@@ -256,16 +311,16 @@ async fn update_loop(daemon: Arc<Daemon>) {
 
 impl Daemon {
     async fn update(&self) {
-        let settings = prefs::load();
+        let settings = self.preferences.load();
         {
             let mut status = self.status.lock().unwrap();
             status.repository_url = settings.repository_url.clone();
             status.branch = settings.branch.clone();
             status.device = settings.device.clone();
-            status.settings_managed = prefs::managed();
+            status.settings_managed = self.preferences.managed();
             // A `defaults write` or a profile may have changed these too.
-            (status.config_mode, status.local_config) = prefs::load_config();
-            status.config_mode_managed = prefs::config_mode_managed();
+            (status.config_mode, status.local_config) = self.preferences.load_config();
+            status.config_mode_managed = self.preferences.config_mode_managed();
         }
 
         let installable = match settings.installable() {
@@ -311,7 +366,7 @@ impl Daemon {
         .await
         .context("nix eval timed out")??;
         // Check it renders before keeping it.
-        render::render(fleet.settings.clone(), None, &self.paths.key, &self.sshd)?;
+        render::render(fleet.settings.clone(), None, &self.additions)?;
         write_atomically(&self.paths.fleet, &serde_json::to_vec(&fleet)?)?;
         *self.fleet.lock().unwrap() = Some(fleet);
         self.apply_fleet().await
@@ -337,7 +392,7 @@ impl Daemon {
         };
         self.status.lock().unwrap().fleet_config = Some(LocalConfig::from_settings(&settings));
         let local = (mode == ConfigMode::Local).then_some(&local);
-        let config = render::render(settings, local, &self.paths.key, &self.sshd)?;
+        let config = render::render(settings, local, &self.additions)?;
         self.set_config(Some(config)).await;
         Ok(())
     }
@@ -412,14 +467,13 @@ async fn cert_info(paths: &Paths) -> Result<report::CertInfo> {
 
 /// Anyone on the Mac may read the status, so the socket is world-writable;
 /// changing settings is checked per connection instead.
-fn listen() -> Result<UnixListener> {
-    let socket = Path::new(SOCKET_PATH);
+fn listen(socket: &Path) -> Result<UnixListener> {
     let dir = socket.parent().context("socket path has no parent")?;
     std::fs::create_dir_all(dir).with_context(|| format!("could not create {}", dir.display()))?;
     std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o755))?;
     let _ = std::fs::remove_file(socket);
-    let listener =
-        UnixListener::bind(socket).with_context(|| format!("could not listen on {SOCKET_PATH}"))?;
+    let listener = UnixListener::bind(socket)
+        .with_context(|| format!("could not listen on {}", socket.display()))?;
     std::fs::set_permissions(socket, std::fs::Permissions::from_mode(0o666))?;
     Ok(listener)
 }
@@ -499,11 +553,11 @@ impl Daemon {
         if !admin {
             bail!("only an administrator can change which fleet this Mac follows");
         }
-        if prefs::managed() {
+        if self.preferences.managed() {
             bail!("these settings are managed by a configuration profile");
         }
         settings.validate()?;
-        prefs::store(&settings)?;
+        self.preferences.store(&settings)?;
 
         let mut status = self.status.lock().unwrap();
         status.repository_url = settings.repository_url;
@@ -521,11 +575,11 @@ impl Daemon {
         if !admin {
             bail!("only an administrator can change this Mac's Nebula config");
         }
-        if prefs::config_mode_managed() {
+        if self.preferences.config_mode_managed() {
             bail!("this Mac's Nebula config is managed by a configuration profile");
         }
         local.validate()?;
-        prefs::store_config(mode, &local)?;
+        self.preferences.store_config(mode, &local)?;
         {
             let mut status = self.status.lock().unwrap();
             status.config_mode = mode;

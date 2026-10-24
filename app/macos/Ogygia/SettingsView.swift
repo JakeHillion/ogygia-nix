@@ -7,9 +7,15 @@ struct SettingsView: View {
     let nebula: NebulaModel
     let updater: UpdaterModel
 
-    @State private var pane: Pane = .general
+    @State private var pane: Pane
 
-    enum Pane: Hashable {
+    init(nebula: NebulaModel, updater: UpdaterModel, pane: Pane = .general) {
+        self.nebula = nebula
+        self.updater = updater
+        _pane = State(initialValue: pane)
+    }
+
+    enum Pane: String, Hashable, CaseIterable {
         case general
         case fleet
         case nebulaOverview

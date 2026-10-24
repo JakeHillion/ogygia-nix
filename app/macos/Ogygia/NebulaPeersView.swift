@@ -3,6 +3,7 @@ import SwiftUI
 /// Every host in the mesh and how this Mac reaches it.
 struct NebulaPeersView: View {
     @State private var feed = MeshModel()
+    @Environment(\.meshSource) private var meshSource
     @State private var sortOrder = [KeyPathComparator(\DaemonProtocol.Peer.displayName)]
 
     var body: some View {
@@ -30,7 +31,7 @@ struct NebulaPeersView: View {
             }
         }
         .navigationTitle("Peers")
-        .task { await feed.watch() }
+        .task { await feed.watch(meshSource) }
     }
 
     private func role(_ peer: DaemonProtocol.Peer) -> String {

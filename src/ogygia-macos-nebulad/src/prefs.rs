@@ -14,6 +14,7 @@ use core_foundation_sys::preferences::kCFPreferencesAnyUser;
 
 use crate::config::ConfigMode;
 use crate::config::LocalConfig;
+use crate::preferences::Preferences;
 use crate::settings::DOMAIN;
 use crate::settings::KEY_BRANCH;
 use crate::settings::KEY_CONFIG_MODE;
@@ -24,7 +25,7 @@ use crate::settings::Settings;
 
 /// The settings as the daemon sees them: forced values from a configuration
 /// profile first, then `/Library/Preferences`.
-pub fn load() -> Settings {
+fn load() -> Settings {
     let domain = CFString::new(DOMAIN);
     // Drop cfprefsd's cached copy so a `defaults write` made since the last
     // read is seen.
@@ -37,7 +38,7 @@ pub fn load() -> Settings {
 }
 
 /// Whether a configuration profile forces any of the settings.
-pub fn managed() -> bool {
+fn managed() -> bool {
     [KEY_REPOSITORY_URL, KEY_BRANCH, KEY_DEVICE]
         .iter()
         .any(|key| forced(key))
@@ -45,7 +46,7 @@ pub fn managed() -> bool {
 
 /// Whether to follow the fleet's Nebula config, and the local one, which a
 /// value that does not parse leaves at its defaults.
-pub fn load_config() -> (ConfigMode, LocalConfig) {
+fn load_config() -> (ConfigMode, LocalConfig) {
     let domain = CFString::new(DOMAIN);
     unsafe { CFPreferencesAppSynchronize(domain.as_concrete_TypeRef()) };
     let mode = match string(&domain, KEY_CONFIG_MODE).as_deref() {
@@ -66,7 +67,7 @@ pub fn load_config() -> (ConfigMode, LocalConfig) {
 
 /// Whether a configuration profile forces the config mode or the local
 /// config.
-pub fn config_mode_managed() -> bool {
+fn config_mode_managed() -> bool {
     forced(KEY_CONFIG_MODE) || forced(KEY_LOCAL_CONFIG)
 }
 
@@ -81,7 +82,7 @@ fn forced(key: &str) -> bool {
 /// Store the settings for every user of this Mac, in
 /// `/Library/Preferences/dev.ogygia.macos.plist`, removing any that are
 /// unset. Only root may write there.
-pub fn store(settings: &Settings) -> anyhow::Result<()> {
+fn store(settings: &Settings) -> anyhow::Result<()> {
     write([
         (KEY_REPOSITORY_URL, settings.repository_url.clone()),
         (KEY_BRANCH, settings.branch.clone()),
@@ -90,7 +91,7 @@ pub fn store(settings: &Settings) -> anyhow::Result<()> {
 }
 
 /// Store the config mode and the local config beside the settings.
-pub fn store_config(mode: ConfigMode, local: &LocalConfig) -> anyhow::Result<()> {
+fn store_config(mode: ConfigMode, local: &LocalConfig) -> anyhow::Result<()> {
     let mode = match mode {
         ConfigMode::Fleet => "fleet",
         ConfigMode::Local => "local",
@@ -145,4 +146,33 @@ fn string(domain: &CFString, key: &str) -> Option<String> {
     let value = value.downcast_into::<CFString>()?.to_string();
     let value = value.trim();
     (!value.is_empty()).then(|| value.to_owned())
+}
+
+/// The `dev.ogygia.macos` domain, which the launchd job uses.
+pub struct SystemPreferences;
+
+impl Preferences for SystemPreferences {
+    fn load(&self) -> Settings {
+        load()
+    }
+
+    fn managed(&self) -> bool {
+        managed()
+    }
+
+    fn store(&self, settings: &Settings) -> anyhow::Result<()> {
+        store(settings)
+    }
+
+    fn load_config(&self) -> (ConfigMode, LocalConfig) {
+        load_config()
+    }
+
+    fn config_mode_managed(&self) -> bool {
+        config_mode_managed()
+    }
+
+    fn store_config(&self, mode: ConfigMode, local: &LocalConfig) -> anyhow::Result<()> {
+        store_config(mode, local)
+    }
 }

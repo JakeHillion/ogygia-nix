@@ -2,7 +2,9 @@ name: CI
 
 on:
   push:
-    branches: [ main ]
+    # A test/ branch runs everything, the macOS VM tests included, without a
+    # pull request; see app/macos/TESTING.md.
+    branches: [ main, 'test/**' ]
   pull_request:
 
 jobs:
@@ -107,6 +109,27 @@ jobs:
     # when history is missing; Sparkle would then never offer an update.
     - name: Check the build number
       run: test "$(plutil -extract CFBundleVersion raw "$APP/Contents/Info.plist")" = "$(git rev-list --count HEAD)"
+
+    # The macOS tests beyond cargo test; see app/macos/TESTING.md. The runner
+    # is a disposable VM, so the system test may run its root daemon here.
+    - name: Test the daemon unprivileged
+      run: nix run .#test-macos-daemon
+
+    - name: Render the settings window
+      run: OGYGIA_TEST_APP="$APP" nix run .#test-macos-ui -- "$RUNNER_TEMP/macos-tests/snapshots"
+
+    - name: Test the installed app
+      env:
+        OGYGIA_TEST_OUTPUT: ${{ runner.temp }}/macos-tests
+      run: nix run .#test-macos-system -- "$APP"
+
+    - name: Upload the test results
+      if: always()
+      uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+      with:
+        name: macos-tests
+        path: ${{ runner.temp }}/macos-tests
+        retention-days: 7
 
     # ditto keeps the framework symlinks and code signatures, which the
     # artifact upload would otherwise flatten.

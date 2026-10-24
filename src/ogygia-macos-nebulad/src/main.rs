@@ -10,7 +10,9 @@ fn main() -> anyhow::Result<()> {
     tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()?
-        .block_on(ogygia_macos_nebulad::daemon::run())
+        .block_on(ogygia_macos_nebulad::daemon::run(
+            ogygia_macos_nebulad::daemon::Env::system()?,
+        ))
 }
 
 #[cfg(not(target_os = "macos"))]
