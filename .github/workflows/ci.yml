@@ -365,6 +365,143 @@ jobs:
         aws s3 cp "$RUNNER_TEMP/appcast.xml" "s3://$ASSETS_BUCKET/macos/appcast.xml" \
           --content-type application/xml --cache-control "public, max-age=300"
 
+  ios-app-release:
+    needs: apple-apps
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: xcode-27
+
+    # Releases run one at a time; a newer queued release replaces an older
+    # pending one. Builds finish in any order, so the first step also skips
+    # a release older than what TestFlight already has.
+    concurrency:
+      group: ios-app-release
+      cancel-in-progress: false
+
+    env:
+      ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
+      ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
+
+    # Everything here runs outside the Nix sandbox: it needs the signing
+    # identity and App Store Connect, neither of which belongs in a
+    # derivation. It only signs and uploads what Nix built.
+    steps:
+    - name: Download the app
+      uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
+      with:
+        name: ogygia-ios
+        path: ${{ runner.temp }}
+
+    # An .ipa is a zip with the app under Payload/.
+    - name: Unpack the app
+      run: |
+        mkdir -p "$RUNNER_TEMP/release/Payload"
+        ditto -x -k "$RUNNER_TEMP/Ogygia.app.zip" "$RUNNER_TEMP/release/Payload"
+        rm "$RUNNER_TEMP/Ogygia.app.zip"
+        chmod -R u+w "$RUNNER_TEMP/release/Payload/Ogygia.app"
+
+    - name: Write the App Store Connect key
+      env:
+        ASC_KEY_P8: ${{ secrets.ASC_KEY_P8 }}
+      run: |
+        echo "$ASC_KEY_P8" > "$RUNNER_TEMP/AuthKey.p8"
+
+    # App Store Connect rejects a build number it has already seen, so a
+    # build that finished after a newer one is skipped rather than failed.
+    - name: Check TestFlight has nothing newer than this build
+      id: testflight
+      run: |
+        plist="$RUNNER_TEMP/release/Payload/Ogygia.app/Info.plist"
+        build="$(plutil -extract CFBundleVersion raw "$plist")"
+        bundle_id="$(plutil -extract CFBundleIdentifier raw "$plist")"
+        # altool prints the token on stderr, after its own banner.
+        token="$(xcrun altool --generate-jwt --api-key "$ASC_KEY_ID" --api-issuer "$ASC_ISSUER_ID" \
+          --p8-file-path "$RUNNER_TEMP/AuthKey.p8" 2>&1 | grep '^eyJ')"
+        api() { curl -fsSG -H "Authorization: Bearer $token" "https://api.appstoreconnect.apple.com/v1/$1" "${@:2}"; }
+        app_id="$(api apps --data-urlencode "filter[bundleId]=$bundle_id" | plutil -extract data.0.id raw -o - -)"
+        # Builds are only ever uploaded in increasing order, so the newest
+        # upload has the highest build number.
+        builds="$(api builds --data-urlencode "filter[app]=$app_id" --data-urlencode "sort=-uploadedDate" \
+          --data-urlencode "limit=1" --data-urlencode "fields[builds]=version")"
+        # An app with no builds yet has an empty list.
+        latest="$(printf '%s' "$builds" | plutil -extract data.0.attributes.version raw -o - - 2>/dev/null || echo 0)"
+        if [ "$latest" -ge "$build" ]; then
+          echo "::notice::TestFlight already has build $latest; skipping build $build"
+          echo "release=false" >> "$GITHUB_OUTPUT"
+        else
+          echo "release=true" >> "$GITHUB_OUTPUT"
+        fi
+
+    - name: Import the Apple Distribution certificate
+      if: steps.testflight.outputs.release == 'true'
+      env:
+        IOS_DIST_CERT_P12_BASE64: ${{ secrets.IOS_DIST_CERT_P12_BASE64 }}
+        IOS_DIST_CERT_PASSWORD: ${{ secrets.IOS_DIST_CERT_PASSWORD }}
+      run: |
+        keychain="$RUNNER_TEMP/signing.keychain-db"
+        keychain_password="$(openssl rand -hex 32)"
+        security create-keychain -p "$keychain_password" "$keychain"
+        security set-keychain-settings -lut 21600 "$keychain"
+        security unlock-keychain -p "$keychain_password" "$keychain"
+        echo "$IOS_DIST_CERT_P12_BASE64" | base64 --decode > "$RUNNER_TEMP/cert.p12"
+        security import "$RUNNER_TEMP/cert.p12" -k "$keychain" -P "$IOS_DIST_CERT_PASSWORD" -f pkcs12 -T /usr/bin/codesign
+        rm "$RUNNER_TEMP/cert.p12"
+        security set-key-partition-list -S apple-tool:,apple: -k "$keychain_password" "$keychain" > /dev/null
+        # Keep the existing search list; its entries are space-free paths.
+        # shellcheck disable=SC2046
+        security list-keychains -d user -s "$keychain" $(security list-keychains -d user | tr -d '"')
+
+    # The entitlements are copied from the provisioning profile, limited to
+    # the ones an app with no capabilities is signed with.
+    - name: Sign
+      if: steps.testflight.outputs.release == 'true'
+      env:
+        IOS_PROVISIONING_PROFILE_BASE64: ${{ secrets.IOS_PROVISIONING_PROFILE_BASE64 }}
+      run: |
+        app="$RUNNER_TEMP/release/Payload/Ogygia.app"
+        profile="$app/embedded.mobileprovision"
+        echo "$IOS_PROVISIONING_PROFILE_BASE64" | base64 --decode > "$profile"
+        security cms -D -i "$profile" > "$RUNNER_TEMP/profile.plist"
+
+        # A missing entitlement reads as empty, so the checks below report it.
+        entitlement() { /usr/libexec/PlistBuddy -c "Print :Entitlements:$1" "$RUNNER_TEMP/profile.plist" 2>/dev/null || true; }
+        app_identifier="$(entitlement application-identifier)"
+        team="$(entitlement com.apple.developer.team-identifier)"
+        get_task_allow="$(entitlement get-task-allow)"
+        beta_reports_active="$(entitlement beta-reports-active)"
+        bundle_id="$(plutil -extract CFBundleIdentifier raw "$app/Info.plist")"
+        if [ "$app_identifier" != "$team.$bundle_id" ]; then
+          echo "::error::The profile is for $app_identifier, not $team.$bundle_id"
+          exit 1
+        fi
+        if [ "$get_task_allow" != false ] || [ "$beta_reports_active" != true ]; then
+          echo "::error::The profile is not an App Store distribution profile"
+          exit 1
+        fi
+
+        entitlements="$RUNNER_TEMP/entitlements.plist"
+        /usr/libexec/PlistBuddy \
+          -c "Add :application-identifier string $app_identifier" \
+          -c "Add :com.apple.developer.team-identifier string $team" \
+          -c "Add :get-task-allow bool false" \
+          -c "Add :beta-reports-active bool true" \
+          "$entitlements"
+
+        codesign --force --sign "Apple Distribution: " --keychain "$RUNNER_TEMP/signing.keychain-db" \
+          --entitlements "$entitlements" "$app"
+        codesign --verify --deep --strict --verbose=2 "$app"
+
+    - name: Upload to TestFlight
+      if: steps.testflight.outputs.release == 'true'
+      run: |
+        cd "$RUNNER_TEMP/release"
+        # Extended attributes would be packed as ._ files that the signature
+        # doesn't cover.
+        ditto -c -k --norsrc --noextattr --keepParent Payload Ogygia.ipa
+        # Waiting until App Store Connect lists the build means the next
+        # release's check sees it.
+        xcrun altool --upload-package Ogygia.ipa --wait \
+          --api-key "$ASC_KEY_ID" --api-issuer "$ASC_ISSUER_ID" --p8-file-path "$RUNNER_TEMP/AuthKey.p8"
+
   single-commit:
     if: github.event_name == 'merge_group'
     runs-on: ubuntu-24.04
