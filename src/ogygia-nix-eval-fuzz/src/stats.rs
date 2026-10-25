@@ -143,8 +143,8 @@ mod tests {
     #[test]
     fn line_pairs_names_with_counts() {
         assert_eq!(
-            line(1700000000, &[1, 2, 3, 4, 5, 6, 7, 8]),
-            "1700000000 ignored 1 parse-rejected 2 skipped 3 limited 4 values 5 caught 6 uncaught 7 diverged 8\n"
+            line(1700000000, &[1, 2, 3, 4, 5, 6, 7, 8, 9]),
+            "1700000000 ignored 1 parse-rejected 2 skipped 3 limited 4 misread 5 values 6 caught 7 uncaught 8 diverged 9\n"
         );
     }
 
@@ -155,7 +155,7 @@ mod tests {
         crate::record(&findings, "old", "report").unwrap();
         let mut summary = Summary::new(&findings).unwrap();
 
-        summary.add(line(2, &[1, 0, 0, 0, 0, 0, 0, 1]).trim_end());
+        summary.add(line(2, &[1, 0, 0, 0, 0, 0, 0, 0, 1]).trim_end());
         crate::record(&findings, "new", "report").unwrap();
         let new = findings.join("11507a0e2f5e69d5dfa40a62a1bd7b6e");
         assert!(new.exists());
@@ -163,7 +163,7 @@ mod tests {
             summary.update().unwrap(),
             [
                 format!("new finding: {}", new.display()),
-                "since start: ignored 1 parse-rejected 0 skipped 0 limited 0 values 0 caught 0 uncaught 0 diverged 1; 2 findings".to_owned(),
+                "since start: ignored 1 parse-rejected 0 skipped 0 limited 0 misread 0 values 0 caught 0 uncaught 0 diverged 1; 2 findings".to_owned(),
             ]
         );
 
@@ -172,7 +172,7 @@ mod tests {
         assert_eq!(
             summary.update().unwrap(),
             [
-                "since start: ignored 3 parse-rejected 0 skipped 0 limited 0 values 0 caught 0 uncaught 0 diverged 2; 2 findings"
+                "since start: ignored 3 parse-rejected 0 skipped 0 limited 0 misread 0 values 0 caught 0 uncaught 0 diverged 2; 2 findings"
             ]
         );
     }
