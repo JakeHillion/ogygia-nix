@@ -10,6 +10,7 @@ use rnix::ast::HasEntry;
 use rnix::ast::InterpolPart;
 use rowan::ast::AstNode;
 
+use crate::builtins::Builtin;
 use crate::context::Context;
 use crate::ir::AttrKey;
 use crate::ir::AttrValue;
@@ -719,8 +720,8 @@ impl<'a> Compiler<'a> {
         } else if name == s.null {
             return Ok(Expr::Null);
         }
-        if self.ctx.is_global(name) {
-            return Ok(Expr::Global(name));
+        if let Some(b) = Builtin::in_scope(self.name(name), self.pure) {
+            return Ok(Expr::Global(b));
         }
         if withs.is_empty() {
             return err(format!("undefined variable '{}' at {pos}", self.name(name)));

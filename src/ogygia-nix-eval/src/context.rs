@@ -3,7 +3,6 @@
 
 use std::cell::RefCell;
 use std::collections::HashMap;
-use std::collections::HashSet;
 
 use anyhow::Result;
 use bumpalo::Bump;
@@ -28,7 +27,6 @@ pub struct Context {
     pub interner: Interner,
     pub syms: Syms,
     pub io: Io,
-    globals: HashSet<Sym>,
     /// Compiled files by path. The `'static` is a lie told to the type
     /// system: the expressions live in `arena` and are only handed out with
     /// the lifetime of a borrow of `self`.
@@ -48,15 +46,11 @@ impl Context {
             }
         }
         let syms = Syms::new(&interner);
-        let globals = builtins::global_names(io.pure)
-            .map(|n| interner.intern(&n))
-            .collect();
         Context {
             arena: Bump::new(),
             interner,
             syms,
             io,
-            globals,
             files: RefCell::new(HashMap::new()),
             regexes: Default::default(),
             drvs: RefCell::new(HashMap::new()),
@@ -69,10 +63,6 @@ impl Context {
 
     pub fn name(&self, sym: Sym) -> &str {
         self.interner.resolve(sym)
-    }
-
-    pub fn is_global(&self, sym: Sym) -> bool {
-        self.globals.contains(&sym)
     }
 
     /// Allocate an IR node. IR types hold only arena references, so not

@@ -6,8 +6,11 @@ use std::collections::HashMap;
 use std::collections::HashSet;
 
 use bumpalo::Bump;
+use enum_map::EnumMap;
 
 use crate::builtins;
+use crate::builtins::Builtin;
+use crate::builtins::Kind;
 use crate::context::Context;
 use crate::ir::AttrKey;
 use crate::ir::AttrValue;
@@ -29,7 +32,6 @@ use crate::value::ErrorKind;
 use crate::value::List;
 use crate::value::NixStr;
 use crate::value::PathV;
-use crate::value::PrimOp;
 use crate::value::PrimOpApp;
 use crate::value::PrimOpFn;
 use crate::value::R;
@@ -86,7 +88,8 @@ pub struct Eval<'a> {
     pub ctx: &'a Context,
     pub bump: &'a Bump,
     pub settings: Settings,
-    globals: RefCell<HashMap<Sym, Value<'a>>>,
+    /// The value of every builtin.
+    globals: EnumMap<Builtin, Value<'a>>,
     import_cache: RefCell<HashMap<String, Value<'a>>>,
     depth: Cell<usize>,
     pub(crate) empty_attrs: &'a Attrs<'a>,
@@ -125,18 +128,17 @@ impl<'a> Eval<'a> {
     }
 
     pub fn new(ctx: &'a Context, bump: &'a Bump, settings: Settings) -> Eval<'a> {
-        let ev = Eval {
+        let mut ev = Eval {
             ctx,
             bump,
             settings,
-            globals: RefCell::new(HashMap::new()),
+            globals: EnumMap::from_fn(|_| Value::Null),
             import_cache: RefCell::new(HashMap::new()),
             depth: Cell::new(0),
             empty_attrs: bump.alloc(Attrs { entries: &[] }),
             empty_list: bump.alloc(List { items: &[] }),
         };
-        let globals = builtins::make_globals(&ev);
-        *ev.globals.borrow_mut() = globals;
+        ev.globals = builtins::make_globals(&ev);
         ev
     }
 
@@ -395,10 +397,7 @@ impl<'a> Eval<'a> {
             Expr::Path(p) => Value::Path(p),
             Expr::Var(d, i) => env.up(*d).slots[*i as usize].get(),
             Expr::Lambda(def) => Value::Lambda(self.bump.alloc(Closure { def, env })),
-            Expr::Global(name) => match self.globals.borrow().get(name) {
-                Some(v) => *v,
-                None => self.thunk(ThunkState::Expr(e, env)),
-            },
+            Expr::Global(b) => self.globals[*b],
             _ => self.thunk(ThunkState::Expr(e, env)),
         }
     }
@@ -422,13 +421,7 @@ impl<'a> Eval<'a> {
             Expr::Str(s) => Ok(Value::Str(s)),
             Expr::Path(p) => Ok(Value::Path(p)),
             Expr::Var(d, i) => self.force(env.up(*d).slots[*i as usize].get()),
-            Expr::Global(name) => {
-                let v = self.globals.borrow().get(name).copied();
-                match v {
-                    Some(v) => self.force(v),
-                    None => eval_err(format!("undefined variable '{}'", self.name(*name))),
-                }
-            }
+            Expr::Global(b) => self.force(self.globals[*b]),
             Expr::WithVar { name, withs, pos } => {
                 for &depth in withs.iter() {
                     let ns = env.up(depth).slots[0].get();
@@ -742,8 +735,11 @@ impl<'a> Eval<'a> {
     }
 
     /// Apply `op`, already given `prev`, to one more argument.
-    fn call_primop(&self, op: &'static PrimOp, prev: &[Value<'a>], arg: Value<'a>) -> R<'a> {
-        let r = match (op.f, prev) {
+    fn call_primop(&self, op: Builtin, prev: &[Value<'a>], arg: Value<'a>) -> R<'a> {
+        let Kind::PrimOp(f) = op.kind() else {
+            unreachable!("only a primop is applied")
+        };
+        let r = match (f, prev) {
             (PrimOpFn::F1(f), []) => f(self, arg)?,
             (PrimOpFn::F2(f), [a]) => f(self, *a, arg)?,
             (PrimOpFn::F3(f), [a, b]) => f(self, *a, *b, arg)?,
@@ -1106,10 +1102,14 @@ impl<'a> Eval<'a> {
         self.deeper(|| {
             let forced_a = self.force(a)?;
             let forced_b = self.force(b)?;
-            if let (Some(p), Some(q)) = (a.ptr(), b.ptr())
-                && p == q
-                && std::mem::discriminant(&a) == std::mem::discriminant(&b)
-            {
+            let same = match (a, b) {
+                (Value::PrimOp(x), Value::PrimOp(y)) => x == y,
+                _ => {
+                    matches!((a.ptr(), b.ptr()), (Some(p), Some(q)) if p == q)
+                        && std::mem::discriminant(&a) == std::mem::discriminant(&b)
+                }
+            };
+            if same {
                 return Ok(true);
             }
             self.eq_forced(forced_a, forced_b)
