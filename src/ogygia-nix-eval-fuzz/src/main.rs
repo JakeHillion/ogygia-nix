@@ -250,7 +250,6 @@ fn minimise(dir: &Path, jobs: NonZero<usize>, stats: &Path) -> bool {
         &corpus,
         &crashed,
         seeds.as_deref().as_slice(),
-        &dir.join("minimise"),
         jobs,
         |inputs, kept, control| {
             let status = std::process::Command::new(&exe)

@@ -34,8 +34,7 @@ pub struct Minimised {
 /// The inputs the control file shows as started but not finished are those
 /// that crashed, hung or ran out of memory.
 ///
-/// `work`, which must be on the same file system as `corpus` and
-/// `crashed`, is deleted and used for scratch space. If any `merge`
+/// `corpus` and `crashed` must be on the same file system. If any `merge`
 /// fails, or `corpus` or `crashed` holds anything other than files, both
 /// are left as they were, and at no point is an input in neither. Must
 /// not run while anything uses them.
@@ -43,17 +42,14 @@ pub fn minimise(
     corpus: &Path,
     crashed: &Path,
     extra: &[&Path],
-    work: &Path,
     jobs: NonZero<usize>,
     merge: impl Fn(&Path, &Path, &Path) -> std::io::Result<()> + Sync,
 ) -> std::io::Result<Minimised> {
-    match std::fs::remove_dir_all(work) {
-        Ok(()) => {}
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-        Err(e) => return Err(e),
-    }
-    let result = minimise_in(corpus, crashed, extra, work, jobs, merge);
-    let cleaned = std::fs::remove_dir_all(work);
+    let work = tempfile::Builder::new()
+        .prefix("ogygia-nix-eval-fuzz-minimise-")
+        .tempdir()?;
+    let result = minimise_in(corpus, crashed, extra, work.path(), jobs, merge);
+    let cleaned = work.close();
     let summary = result?;
     cleaned?;
     Ok(summary)
@@ -67,7 +63,6 @@ fn minimise_in(
     jobs: NonZero<usize>,
     merge: impl Fn(&Path, &Path, &Path) -> std::io::Result<()> + Sync,
 ) -> std::io::Result<Minimised> {
-    std::fs::create_dir_all(work)?;
     std::fs::create_dir_all(crashed)?;
     let mut names = HashSet::new();
     let mut inputs = Vec::new();
@@ -115,8 +110,12 @@ fn minimise_in(
             .try_for_each(|m| m.join().unwrap_or_else(|e| std::panic::resume_unwind(e)))
     })?;
 
-    let new_corpus = work.join("corpus");
-    let new_crashed = work.join("crashed");
+    // The exchanges need the new directories on the corpus's file system.
+    let stage = tempfile::Builder::new()
+        .prefix(".minimise-")
+        .tempdir_in(corpus.parent().unwrap_or(Path::new(".")))?;
+    let new_corpus = stage.path().join("corpus");
+    let new_crashed = stage.path().join("crashed");
     std::fs::create_dir(&new_corpus)?;
     std::fs::create_dir(&new_crashed)?;
     for shard in &shards {
@@ -139,6 +138,7 @@ fn minimise_in(
         exchange(&new_crashed, crashed)?;
         return Err(e);
     }
+    stage.close()?;
     Ok(summary)
 }
 
@@ -232,7 +232,12 @@ fn files(dir: &Path) -> std::io::Result<Vec<PathBuf>> {
 /// Hard-link `from` to `to`, or copy it where that is refused, such as
 /// across file systems or from the Nix store.
 fn link_or_copy(from: &Path, to: &Path) -> std::io::Result<()> {
-    std::fs::hard_link(from, to).or_else(|_| std::fs::copy(from, to).map(drop))
+    std::fs::hard_link(from, to).or_else(|_| {
+        // A new file rather than `std::fs::copy`, so that its permissions
+        // come from where it lands, such as a default ACL, not from `from`.
+        let mut to = std::fs::File::create(to)?;
+        std::io::copy(&mut std::fs::File::open(from)?, &mut to).map(drop)
+    })
 }
 
 /// Swap the directories `a` and `b` atomically.
@@ -265,7 +270,6 @@ mod tests {
         tmp: tempfile::TempDir,
         corpus: PathBuf,
         crashed: PathBuf,
-        work: PathBuf,
     }
 
     /// A corpus holding an input named after each of `inputs`, holding its
@@ -277,7 +281,6 @@ mod tests {
         Dirs {
             corpus,
             crashed: tmp.path().join("crashed"),
-            work: tmp.path().join("work"),
             tmp,
         }
     }
@@ -294,7 +297,7 @@ mod tests {
         extra: &[&Path],
         merge: impl Fn(&Path, &Path, &Path) -> std::io::Result<()> + Sync,
     ) -> std::io::Result<Minimised> {
-        minimise(&d.corpus, &d.crashed, extra, &d.work, JOBS, merge)
+        minimise(&d.corpus, &d.crashed, extra, JOBS, merge)
     }
 
     fn names(dir: &Path) -> Vec<String> {
@@ -302,6 +305,16 @@ mod tests {
             .unwrap()
             .iter()
             .map(|f| f.file_name().unwrap().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        names
+    }
+
+    /// What is beside the corpus, files or not.
+    fn beside(d: &Dirs) -> Vec<String> {
+        let mut names: Vec<String> = std::fs::read_dir(d.tmp.path())
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
             .collect();
         names.sort();
         names
@@ -345,7 +358,7 @@ mod tests {
             std::fs::read_to_string(d.crashed.join("crash1")).unwrap(),
             "crash1"
         );
-        assert!(!d.work.exists());
+        assert_eq!(beside(&d), ["corpus", "crashed"]);
     }
 
     #[test]
@@ -413,7 +426,7 @@ mod tests {
             ["drop1", "drop2", "drop3", "drop4", "keep1"]
         );
         assert_eq!(names(&d.crashed), ["crash1"]);
-        assert!(!d.work.exists());
+        assert_eq!(beside(&d), ["corpus", "crashed"]);
     }
 
     #[test]
@@ -423,15 +436,31 @@ mod tests {
         let err = run(&d, &[], |_, _, _| unreachable!()).unwrap_err();
         assert!(err.to_string().ends_with("sub is not a file"), "{err}");
         assert_eq!(names(&d.corpus.join("sub")), Vec::<String>::new());
-        assert!(!d.work.exists());
+        assert_eq!(beside(&d), ["corpus", "crashed"]);
     }
 
     #[test]
-    fn clears_leftover_work() {
+    fn ignores_a_leftover_it_cannot_remove_beside_the_corpus() {
+        use std::os::unix::fs::PermissionsExt;
         let d = dirs(&["keep1"]);
-        std::fs::create_dir_all(d.work.join("shards/0/kept")).unwrap();
-        std::fs::write(d.work.join("shards/0/kept/stale"), "stale").unwrap();
-        run(&d, &[], fake_merge).unwrap();
+        let shards = d.tmp.path().join("minimise/shards");
+        std::fs::create_dir_all(shards.join("0")).unwrap();
+        let mode = |m| std::fs::set_permissions(&shards, std::fs::Permissions::from_mode(m));
+        mode(0o555).unwrap();
+        let result = run(&d, &[], fake_merge);
+        mode(0o755).unwrap();
+        result.unwrap();
+        assert_eq!(names(&d.corpus), ["keep1"]);
+    }
+
+    #[test]
+    fn merges_outside_the_corpus_directory() {
+        let d = dirs(&["keep1", "drop1"]);
+        run(&d, &[], |inputs, kept, control| {
+            assert!(!inputs.starts_with(d.tmp.path()), "{}", inputs.display());
+            fake_merge(inputs, kept, control)
+        })
+        .unwrap();
         assert_eq!(names(&d.corpus), ["keep1"]);
     }
 
