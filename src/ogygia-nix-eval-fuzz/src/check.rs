@@ -333,13 +333,12 @@ fn limited(stderr: &str) -> bool {
 
 fn settings() -> Settings {
     Settings {
-        current_system: None,
-        nix_path: Vec::new(),
         pure: true,
         // Nix's regular expressions are libstdc++'s `std::regex`, whose
         // semantics are too broken to reasonably match, so inputs that use
         // one are not compared.
         disabled: vec![Feature::Regex],
+        ..Settings::default()
     }
 }
 

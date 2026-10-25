@@ -46,8 +46,8 @@ const MAX_CALL_DEPTH: usize = 10_000;
 /// Evaluation settings that are fixed for a session.
 #[derive(Clone, Debug)]
 pub struct Settings {
-    /// `builtins.currentSystem`; `None` in pure evaluation.
-    pub current_system: Option<String>,
+    /// `builtins.currentSystem`, which pure evaluation leaves out.
+    pub current_system: String,
     /// Search path entries for `<...>` lookups, as `(prefix, path)`.
     pub nix_path: Vec<(String, String)>,
     pub pure: bool,
@@ -59,7 +59,7 @@ pub struct Settings {
 impl Default for Settings {
     fn default() -> Self {
         Settings {
-            current_system: Some(crate::CURRENT_SYSTEM.to_owned()),
+            current_system: crate::CURRENT_SYSTEM.to_owned(),
             nix_path: Vec::new(),
             pure: false,
             disabled: Vec::new(),
