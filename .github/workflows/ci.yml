@@ -83,7 +83,7 @@ jobs:
           extra-substituters = https://nixcache.jakehillion.me
           extra-trusted-public-keys = nixcache.jakehillion.me-1:HQsjYdrcs3ilS/ngtlbTQXU4Xfsm+va5NN7yoK0wKMg=
           sandbox = true
-          # The host paths ogygia-macos declares in __impureHostDeps.
+          # The host paths app/xcode-build declares in __impureHostDeps.
           allowed-impure-host-deps = /System/Library /bin/sh /dev /usr/lib /usr/share/firmlinks /Library/Developer/PrivateFrameworks /Library/Apple/System/Library/PrivateFrameworks /Library/Preferences/com.apple.dt.Xcode.plist /usr/bin/codesign /usr/bin/touch
 
     # Xcode cannot be downloaded without an Apple ID, so the runner's copy
