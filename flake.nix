@@ -44,19 +44,25 @@
             # Xcode is unfree, and is the only unfree package allowed.
             config.allowUnfreePredicate = pkg: nixpkgs.lib.getName pkg == "xcode";
           };
-        in
-        {
-          packages.ogygia-macos = pkgs.callPackage ./app/macos {
+
+          # The Xcode build every app under app/ shares.
+          xcodeBuild = pkgs.callPackage ./app/xcode-build {
             # nixpkgs does not package Xcode 27 yet. The hash is of Xcode
             # 27.0 (27A266a) as installed from Apple's .xip; the App Store
             # build is signed differently and does not match.
-            inherit (self.packages.${system}) ogygia-macos-nebulad;
             xcode = pkgs.darwin.requireXcode "27.0" "sha256-k0YuMjPbP5Adnnx6KhQXGRi8kRLPpXJN+EUxpqYHwOE=";
+          };
+          callApp = pkgs.lib.callPackageWith (pkgs // xcodeBuild // {
             version = (nixpkgs.lib.importTOML ./Cargo.toml).workspace.package.version;
             # Sparkle orders updates by CFBundleVersion, so it must grow with
             # every commit on main; the commit count does.
             buildNumber = self.revCount or 0;
             gitRevision = self.shortRev or self.dirtyShortRev or "unknown";
+          });
+        in
+        {
+          packages.ogygia-macos = callApp ./app/macos {
+            inherit (self.packages.${system}) ogygia-macos-nebulad;
           };
         });
     in
