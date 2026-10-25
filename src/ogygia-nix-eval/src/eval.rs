@@ -235,10 +235,6 @@ impl<'a> Eval<'a> {
         self.thunk(ThunkState::Native(f))
     }
 
-    pub fn global(&self, name: &str) -> Option<Value<'a>> {
-        self.globals.borrow().get(&self.sym(name)).copied()
-    }
-
     // ---- forcing ----------------------------------------------------------
 
     pub fn force(&self, v: Value<'a>) -> R<'a> {
@@ -435,22 +431,13 @@ impl<'a> Eval<'a> {
                     None => eval_err(format!("undefined variable '{}'", self.name(*name))),
                 }
             }
-            Expr::WithVar {
-                name,
-                withs,
-                global,
-                pos,
-            } => {
+            Expr::WithVar { name, withs, pos } => {
                 for &depth in withs.iter() {
                     let ns = env.up(depth).slots[0].get();
                     let attrs = self.force_attrs(ns)?;
                     if let Some(v) = attrs.get(*name) {
                         return self.force(v);
                     }
-                }
-                if *global {
-                    let v = self.globals.borrow()[name];
-                    return self.force(v);
                 }
                 eval_err(format!(
                     "undefined variable '{}' at {pos}",
