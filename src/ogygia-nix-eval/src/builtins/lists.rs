@@ -67,7 +67,7 @@ pub fn filter<'a>(ev: &Eval<'a>, f: Value<'a>, list: Value<'a>) -> R<'a> {
     let f = ev.force_function(f)?;
     let mut out = Vec::with_capacity(items.len());
     for item in items {
-        if ev.force_bool(ev.call(f, *item)?)? {
+        if ev.force_bool(ev.call(f, &[*item], None)?)? {
             out.push(*item);
         }
     }
@@ -80,7 +80,7 @@ pub fn filter<'a>(ev: &Eval<'a>, f: Value<'a>, list: Value<'a>) -> R<'a> {
 pub fn all<'a>(ev: &Eval<'a>, f: Value<'a>, list: Value<'a>) -> R<'a> {
     let f = ev.force_function(f)?;
     for item in ev.force_list(list)? {
-        if !ev.force_bool(ev.call(f, *item)?)? {
+        if !ev.force_bool(ev.call(f, &[*item], None)?)? {
             return Ok(Value::Bool(false));
         }
     }
@@ -90,7 +90,7 @@ pub fn all<'a>(ev: &Eval<'a>, f: Value<'a>, list: Value<'a>) -> R<'a> {
 pub fn any<'a>(ev: &Eval<'a>, f: Value<'a>, list: Value<'a>) -> R<'a> {
     let f = ev.force_function(f)?;
     for item in ev.force_list(list)? {
-        if ev.force_bool(ev.call(f, *item)?)? {
+        if ev.force_bool(ev.call(f, &[*item], None)?)? {
             return Ok(Value::Bool(true));
         }
     }
@@ -109,7 +109,7 @@ pub fn concat_map<'a>(ev: &Eval<'a>, f: Value<'a>, list: Value<'a>) -> R<'a> {
     let f = ev.force_function(f)?;
     let mut out = Vec::new();
     for item in ev.force_list(list)? {
-        out.extend_from_slice(ev.force_list(ev.call(f, *item)?)?);
+        out.extend_from_slice(ev.force_list(ev.call(f, &[*item], None)?)?);
     }
     Ok(ev.list(&out))
 }
@@ -122,8 +122,7 @@ pub fn foldl<'a>(ev: &Eval<'a>, f: Value<'a>, init: Value<'a>, list: Value<'a>) 
         return ev.force(acc);
     }
     for item in list {
-        let g = ev.call(f, acc)?;
-        acc = ev.call(g, *item)?;
+        acc = ev.call(f, &[acc, *item], None)?;
     }
     Ok(acc)
 }
@@ -144,7 +143,7 @@ pub fn partition<'a>(ev: &Eval<'a>, f: Value<'a>, list: Value<'a>) -> R<'a> {
     let mut wrong = Vec::new();
     for item in ev.force_list(list)? {
         let item = ev.force(*item)?;
-        if ev.force_bool(ev.call(f, item)?)? {
+        if ev.force_bool(ev.call(f, &[item], None)?)? {
             right.push(item);
         } else {
             wrong.push(item);
@@ -160,7 +159,7 @@ pub fn group_by<'a>(ev: &Eval<'a>, f: Value<'a>, list: Value<'a>) -> R<'a> {
     let f = ev.force_function(f)?;
     let mut groups: HashMap<Sym, Vec<Value<'a>>> = HashMap::new();
     for item in ev.force_list(list)? {
-        let key = ev.force_str_no_ctx(ev.call(f, *item)?)?;
+        let key = ev.force_str_no_ctx(ev.call(f, &[*item], None)?)?;
         let key = ev.ctx.interner.intern_bytes(key);
         groups.entry(key).or_default().push(*item);
     }
@@ -194,8 +193,7 @@ pub fn sort<'a>(ev: &Eval<'a>, cmp: Value<'a>, list: Value<'a>) -> R<'a> {
         if direct {
             return ev.less_than(a, b);
         }
-        let g = ev.call(cmp, a)?;
-        ev.force_bool(ev.call(g, b)?)
+        ev.force_bool(ev.call(cmp, &[a, b], None)?)
     };
     let len = items.len();
     PeekSort {
@@ -362,7 +360,7 @@ pub fn generic_closure<'a>(ev: &Eval<'a>, set: Value<'a>) -> R<'a> {
             continue;
         }
         out.push(item);
-        let next = ev.call(op, item)?;
+        let next = ev.call(op, &[item], None)?;
         for &elem in ev.force_list(next)? {
             ev.force(elem)?;
             queue.push_back(elem);
