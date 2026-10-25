@@ -534,7 +534,7 @@ impl<'a> Eval<'a> {
                 )),
                 other => self.type_error("a Boolean", other),
             },
-            Expr::Not(e, _) => match self.eval(e, env)? {
+            Expr::Not(e) => match self.eval(e, env)? {
                 Value::Bool(b) => Ok(Value::Bool(!b)),
                 other => self.type_error("a Boolean", other),
             },
@@ -918,7 +918,7 @@ impl<'a> Eval<'a> {
     pub fn add(&self, a: Value<'a>, b: impl FnOnce() -> R<'a>, pos: Pos<'a>) -> R<'a> {
         let a = self.force(a)?;
         match a {
-            Value::Int(_) | Value::Float(_) => self.arith(Arith::Add, a, b()?, pos),
+            Value::Int(_) | Value::Float(_) => self.arith(Arith::Add, a, b()?, Some(pos)),
             Value::Path(p) => {
                 let b = self.force(b()?)?;
                 let mut buf = crate::path::abs(p.0).as_bytes().to_vec();
@@ -948,16 +948,10 @@ impl<'a> Eval<'a> {
         }
     }
 
-    /// Arithmetic from a builtin, where there is no source position.
-    pub fn arith_nopos(&self, op: Arith, a: Value<'a>, b: Value<'a>) -> R<'a> {
-        self.arith_inner(op, a, b, String::new())
-    }
-
-    pub fn arith(&self, op: Arith, a: Value<'a>, b: Value<'a>, pos: Pos<'a>) -> R<'a> {
-        self.arith_inner(op, a, b, format!(" at {pos}"))
-    }
-
-    fn arith_inner(&self, op: Arith, a: Value<'a>, b: Value<'a>, at: String) -> R<'a> {
+    /// `a op b` on numbers. `pos` is where the operator is written, if it is
+    /// written anywhere.
+    pub fn arith(&self, op: Arith, a: Value<'a>, b: Value<'a>, pos: Option<Pos<'a>>) -> R<'a> {
+        let at = pos.map(|p| format!(" at {p}")).unwrap_or_default();
         let a = self.force(a)?;
         let b = self.force(b)?;
         match (a, b) {

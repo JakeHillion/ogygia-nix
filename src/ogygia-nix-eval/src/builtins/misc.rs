@@ -11,31 +11,20 @@ use crate::value::Value;
 use crate::value::error;
 use crate::value::eval_err;
 
-fn arith<'a>(ev: &Eval<'a>, op: Arith, a: Value<'a>, b: Value<'a>) -> R<'a> {
-    let a = ev.force(a)?;
-    let b = ev.force(b)?;
-    match (a, b) {
-        (Value::Int(_) | Value::Float(_), Value::Int(_) | Value::Float(_)) => {
-            ev.arith_nopos(op, a, b)
-        }
-        (Value::Int(_) | Value::Float(_), other) | (other, _) => ev.type_error("an integer", other),
-    }
-}
-
 pub fn add<'a>(ev: &Eval<'a>, a: Value<'a>, b: Value<'a>) -> R<'a> {
-    arith(ev, Arith::Add, a, b)
+    ev.arith(Arith::Add, a, b, None)
 }
 
 pub fn sub<'a>(ev: &Eval<'a>, a: Value<'a>, b: Value<'a>) -> R<'a> {
-    arith(ev, Arith::Sub, a, b)
+    ev.arith(Arith::Sub, a, b, None)
 }
 
 pub fn mul<'a>(ev: &Eval<'a>, a: Value<'a>, b: Value<'a>) -> R<'a> {
-    arith(ev, Arith::Mul, a, b)
+    ev.arith(Arith::Mul, a, b, None)
 }
 
 pub fn div<'a>(ev: &Eval<'a>, a: Value<'a>, b: Value<'a>) -> R<'a> {
-    arith(ev, Arith::Div, a, b)
+    ev.arith(Arith::Div, a, b, None)
 }
 
 fn bits<'a>(ev: &Eval<'a>, a: Value<'a>, b: Value<'a>, f: fn(i64, i64) -> i64) -> R<'a> {

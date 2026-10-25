@@ -198,6 +198,6 @@ pub enum Expr<'a> {
         pos: Pos<'a>,
     },
     Bin(BinOp, ExprRef<'a>, ExprRef<'a>, Pos<'a>),
-    Not(ExprRef<'a>, Pos<'a>),
+    Not(ExprRef<'a>),
     CurPos(Pos<'a>),
 }
