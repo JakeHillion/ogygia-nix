@@ -269,7 +269,7 @@ impl<'a> Eval<'a> {
             }
             ThunkState::App(f, x) => {
                 t.0.set(ThunkState::Blackhole);
-                self.call(f, x)
+                self.call(f, &[x], None)
             }
             ThunkState::Native(f) => {
                 t.0.set(ThunkState::Blackhole);
@@ -515,7 +515,7 @@ impl<'a> Eval<'a> {
                 let mut f = self.eval(func, env)?;
                 for arg in args.iter() {
                     let a = self.lazy(arg, env);
-                    f = self.call_at(f, a, *pos)?;
+                    f = self.call(f, &[a], Some(*pos))?;
                 }
                 Ok(f)
             }
@@ -683,26 +683,29 @@ impl<'a> Eval<'a> {
 
     // ---- function calls ---------------------------------------------------
 
-    pub fn call(&self, f: Value<'a>, arg: Value<'a>) -> R<'a> {
-        self.call_inner(f, arg, None)
-    }
-
-    pub fn call_at(&self, f: Value<'a>, arg: Value<'a>, pos: Pos<'a>) -> R<'a> {
-        self.call_inner(f, arg, Some(pos))
-    }
-
-    /// Apply `f` to several arguments in turn.
-    pub fn call_n(&self, f: Value<'a>, args: &[Value<'a>]) -> R<'a> {
+    /// Apply `f` to each of `args` in turn. `pos` is where the application
+    /// is written, if it is written anywhere.
+    pub fn call(&self, f: Value<'a>, args: &[Value<'a>], pos: Option<Pos<'a>>) -> R<'a> {
         let mut f = f;
-        for a in args {
-            f = self.call(f, *a)?;
+        for &arg in args {
+            f = self.force(f)?;
+            f = self.deeper(|| match f {
+                Value::Lambda(c) => self.call_lambda(c, arg),
+                Value::PrimOp(op) => self.call_primop(op, &[], arg),
+                Value::PrimOpApp(app) => self.call_primop(app.op, app.args, arg),
+                Value::Attrs(a) if a.get(self.ctx.syms.functor).is_some() => {
+                    let functor = a.get(self.ctx.syms.functor).unwrap();
+                    let g = self.call(functor, &[f], None)?;
+                    self.call(g, &[arg], pos)
+                }
+                other => eval_err(format!(
+                    "attempt to call something which is not a function but {}{}",
+                    self.describe(other),
+                    pos.map(|p| format!(" at {p}")).unwrap_or_default()
+                )),
+            })?;
         }
         Ok(f)
-    }
-
-    fn call_inner(&self, f: Value<'a>, arg: Value<'a>, pos: Option<Pos<'a>>) -> R<'a> {
-        let f = self.force(f)?;
-        self.deeper(|| self.call_forced(f, arg, pos))
     }
 
     /// Run `f` one level deeper: in a call, or one level down a walk over a
@@ -718,24 +721,6 @@ impl<'a> Eval<'a> {
         let r = f();
         self.depth.set(depth);
         r
-    }
-
-    fn call_forced(&self, f: Value<'a>, arg: Value<'a>, pos: Option<Pos<'a>>) -> R<'a> {
-        match f {
-            Value::Lambda(c) => self.call_lambda(c, arg),
-            Value::PrimOp(op) => self.call_primop(op, &[], arg),
-            Value::PrimOpApp(app) => self.call_primop(app.op, app.args, arg),
-            Value::Attrs(a) if a.get(self.ctx.syms.functor).is_some() => {
-                let functor = a.get(self.ctx.syms.functor).unwrap();
-                let g = self.call(functor, f)?;
-                self.call_inner(g, arg, pos)
-            }
-            other => eval_err(format!(
-                "attempt to call something which is not a function but {}{}",
-                self.describe(other),
-                pos.map(|p| format!(" at {p}")).unwrap_or_default()
-            )),
-        }
     }
 
     /// Apply `op`, already given `prev`, to one more argument.
@@ -1176,7 +1161,7 @@ impl<'a> Eval<'a> {
             Value::Attrs(a) => {
                 let s = &self.ctx.syms;
                 if let Some(f) = a.get(s.to_string) {
-                    let r = self.call(f, v)?;
+                    let r = self.call(f, &[v], None)?;
                     return self.coerce_into(r, c, buf, ctx);
                 }
                 if let Some(out) = a.get(s.out_path) {
