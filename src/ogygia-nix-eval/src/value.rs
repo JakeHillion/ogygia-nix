@@ -6,6 +6,7 @@
 use std::cell::Cell;
 use std::fmt;
 
+use crate::builtins::Builtin;
 use crate::eval::Eval;
 use crate::ir::ExprRef;
 use crate::ir::LambdaDef;
@@ -23,7 +24,7 @@ pub enum Value<'a> {
     Attrs(&'a Attrs<'a>),
     List(&'a List<'a>),
     Lambda(&'a Closure<'a>),
-    PrimOp(&'static PrimOp),
+    PrimOp(Builtin),
     PrimOpApp(&'a PrimOpApp<'a>),
     Thunk(&'a Thunk<'a>),
 }
@@ -110,23 +111,8 @@ pub enum PrimOpFn {
     F3(for<'a> fn(&Eval<'a>, Value<'a>, Value<'a>, Value<'a>) -> R<'a>),
 }
 
-pub struct PrimOp {
-    pub name: &'static str,
-    pub f: PrimOpFn,
-}
-
-impl PrimOp {
-    pub fn arity(&self) -> usize {
-        match self.f {
-            PrimOpFn::F1(_) => 1,
-            PrimOpFn::F2(_) => 2,
-            PrimOpFn::F3(_) => 3,
-        }
-    }
-}
-
 pub struct PrimOpApp<'a> {
-    pub op: &'static PrimOp,
+    pub op: Builtin,
     pub args: &'a [Value<'a>],
 }
 
@@ -264,7 +250,6 @@ impl<'a> Value<'a> {
             Value::Attrs(a) => *a as *const _ as *const (),
             Value::List(l) => *l as *const _ as *const (),
             Value::Lambda(c) => *c as *const _ as *const (),
-            Value::PrimOp(p) => *p as *const _ as *const (),
             Value::PrimOpApp(p) => *p as *const _ as *const (),
             Value::Thunk(t) => *t as *const _ as *const (),
             _ => return None,

@@ -7,6 +7,7 @@
 //! Every node is allocated in a [`crate::Context`]'s arena and holds only
 //! references into it, so nothing here owns heap memory of its own.
 
+use crate::builtins::Builtin;
 use crate::symbol::Sym;
 use crate::value::NixStr;
 use crate::value::PathV;
@@ -173,7 +174,7 @@ pub enum Expr<'a> {
         withs: &'a [u32],
         pos: Pos<'a>,
     },
-    Global(Sym),
+    Global(Builtin),
     Select {
         expr: ExprRef<'a>,
         path: &'a [AttrKey<'a>],

@@ -242,8 +242,8 @@ fn short_into<'a>(ev: &Eval<'a>, v: Value<'a>, s: &mut String, depth: usize) {
             s.push(']');
         }
         Value::Lambda(_) => s.push_str("«lambda»"),
-        Value::PrimOp(p) => write!(s, "«primop {}»", p.name).unwrap(),
-        Value::PrimOpApp(p) => write!(s, "«partially applied primop {}»", p.op.name).unwrap(),
+        Value::PrimOp(p) => write!(s, "«primop {}»", p.name()).unwrap(),
+        Value::PrimOpApp(p) => write!(s, "«partially applied primop {}»", p.op.name()).unwrap(),
         Value::Thunk(t) => match t.0.get() {
             crate::value::ThunkState::Done(v) => short_into(ev, v, s, depth),
             _ => s.push_str("«thunk»"),

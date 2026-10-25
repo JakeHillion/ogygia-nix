@@ -2,6 +2,7 @@
 
 use std::collections::HashMap;
 
+use crate::builtins::Builtin;
 use crate::eval::Eval;
 use crate::symbol::Sym;
 use crate::value::Entry;
@@ -188,7 +189,7 @@ pub fn sort<'a>(ev: &Eval<'a>, cmp: Value<'a>, list: Value<'a>) -> R<'a> {
         return Ok(ev.list(&items));
     }
     // Nix compares directly, without a call, when the comparator is `lessThan`.
-    let direct = matches!(cmp, Value::PrimOp(op) if op.name == "lessThan");
+    let direct = matches!(cmp, Value::PrimOp(Builtin::LessThan));
     let less = |a: Value<'a>, b: Value<'a>| -> R<'a, bool> {
         if direct {
             return ev.less_than(a, b);
