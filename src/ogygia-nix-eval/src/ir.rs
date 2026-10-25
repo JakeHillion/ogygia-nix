@@ -171,7 +171,6 @@ pub enum Expr<'a> {
         name: Sym,
         /// Depths of the enclosing `with` frames, innermost first.
         withs: &'a [u32],
-        global: bool,
         pos: Pos<'a>,
     },
     Global(Sym),

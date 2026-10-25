@@ -728,7 +728,6 @@ impl<'a> Compiler<'a> {
         Ok(Expr::WithVar {
             name,
             withs: self.ctx.alloc_slice(withs),
-            global: false,
             pos,
         })
     }
