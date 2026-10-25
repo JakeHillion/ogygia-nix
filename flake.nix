@@ -54,8 +54,8 @@
           };
           callApp = pkgs.lib.callPackageWith (pkgs // xcodeBuild // {
             version = (nixpkgs.lib.importTOML ./Cargo.toml).workspace.package.version;
-            # Sparkle orders updates by CFBundleVersion, so it must grow with
-            # every commit on main; the commit count does.
+            # Sparkle and TestFlight both order builds by CFBundleVersion, so
+            # it must grow with every commit on main; the commit count does.
             buildNumber = self.revCount or 0;
             gitRevision = self.shortRev or self.dirtyShortRev or "unknown";
           });
@@ -64,6 +64,7 @@
           packages.ogygia-macos = callApp ./app/macos {
             inherit (self.packages.${system}) ogygia-macos-nebulad;
           };
+          packages.ogygia-ios = callApp ./app/ios { };
         });
     in
     nixpkgs.lib.recursiveUpdate darwinOutputs
@@ -419,9 +420,9 @@
 
             formatter = treefmtEval.config.build.wrapper;
 
-            # ogygia-macos needs Xcode in the store, which only CI's macos job
-            # adds, so it is built there rather than as a check.
-            checks = builtins.removeAttrs self.packages.${system} [ "ogygia-macos" ] // self.devShells.${system} // linuxOnly {
+            # The apps need Xcode in the store, which only CI's apple-apps job
+            # adds, so they are built there rather than as checks.
+            checks = builtins.removeAttrs self.packages.${system} [ "ogygia-macos" "ogygia-ios" ] // self.devShells.${system} // linuxOnly {
 
               ogygia-clippy = craneLib.cargoClippy (commonArgs // {
                 inherit cargoArtifacts;
