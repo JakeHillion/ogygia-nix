@@ -250,7 +250,7 @@ impl Builtin {
             CurrentSystem => Kind::Const(|ev| ev.string(&ev.settings.current_system)),
             CurrentTime => Kind::Const(|_| Value::Int(current_time())),
             DeepSeq => Kind::PrimOp(F2(misc::deep_seq)),
-            Derivation => Kind::Const(|ev| ev.lazy_native(derivation::derivation_lambda)),
+            Derivation => Kind::Const(derivation::derivation),
             DerivationStrict => Kind::PrimOp(F1(derivation::derivation_strict)),
             DirOf => Kind::PrimOp(F1(strings::dir_of)),
             Div => Kind::PrimOp(F2(misc::div)),

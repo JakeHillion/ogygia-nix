@@ -237,13 +237,6 @@ impl<'a> Eval<'a> {
         self.thunk(ThunkState::App(f, x))
     }
 
-    /// A lazy native computation. The closure lives in the arena, which never
-    /// runs destructors, so it may only capture `Copy` data.
-    pub fn lazy_native(&self, f: impl Fn(&Eval<'a>) -> R<'a> + Copy + 'a) -> Value<'a> {
-        let f: &'a dyn Fn(&Eval<'a>) -> R<'a> = self.bump.alloc(f);
-        self.thunk(ThunkState::Native(f))
-    }
-
     // ---- forcing ----------------------------------------------------------
 
     pub fn force(&self, v: Value<'a>) -> R<'a> {
@@ -270,10 +263,6 @@ impl<'a> Eval<'a> {
             ThunkState::App(f, x) => {
                 t.0.set(ThunkState::Blackhole);
                 self.call(f, &[x], None)
-            }
-            ThunkState::Native(f) => {
-                t.0.set(ThunkState::Blackhole);
-                f(self)
             }
         };
         match result {

@@ -13,11 +13,10 @@ use crate::eval::Coerce;
 use crate::eval::Eval;
 use crate::store::HashAlgo;
 use crate::value::Ctx;
-use crate::value::ErrorKind;
 use crate::value::R;
+use crate::value::ThunkState;
 use crate::value::Value;
 use crate::value::anyhow_err;
-use crate::value::error;
 use crate::value::eval_err;
 
 /// `derivation` is a thin Nix wrapper around `derivationStrict` that turns its
@@ -44,12 +43,13 @@ in
 (builtins.head outputsList).value
 "#;
 
-pub fn derivation_lambda<'a>(ev: &Eval<'a>) -> R<'a> {
+/// The value of `derivation`, which is evaluated when first used.
+pub fn derivation<'a>(ev: &Eval<'a>) -> Value<'a> {
     let expr = ev
         .ctx
         .compile_internal("derivation-internal.nix", DERIVATION_NIX)
-        .map_err(|e| error(ErrorKind::Eval, e.msg))?;
-    ev.eval(expr, ev.root_env())
+        .expect("the derivation wrapper compiles");
+    ev.thunk(ThunkState::Expr(expr, ev.root_env()))
 }
 
 pub fn placeholder<'a>(ev: &Eval<'a>, output: Value<'a>) -> R<'a> {

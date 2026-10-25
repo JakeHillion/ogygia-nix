@@ -116,14 +116,11 @@ pub struct PrimOpApp<'a> {
     pub args: &'a [Value<'a>],
 }
 
-pub type NativeFn<'a> = &'a dyn Fn(&Eval<'a>) -> R<'a>;
-
 #[derive(Clone, Copy)]
 pub enum ThunkState<'a> {
     Expr(ExprRef<'a>, &'a Env<'a>),
     /// A lazy function application.
     App(Value<'a>, Value<'a>),
-    Native(NativeFn<'a>),
     Blackhole,
     Done(Value<'a>),
 }
