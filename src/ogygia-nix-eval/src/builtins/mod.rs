@@ -48,8 +48,8 @@ struct Builtin {
 
 enum Kind {
     PrimOp(PrimOp),
-    /// A value built per session, if there is one.
-    Const(for<'a> fn(&Eval<'a>) -> Option<Value<'a>>),
+    /// A value built per session.
+    Const(for<'a> fn(&Eval<'a>) -> Value<'a>),
     /// The `builtins` set itself.
     Builtins,
 }
@@ -91,7 +91,7 @@ const fn prim(name: &'static str, f: PrimOpFn) -> Builtin {
     builtin(name, Kind::PrimOp(PrimOp { name, f }))
 }
 
-const fn constant(name: &'static str, f: for<'a> fn(&Eval<'a>) -> Option<Value<'a>>) -> Builtin {
+const fn constant(name: &'static str, f: for<'a> fn(&Eval<'a>) -> Value<'a>) -> Builtin {
     builtin(name, Kind::Const(f))
 }
 
@@ -121,14 +121,11 @@ static BUILTINS: &[Builtin] = &[
     prim("concatMap", F2(lists::concat_map)),
     prim("concatStringsSep", F2(strings::concat_strings_sep)),
     prim("convertHash", F1(strings::convert_hash)),
-    constant("currentSystem", |ev| {
-        ev.settings.current_system.as_deref().map(|s| ev.string(s))
-    })
-    .impure(),
-    constant("currentTime", |_| Some(Value::Int(current_time()))).impure(),
+    constant("currentSystem", |ev| ev.string(&ev.settings.current_system)).impure(),
+    constant("currentTime", |_| Value::Int(current_time())).impure(),
     prim("deepSeq", F2(misc::deep_seq)),
     constant("derivation", |ev| {
-        Some(ev.lazy_native(derivation::derivation_lambda))
+        ev.lazy_native(derivation::derivation_lambda)
     })
     .global(),
     prim("derivationStrict", F1(derivation::derivation_strict)).global(),
@@ -136,7 +133,7 @@ static BUILTINS: &[Builtin] = &[
     prim("div", F2(misc::div)),
     prim("elem", F2(lists::elem)),
     prim("elemAt", F2(lists::elem_at)),
-    constant("false", |_| Some(Value::Bool(false))).global(),
+    constant("false", |_| Value::Bool(false)).global(),
     prim("fetchGit", F1(fs::fetch_git)).global(),
     prim("fetchMercurial", F1(fs::fetch_mercurial)).global(),
     prim("fetchTarball", F1(fs::fetch_tarball)).global(),
@@ -173,7 +170,7 @@ static BUILTINS: &[Builtin] = &[
     prim("isNull", F1(misc::is_null)).global(),
     prim("isPath", F1(misc::is_path)),
     prim("isString", F1(misc::is_string)),
-    constant("langVersion", |_| Some(Value::Int(6))),
+    constant("langVersion", |_| Value::Int(6)),
     prim("length", F1(lists::length)),
     prim("lessThan", F2(misc::less_than)),
     prim("listToAttrs", F1(attrs::list_to_attrs)),
@@ -181,9 +178,9 @@ static BUILTINS: &[Builtin] = &[
     prim("mapAttrs", F2(attrs::map_attrs)),
     prim("match", F2(regex::match_)),
     prim("mul", F2(misc::mul)),
-    constant("nixPath", |ev| Some(nix_path(ev))),
-    constant("nixVersion", |ev| Some(ev.string(NIX_VERSION))),
-    constant("null", |_| Some(Value::Null)).global(),
+    constant("nixPath", nix_path),
+    constant("nixVersion", |ev| ev.string(NIX_VERSION)),
+    constant("null", |_| Value::Null).global(),
     prim("parseDrvName", F1(strings::parse_drv_name)),
     prim("parseFlakeRef", F1(flake::parse_flake_ref)),
     prim("partition", F2(lists::partition)),
@@ -200,7 +197,7 @@ static BUILTINS: &[Builtin] = &[
     prim("sort", F2(lists::sort)),
     prim("split", F2(regex::split)),
     prim("splitVersion", F1(strings::split_version)),
-    constant("storeDir", |ev| Some(ev.string(STORE_DIR))),
+    constant("storeDir", |ev| ev.string(STORE_DIR)),
     prim("storePath", F1(fs::store_path)),
     prim("stringLength", F1(strings::string_length)),
     prim("sub", F2(misc::sub)),
@@ -214,7 +211,7 @@ static BUILTINS: &[Builtin] = &[
     prim("toXML", F1(xml::to_xml)),
     prim("trace", F2(misc::trace)),
     prim("traceVerbose", F2(misc::trace_verbose)),
-    constant("true", |_| Some(Value::Bool(true))).global(),
+    constant("true", |_| Value::Bool(true)).global(),
     prim("tryEval", F1(misc::try_eval)),
     prim("typeOf", F1(misc::type_of)),
     prim(
@@ -269,10 +266,7 @@ pub fn make_globals<'a>(ev: &Eval<'a>) -> HashMap<Sym, Value<'a>> {
     for b in BUILTINS.iter().filter(|b| !(ev.settings.pure && b.impure)) {
         let value = match &b.kind {
             Kind::PrimOp(op) => Value::PrimOp(op),
-            Kind::Const(f) => match f(ev) {
-                Some(v) => v,
-                None => continue,
-            },
+            Kind::Const(f) => f(ev),
             Kind::Builtins => Value::Thunk(self_ref),
         };
         entries.push(ev.entry(b.name, value));
