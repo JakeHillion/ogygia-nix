@@ -9,7 +9,7 @@
 </p>
 
 <p align="center">
-  <a href="https://deepwiki.com/JakeHillion/ogygia-nix"><img src="https://deepwiki.com/badge.svg" alt="Ask DeepWiki"></a>
+  <a href="https://deepwiki.com/ogygia-nix/ogygia-nix"><img src="https://deepwiki.com/badge.svg" alt="Ask DeepWiki"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-green.svg" alt="License: MIT"></a>
 </p>
 
@@ -58,7 +58,7 @@ Add Ogygia to your flake inputs:
 {
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
-    ogygia.url = "github:JakeHillion/ogygia-nix";
+    ogygia.url = "github:ogygia-nix/ogygia-nix";
   };
 
   outputs = { self, nixpkgs, ogygia, ... }: {
@@ -81,7 +81,7 @@ Add Ogygia to your flake inputs:
 Run the CLI directly without installation:
 
 ```bash
-nix run github:JakeHillion/ogygia-nix
+nix run github:ogygia-nix/ogygia-nix
 ```
 
 Or add it to your system packages or home-manager configuration.
