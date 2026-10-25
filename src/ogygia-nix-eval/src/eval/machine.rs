@@ -77,11 +77,6 @@ pub(super) enum Frame<'a> {
         arg: Value<'a>,
         pos: Option<Pos<'a>>,
     },
-    /// Apply the function a `__functor` returned to `arg`.
-    Functor {
-        arg: Value<'a>,
-        pos: Option<Pos<'a>>,
-    },
     /// Bind the formals of a lambda to its argument, once forced.
     Pattern {
         closure: &'a Closure<'a>,
@@ -435,29 +430,20 @@ impl<'a> Eval<'a> {
                 Ok(Step::Call(v, self.lazy(arg, env), Some(pos)))
             }
             Frame::Call { arg, pos } => self.apply(stack, v, arg, pos),
-            Frame::Functor { arg, pos } => Ok(Step::Call(v, arg, pos)),
             Frame::Pattern { closure, arg } => self.bind_pattern(stack, closure, arg, v),
-            Frame::If { then, else_, env } => match v {
-                Value::Bool(true) => Ok(Step::Eval(then, env)),
-                Value::Bool(false) => Ok(Step::Eval(else_, env)),
-                other => self.type_error("a Boolean", other),
-            },
-            Frame::Assert { body, env, pos } => match v {
-                Value::Bool(true) => Ok(Step::Eval(body, env)),
-                Value::Bool(false) => Err(error(
+            Frame::If { then, else_, env } => Ok(Step::Eval(
+                if self.force_bool(v)? { then } else { else_ },
+                env,
+            )),
+            Frame::Assert { body, env, pos } => match self.force_bool(v)? {
+                true => Ok(Step::Eval(body, env)),
+                false => Err(error(
                     ErrorKind::Assert,
                     format!("assertion failed at {pos}"),
                 )),
-                other => self.type_error("a Boolean", other),
             },
-            Frame::Not => match v {
-                Value::Bool(b) => Ok(Step::Return(Value::Bool(!b))),
-                other => self.type_error("a Boolean", other),
-            },
-            Frame::Bool => match v {
-                Value::Bool(_) => Ok(Step::Return(v)),
-                other => self.type_error("a Boolean", other),
-            },
+            Frame::Not => Ok(Step::Return(Value::Bool(!self.force_bool(v)?))),
+            Frame::Bool => Ok(Step::Return(Value::Bool(self.force_bool(v)?))),
             Frame::Operand1 {
                 op,
                 other,
@@ -473,14 +459,7 @@ impl<'a> Eval<'a> {
                 let mut buf = crate::path::abs(p.0).as_bytes().to_vec();
                 let mut ctx = Vec::new();
                 self.coerce_into(v, Coerce::PLAIN, &mut buf, &mut ctx)?;
-                if !ctx.is_empty() {
-                    return eval_err(
-                        "a string that refers to a store path cannot be appended to a path",
-                    );
-                }
-                Ok(Step::Return(
-                    self.path_val(&canon_path(&String::from_utf8_lossy(&buf))),
-                ))
+                self.appended_path(&buf, &ctx)
             }
             Frame::AddStr(mut acc, how) => {
                 self.coerce_into(v, how, &mut acc.buf, &mut acc.ctx)?;
@@ -569,7 +548,7 @@ impl<'a> Eval<'a> {
             Value::PrimOpApp(app) => self.call_primop(app.op, app.args, arg),
             Value::Attrs(a) if a.get(self.ctx.syms.functor).is_some() => {
                 let functor = a.get(self.ctx.syms.functor).unwrap();
-                stack.push(Frame::Functor { arg, pos });
+                stack.push(Frame::Call { arg, pos });
                 Ok(Step::Call(functor, f, None))
             }
             other => eval_err(format!(
@@ -995,11 +974,17 @@ impl<'a> Eval<'a> {
         if !s.path {
             return Ok(Step::Return(self.str_with_ctx(&buf, ctx)));
         }
+        self.appended_path(&buf, &ctx)
+    }
+
+    /// The path `buf`, built by appending strings with context `ctx` to a
+    /// path.
+    fn appended_path(&self, buf: &[u8], ctx: &[Ctx<'a>]) -> R<'a, Step<'a>> {
         if !ctx.is_empty() {
             return eval_err("a string that refers to a store path cannot be appended to a path");
         }
         Ok(Step::Return(
-            self.path_val(&canon_path(&String::from_utf8_lossy(&buf))),
+            self.path_val(&canon_path(&String::from_utf8_lossy(buf))),
         ))
     }
 }
