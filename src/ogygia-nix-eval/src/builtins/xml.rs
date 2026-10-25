@@ -10,7 +10,7 @@ use crate::value::Ctx;
 use crate::value::R;
 use crate::value::Value;
 
-pub fn to_xml<'a>(ev: &Eval<'a>, args: &[Value<'a>]) -> R<'a> {
+pub fn to_xml<'a>(ev: &Eval<'a>, v: Value<'a>) -> R<'a> {
     let mut w = Writer {
         out: b"<?xml version='1.0' encoding='utf-8'?>\n".to_vec(),
         depth: 0,
@@ -18,7 +18,7 @@ pub fn to_xml<'a>(ev: &Eval<'a>, args: &[Value<'a>]) -> R<'a> {
         drvs_seen: HashSet::new(),
     };
     w.open("expr", &[]);
-    w.value(ev, args[0])?;
+    w.value(ev, v)?;
     w.close("expr");
     Ok(ev.str_with_ctx(&w.out, w.ctx))
 }

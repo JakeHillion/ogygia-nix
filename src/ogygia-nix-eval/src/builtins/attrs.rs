@@ -14,8 +14,8 @@ fn sym_arg<'a>(ev: &Eval<'a>, v: Value<'a>) -> R<'a, Sym> {
     Ok(ev.ctx.interner.intern_bytes(s))
 }
 
-pub fn attr_names<'a>(ev: &Eval<'a>, args: &[Value<'a>]) -> R<'a> {
-    let set = ev.force_attrs(args[0])?;
+pub fn attr_names<'a>(ev: &Eval<'a>, set: Value<'a>) -> R<'a> {
+    let set = ev.force_attrs(set)?;
     let names: Vec<Value<'a>> = set
         .sorted(ev.ctx)
         .iter()
@@ -24,30 +24,30 @@ pub fn attr_names<'a>(ev: &Eval<'a>, args: &[Value<'a>]) -> R<'a> {
     Ok(ev.list(&names))
 }
 
-pub fn attr_values<'a>(ev: &Eval<'a>, args: &[Value<'a>]) -> R<'a> {
-    let set = ev.force_attrs(args[0])?;
+pub fn attr_values<'a>(ev: &Eval<'a>, set: Value<'a>) -> R<'a> {
+    let set = ev.force_attrs(set)?;
     let values: Vec<Value<'a>> = set.sorted(ev.ctx).iter().map(|e| e.value).collect();
     Ok(ev.list(&values))
 }
 
-pub fn get_attr<'a>(ev: &Eval<'a>, args: &[Value<'a>]) -> R<'a> {
-    let name = sym_arg(ev, args[0])?;
-    let set = ev.force_attrs(args[1])?;
+pub fn get_attr<'a>(ev: &Eval<'a>, name: Value<'a>, set: Value<'a>) -> R<'a> {
+    let name = sym_arg(ev, name)?;
+    let set = ev.force_attrs(set)?;
     match set.get(name) {
         Some(v) => ev.force(v),
         None => eval_err(format!("attribute '{}' missing", ev.name(name))),
     }
 }
 
-pub fn has_attr<'a>(ev: &Eval<'a>, args: &[Value<'a>]) -> R<'a> {
-    let name = sym_arg(ev, args[0])?;
-    let set = ev.force_attrs(args[1])?;
+pub fn has_attr<'a>(ev: &Eval<'a>, name: Value<'a>, set: Value<'a>) -> R<'a> {
+    let name = sym_arg(ev, name)?;
+    let set = ev.force_attrs(set)?;
     Ok(Value::Bool(set.get(name).is_some()))
 }
 
-pub fn cat_attrs<'a>(ev: &Eval<'a>, args: &[Value<'a>]) -> R<'a> {
-    let name = sym_arg(ev, args[0])?;
-    let list = ev.force_list(args[1])?;
+pub fn cat_attrs<'a>(ev: &Eval<'a>, name: Value<'a>, list: Value<'a>) -> R<'a> {
+    let name = sym_arg(ev, name)?;
+    let list = ev.force_list(list)?;
     let mut out = Vec::new();
     for item in list {
         if let Some(v) = ev.force_attrs(*item)?.get(name) {
@@ -57,9 +57,9 @@ pub fn cat_attrs<'a>(ev: &Eval<'a>, args: &[Value<'a>]) -> R<'a> {
     Ok(ev.list(&out))
 }
 
-pub fn intersect_attrs<'a>(ev: &Eval<'a>, args: &[Value<'a>]) -> R<'a> {
-    let a = ev.force_attrs(args[0])?;
-    let b = ev.force_attrs(args[1])?;
+pub fn intersect_attrs<'a>(ev: &Eval<'a>, a: Value<'a>, b: Value<'a>) -> R<'a> {
+    let a = ev.force_attrs(a)?;
+    let b = ev.force_attrs(b)?;
     let out: Vec<Entry<'a>> = b
         .entries
         .iter()
@@ -69,9 +69,9 @@ pub fn intersect_attrs<'a>(ev: &Eval<'a>, args: &[Value<'a>]) -> R<'a> {
     Ok(ev.attrs_sorted(&out))
 }
 
-pub fn remove_attrs<'a>(ev: &Eval<'a>, args: &[Value<'a>]) -> R<'a> {
-    let set = ev.force_attrs(args[0])?;
-    let names = ev.force_list(args[1])?;
+pub fn remove_attrs<'a>(ev: &Eval<'a>, set: Value<'a>, names: Value<'a>) -> R<'a> {
+    let set = ev.force_attrs(set)?;
+    let names = ev.force_list(names)?;
     let mut remove = Vec::with_capacity(names.len());
     for n in names {
         remove.push(sym_arg(ev, *n)?);
@@ -88,8 +88,8 @@ pub fn remove_attrs<'a>(ev: &Eval<'a>, args: &[Value<'a>]) -> R<'a> {
     Ok(ev.attrs_sorted(&out))
 }
 
-pub fn list_to_attrs<'a>(ev: &Eval<'a>, args: &[Value<'a>]) -> R<'a> {
-    let list = ev.force_list(args[0])?;
+pub fn list_to_attrs<'a>(ev: &Eval<'a>, list: Value<'a>) -> R<'a> {
+    let list = ev.force_list(list)?;
     let s = &ev.ctx.syms;
     let mut seen: HashMap<Sym, ()> = HashMap::with_capacity(list.len());
     let mut pairs = Vec::with_capacity(list.len());
@@ -120,9 +120,8 @@ pub fn list_to_attrs<'a>(ev: &Eval<'a>, args: &[Value<'a>]) -> R<'a> {
     Ok(ev.attrs_sorted(&out))
 }
 
-pub fn map_attrs<'a>(ev: &Eval<'a>, args: &[Value<'a>]) -> R<'a> {
-    let f = args[0];
-    let set = ev.force_attrs(args[1])?;
+pub fn map_attrs<'a>(ev: &Eval<'a>, f: Value<'a>, set: Value<'a>) -> R<'a> {
+    let set = ev.force_attrs(set)?;
     let out: Vec<Entry<'a>> = set
         .entries
         .iter()
@@ -138,9 +137,9 @@ pub fn map_attrs<'a>(ev: &Eval<'a>, args: &[Value<'a>]) -> R<'a> {
     Ok(ev.attrs_sorted(&out))
 }
 
-pub fn zip_attrs_with<'a>(ev: &Eval<'a>, args: &[Value<'a>]) -> R<'a> {
-    let f = ev.force_function(args[0])?;
-    let list = ev.force_list(args[1])?;
+pub fn zip_attrs_with<'a>(ev: &Eval<'a>, f: Value<'a>, list: Value<'a>) -> R<'a> {
+    let f = ev.force_function(f)?;
+    let list = ev.force_list(list)?;
     let mut groups: HashMap<Sym, Vec<Value<'a>>> = HashMap::new();
     let mut order = Vec::new();
     for item in list {
@@ -169,9 +168,9 @@ pub fn zip_attrs_with<'a>(ev: &Eval<'a>, args: &[Value<'a>]) -> R<'a> {
     Ok(ev.attrs(out))
 }
 
-pub fn unsafe_get_attr_pos<'a>(ev: &Eval<'a>, args: &[Value<'a>]) -> R<'a> {
-    let name = sym_arg(ev, args[0])?;
-    let set = ev.force_attrs(args[1])?;
+pub fn unsafe_get_attr_pos<'a>(ev: &Eval<'a>, name: Value<'a>, set: Value<'a>) -> R<'a> {
+    let name = sym_arg(ev, name)?;
+    let set = ev.force_attrs(set)?;
     match set.entry(name).and_then(|e| e.pos) {
         Some(pos) => Ok(ev.pos_value(pos)),
         None => Ok(Value::Null),

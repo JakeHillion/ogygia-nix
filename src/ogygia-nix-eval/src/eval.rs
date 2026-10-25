@@ -30,7 +30,9 @@ use crate::value::ErrorKind;
 use crate::value::List;
 use crate::value::NixStr;
 use crate::value::PathV;
+use crate::value::PrimOp;
 use crate::value::PrimOpApp;
+use crate::value::PrimOpFn;
 use crate::value::R;
 use crate::value::Thunk;
 use crate::value::ThunkState;
@@ -762,31 +764,8 @@ impl<'a> Eval<'a> {
     fn call_forced(&self, f: Value<'a>, arg: Value<'a>, pos: Option<Pos<'a>>) -> R<'a> {
         match f {
             Value::Lambda(c) => self.call_lambda(c, arg),
-            Value::PrimOp(op) => {
-                if op.arity == 1 {
-                    let r = (op.f)(self, &[arg])?;
-                    self.force(r)
-                } else {
-                    Ok(Value::PrimOpApp(self.bump.alloc(PrimOpApp {
-                        op,
-                        args: self.bump.alloc_slice_copy(&[arg]),
-                    })))
-                }
-            }
-            Value::PrimOpApp(app) => {
-                let mut args: Vec<Value<'a>> = Vec::with_capacity(app.args.len() + 1);
-                args.extend_from_slice(app.args);
-                args.push(arg);
-                if args.len() == app.op.arity {
-                    let r = (app.op.f)(self, &args)?;
-                    self.force(r)
-                } else {
-                    Ok(Value::PrimOpApp(self.bump.alloc(PrimOpApp {
-                        op: app.op,
-                        args: self.bump.alloc_slice_copy(&args),
-                    })))
-                }
-            }
+            Value::PrimOp(op) => self.call_primop(op, &[], arg),
+            Value::PrimOpApp(app) => self.call_primop(app.op, app.args, arg),
             Value::Attrs(a) if a.get(self.ctx.syms.functor).is_some() => {
                 let functor = a.get(self.ctx.syms.functor).unwrap();
                 let g = self.call(functor, f)?;
@@ -798,6 +777,22 @@ impl<'a> Eval<'a> {
                 pos.map(|p| format!(" at {p}")).unwrap_or_default()
             )),
         }
+    }
+
+    /// Apply `op`, already given `prev`, to one more argument.
+    fn call_primop(&self, op: &'static PrimOp, prev: &[Value<'a>], arg: Value<'a>) -> R<'a> {
+        let r = match (op.f, prev) {
+            (PrimOpFn::F1(f), []) => f(self, arg)?,
+            (PrimOpFn::F2(f), [a]) => f(self, *a, arg)?,
+            (PrimOpFn::F3(f), [a, b]) => f(self, *a, *b, arg)?,
+            _ => {
+                let args = self
+                    .bump
+                    .alloc_slice_fill_with(prev.len() + 1, |i| prev.get(i).copied().unwrap_or(arg));
+                return Ok(Value::PrimOpApp(self.bump.alloc(PrimOpApp { op, args })));
+            }
+        };
+        self.force(r)
     }
 
     fn call_lambda(&self, c: &'a Closure<'a>, arg: Value<'a>) -> R<'a> {

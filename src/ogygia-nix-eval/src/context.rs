@@ -4,7 +4,6 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::collections::HashSet;
-use std::rc::Rc;
 
 use anyhow::Result;
 use bumpalo::Bump;
@@ -34,10 +33,7 @@ pub struct Context {
     /// system: the expressions live in `arena` and are only handed out with
     /// the lifetime of a borrow of `self`.
     files: RefCell<HashMap<(String, bool), ExprRef<'static>>>,
-    /// Compiled `builtins.match` patterns by source.
-    pub(crate) match_regexes: RefCell<HashMap<Vec<u8>, Rc<regex::bytes::Regex>>>,
-    /// Compiled `builtins.split` patterns by source.
-    pub(crate) split_regexes: RefCell<HashMap<Vec<u8>, Rc<builtins::strings::SplitRegex>>>,
+    pub(crate) regexes: builtins::regex::Cache,
     /// Derivations written to the store, with their modulo hashes, by `.drv`
     /// path.
     pub(crate) drvs: RefCell<HashMap<String, (Derivation, [u8; 32])>>,
@@ -52,8 +48,7 @@ impl Context {
             }
         }
         let syms = Syms::new(&interner);
-        let globals = builtins::global_names()
-            .filter(|n| !(io.pure && symbol::NIX_STARTUP_IMPURE.contains(&n.as_str())))
+        let globals = builtins::global_names(io.pure)
             .map(|n| interner.intern(&n))
             .collect();
         Context {
@@ -63,8 +58,7 @@ impl Context {
             io,
             globals,
             files: RefCell::new(HashMap::new()),
-            match_regexes: RefCell::new(HashMap::new()),
-            split_regexes: RefCell::new(HashMap::new()),
+            regexes: Default::default(),
             drvs: RefCell::new(HashMap::new()),
         }
     }

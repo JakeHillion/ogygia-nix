@@ -102,12 +102,27 @@ pub struct Closure<'a> {
     pub env: &'a Env<'a>,
 }
 
-pub type PrimOpFn = for<'a> fn(&Eval<'a>, &[Value<'a>]) -> R<'a>;
+/// A builtin function, taking its arguments by position.
+#[derive(Clone, Copy)]
+pub enum PrimOpFn {
+    F1(for<'a> fn(&Eval<'a>, Value<'a>) -> R<'a>),
+    F2(for<'a> fn(&Eval<'a>, Value<'a>, Value<'a>) -> R<'a>),
+    F3(for<'a> fn(&Eval<'a>, Value<'a>, Value<'a>, Value<'a>) -> R<'a>),
+}
 
 pub struct PrimOp {
     pub name: &'static str,
-    pub arity: usize,
     pub f: PrimOpFn,
+}
+
+impl PrimOp {
+    pub fn arity(&self) -> usize {
+        match self.f {
+            PrimOpFn::F1(_) => 1,
+            PrimOpFn::F2(_) => 2,
+            PrimOpFn::F3(_) => 3,
+        }
+    }
 }
 
 pub struct PrimOpApp<'a> {

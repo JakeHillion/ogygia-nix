@@ -9,27 +9,27 @@ use crate::value::R;
 use crate::value::Value;
 use crate::value::eval_err;
 
-pub fn head<'a>(ev: &Eval<'a>, args: &[Value<'a>]) -> R<'a> {
-    match ev.force_list(args[0])?.first() {
+pub fn head<'a>(ev: &Eval<'a>, list: Value<'a>) -> R<'a> {
+    match ev.force_list(list)?.first() {
         Some(v) => ev.force(*v),
         None => eval_err("'builtins.head' called on an empty list"),
     }
 }
 
-pub fn tail<'a>(ev: &Eval<'a>, args: &[Value<'a>]) -> R<'a> {
-    match ev.force_list(args[0])? {
+pub fn tail<'a>(ev: &Eval<'a>, list: Value<'a>) -> R<'a> {
+    match ev.force_list(list)? {
         [] => eval_err("'builtins.tail' called on an empty list"),
         [_, rest @ ..] => Ok(ev.list(rest)),
     }
 }
 
-pub fn length<'a>(ev: &Eval<'a>, args: &[Value<'a>]) -> R<'a> {
-    Ok(Value::Int(ev.force_list(args[0])?.len() as i64))
+pub fn length<'a>(ev: &Eval<'a>, list: Value<'a>) -> R<'a> {
+    Ok(Value::Int(ev.force_list(list)?.len() as i64))
 }
 
-pub fn elem_at<'a>(ev: &Eval<'a>, args: &[Value<'a>]) -> R<'a> {
-    let n = ev.force_int(args[1])?;
-    let list = ev.force_list(args[0])?;
+pub fn elem_at<'a>(ev: &Eval<'a>, list: Value<'a>, n: Value<'a>) -> R<'a> {
+    let n = ev.force_int(n)?;
+    let list = ev.force_list(list)?;
     match usize::try_from(n).ok().and_then(|i| list.get(i)) {
         Some(v) => ev.force(*v),
         None => eval_err(format!(
@@ -39,46 +39,46 @@ pub fn elem_at<'a>(ev: &Eval<'a>, args: &[Value<'a>]) -> R<'a> {
     }
 }
 
-pub fn elem<'a>(ev: &Eval<'a>, args: &[Value<'a>]) -> R<'a> {
-    for item in ev.force_list(args[1])? {
-        if ev.eq(args[0], *item)? {
+pub fn elem<'a>(ev: &Eval<'a>, x: Value<'a>, list: Value<'a>) -> R<'a> {
+    for item in ev.force_list(list)? {
+        if ev.eq(x, *item)? {
             return Ok(Value::Bool(true));
         }
     }
     Ok(Value::Bool(false))
 }
 
-pub fn map<'a>(ev: &Eval<'a>, args: &[Value<'a>]) -> R<'a> {
-    let list = ev.force_list(args[1])?;
-    if list.is_empty() {
-        return ev.force(args[1]);
+pub fn map<'a>(ev: &Eval<'a>, f: Value<'a>, list: Value<'a>) -> R<'a> {
+    let items = ev.force_list(list)?;
+    if items.is_empty() {
+        return ev.force(list);
     }
-    let f = ev.force_function(args[0])?;
-    let out: Vec<Value<'a>> = list.iter().map(|x| ev.lazy_app(f, *x)).collect();
+    let f = ev.force_function(f)?;
+    let out: Vec<Value<'a>> = items.iter().map(|x| ev.lazy_app(f, *x)).collect();
     Ok(ev.list(&out))
 }
 
-pub fn filter<'a>(ev: &Eval<'a>, args: &[Value<'a>]) -> R<'a> {
-    let list = ev.force_list(args[1])?;
-    if list.is_empty() {
-        return ev.force(args[1]);
+pub fn filter<'a>(ev: &Eval<'a>, f: Value<'a>, list: Value<'a>) -> R<'a> {
+    let items = ev.force_list(list)?;
+    if items.is_empty() {
+        return ev.force(list);
     }
-    let f = ev.force_function(args[0])?;
-    let mut out = Vec::with_capacity(list.len());
-    for item in list {
+    let f = ev.force_function(f)?;
+    let mut out = Vec::with_capacity(items.len());
+    for item in items {
         if ev.force_bool(ev.call(f, *item)?)? {
             out.push(*item);
         }
     }
-    if out.len() == list.len() {
-        return ev.force(args[1]);
+    if out.len() == items.len() {
+        return ev.force(list);
     }
     Ok(ev.list(&out))
 }
 
-pub fn all<'a>(ev: &Eval<'a>, args: &[Value<'a>]) -> R<'a> {
-    let f = ev.force_function(args[0])?;
-    for item in ev.force_list(args[1])? {
+pub fn all<'a>(ev: &Eval<'a>, f: Value<'a>, list: Value<'a>) -> R<'a> {
+    let f = ev.force_function(f)?;
+    for item in ev.force_list(list)? {
         if !ev.force_bool(ev.call(f, *item)?)? {
             return Ok(Value::Bool(false));
         }
@@ -86,9 +86,9 @@ pub fn all<'a>(ev: &Eval<'a>, args: &[Value<'a>]) -> R<'a> {
     Ok(Value::Bool(true))
 }
 
-pub fn any<'a>(ev: &Eval<'a>, args: &[Value<'a>]) -> R<'a> {
-    let f = ev.force_function(args[0])?;
-    for item in ev.force_list(args[1])? {
+pub fn any<'a>(ev: &Eval<'a>, f: Value<'a>, list: Value<'a>) -> R<'a> {
+    let f = ev.force_function(f)?;
+    for item in ev.force_list(list)? {
         if ev.force_bool(ev.call(f, *item)?)? {
             return Ok(Value::Bool(true));
         }
@@ -96,27 +96,27 @@ pub fn any<'a>(ev: &Eval<'a>, args: &[Value<'a>]) -> R<'a> {
     Ok(Value::Bool(false))
 }
 
-pub fn concat_lists<'a>(ev: &Eval<'a>, args: &[Value<'a>]) -> R<'a> {
+pub fn concat_lists<'a>(ev: &Eval<'a>, lists: Value<'a>) -> R<'a> {
     let mut out = Vec::new();
-    for l in ev.force_list(args[0])? {
+    for l in ev.force_list(lists)? {
         out.extend_from_slice(ev.force_list(*l)?);
     }
     Ok(ev.list(&out))
 }
 
-pub fn concat_map<'a>(ev: &Eval<'a>, args: &[Value<'a>]) -> R<'a> {
-    let f = ev.force_function(args[0])?;
+pub fn concat_map<'a>(ev: &Eval<'a>, f: Value<'a>, list: Value<'a>) -> R<'a> {
+    let f = ev.force_function(f)?;
     let mut out = Vec::new();
-    for item in ev.force_list(args[1])? {
+    for item in ev.force_list(list)? {
         out.extend_from_slice(ev.force_list(ev.call(f, *item)?)?);
     }
     Ok(ev.list(&out))
 }
 
-pub fn foldl<'a>(ev: &Eval<'a>, args: &[Value<'a>]) -> R<'a> {
-    let f = ev.force_function(args[0])?;
-    let mut acc = args[1];
-    let list = ev.force_list(args[2])?;
+pub fn foldl<'a>(ev: &Eval<'a>, f: Value<'a>, init: Value<'a>, list: Value<'a>) -> R<'a> {
+    let f = ev.force_function(f)?;
+    let mut acc = init;
+    let list = ev.force_list(list)?;
     if list.is_empty() {
         return ev.force(acc);
     }
@@ -127,21 +127,21 @@ pub fn foldl<'a>(ev: &Eval<'a>, args: &[Value<'a>]) -> R<'a> {
     Ok(acc)
 }
 
-pub fn gen_list<'a>(ev: &Eval<'a>, args: &[Value<'a>]) -> R<'a> {
-    let n = ev.force_int(args[1])?;
+pub fn gen_list<'a>(ev: &Eval<'a>, f: Value<'a>, n: Value<'a>) -> R<'a> {
+    let n = ev.force_int(n)?;
     if n < 0 {
         return eval_err(format!("cannot create list of size {n}"));
     }
-    let f = ev.force_function(args[0])?;
+    let f = ev.force_function(f)?;
     let out: Vec<Value<'a>> = (0..n).map(|i| ev.lazy_app(f, Value::Int(i))).collect();
     Ok(ev.list(&out))
 }
 
-pub fn partition<'a>(ev: &Eval<'a>, args: &[Value<'a>]) -> R<'a> {
-    let f = ev.force_function(args[0])?;
+pub fn partition<'a>(ev: &Eval<'a>, f: Value<'a>, list: Value<'a>) -> R<'a> {
+    let f = ev.force_function(f)?;
     let mut right = Vec::new();
     let mut wrong = Vec::new();
-    for item in ev.force_list(args[1])? {
+    for item in ev.force_list(list)? {
         let item = ev.force(*item)?;
         if ev.force_bool(ev.call(f, item)?)? {
             right.push(item);
@@ -155,10 +155,10 @@ pub fn partition<'a>(ev: &Eval<'a>, args: &[Value<'a>]) -> R<'a> {
     ]))
 }
 
-pub fn group_by<'a>(ev: &Eval<'a>, args: &[Value<'a>]) -> R<'a> {
-    let f = ev.force_function(args[0])?;
+pub fn group_by<'a>(ev: &Eval<'a>, f: Value<'a>, list: Value<'a>) -> R<'a> {
+    let f = ev.force_function(f)?;
     let mut groups: HashMap<Sym, Vec<Value<'a>>> = HashMap::new();
-    for item in ev.force_list(args[1])? {
+    for item in ev.force_list(list)? {
         let key = ev.force_str_no_ctx(ev.call(f, *item)?)?;
         let key = ev.ctx.interner.intern_bytes(key);
         groups.entry(key).or_default().push(*item);
@@ -175,12 +175,12 @@ pub fn group_by<'a>(ev: &Eval<'a>, args: &[Value<'a>]) -> R<'a> {
 }
 
 /// A stable merge sort whose comparator may fail.
-pub fn sort<'a>(ev: &Eval<'a>, args: &[Value<'a>]) -> R<'a> {
-    let mut items = ev.force_list(args[1])?.to_vec();
+pub fn sort<'a>(ev: &Eval<'a>, cmp: Value<'a>, list: Value<'a>) -> R<'a> {
+    let mut items = ev.force_list(list)?.to_vec();
     if items.is_empty() {
         return Ok(ev.list(&items));
     }
-    let cmp = ev.force_function(args[0])?;
+    let cmp = ev.force_function(cmp)?;
     for item in &mut items {
         *item = ev.force(*item)?;
     }
@@ -334,9 +334,9 @@ impl<'a> PeekSort<'_, 'a> {
     }
 }
 
-pub fn generic_closure<'a>(ev: &Eval<'a>, args: &[Value<'a>]) -> R<'a> {
+pub fn generic_closure<'a>(ev: &Eval<'a>, set: Value<'a>) -> R<'a> {
     let s = &ev.ctx.syms;
-    let set = ev.force_attrs(args[0])?;
+    let set = ev.force_attrs(set)?;
     let Some(start) = set.get(s.start_set) else {
         return eval_err("attribute 'startSet' required");
     };

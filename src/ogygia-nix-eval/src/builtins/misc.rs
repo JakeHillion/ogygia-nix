@@ -11,9 +11,9 @@ use crate::value::Value;
 use crate::value::error;
 use crate::value::eval_err;
 
-fn arith<'a>(ev: &Eval<'a>, op: BinOp, args: &[Value<'a>]) -> R<'a> {
-    let a = ev.force(args[0])?;
-    let b = ev.force(args[1])?;
+fn arith<'a>(ev: &Eval<'a>, op: BinOp, a: Value<'a>, b: Value<'a>) -> R<'a> {
+    let a = ev.force(a)?;
+    let b = ev.force(b)?;
     match (a, b) {
         (Value::Int(_) | Value::Float(_), Value::Int(_) | Value::Float(_)) => {
             ev.arith_nopos(op, a, b)
@@ -22,38 +22,38 @@ fn arith<'a>(ev: &Eval<'a>, op: BinOp, args: &[Value<'a>]) -> R<'a> {
     }
 }
 
-pub fn add<'a>(ev: &Eval<'a>, args: &[Value<'a>]) -> R<'a> {
-    arith(ev, BinOp::Add, args)
+pub fn add<'a>(ev: &Eval<'a>, a: Value<'a>, b: Value<'a>) -> R<'a> {
+    arith(ev, BinOp::Add, a, b)
 }
 
-pub fn sub<'a>(ev: &Eval<'a>, args: &[Value<'a>]) -> R<'a> {
-    arith(ev, BinOp::Sub, args)
+pub fn sub<'a>(ev: &Eval<'a>, a: Value<'a>, b: Value<'a>) -> R<'a> {
+    arith(ev, BinOp::Sub, a, b)
 }
 
-pub fn mul<'a>(ev: &Eval<'a>, args: &[Value<'a>]) -> R<'a> {
-    arith(ev, BinOp::Mul, args)
+pub fn mul<'a>(ev: &Eval<'a>, a: Value<'a>, b: Value<'a>) -> R<'a> {
+    arith(ev, BinOp::Mul, a, b)
 }
 
-pub fn div<'a>(ev: &Eval<'a>, args: &[Value<'a>]) -> R<'a> {
-    arith(ev, BinOp::Div, args)
+pub fn div<'a>(ev: &Eval<'a>, a: Value<'a>, b: Value<'a>) -> R<'a> {
+    arith(ev, BinOp::Div, a, b)
 }
 
-fn bits<'a>(ev: &Eval<'a>, args: &[Value<'a>], f: fn(i64, i64) -> i64) -> R<'a> {
-    let a = ev.force_int(args[0])?;
-    let b = ev.force_int(args[1])?;
+fn bits<'a>(ev: &Eval<'a>, a: Value<'a>, b: Value<'a>, f: fn(i64, i64) -> i64) -> R<'a> {
+    let a = ev.force_int(a)?;
+    let b = ev.force_int(b)?;
     Ok(Value::Int(f(a, b)))
 }
 
-pub fn bit_and<'a>(ev: &Eval<'a>, args: &[Value<'a>]) -> R<'a> {
-    bits(ev, args, |a, b| a & b)
+pub fn bit_and<'a>(ev: &Eval<'a>, a: Value<'a>, b: Value<'a>) -> R<'a> {
+    bits(ev, a, b, |a, b| a & b)
 }
 
-pub fn bit_or<'a>(ev: &Eval<'a>, args: &[Value<'a>]) -> R<'a> {
-    bits(ev, args, |a, b| a | b)
+pub fn bit_or<'a>(ev: &Eval<'a>, a: Value<'a>, b: Value<'a>) -> R<'a> {
+    bits(ev, a, b, |a, b| a | b)
 }
 
-pub fn bit_xor<'a>(ev: &Eval<'a>, args: &[Value<'a>]) -> R<'a> {
-    bits(ev, args, |a, b| a ^ b)
+pub fn bit_xor<'a>(ev: &Eval<'a>, a: Value<'a>, b: Value<'a>) -> R<'a> {
+    bits(ev, a, b, |a, b| a ^ b)
 }
 
 fn round<'a>(ev: &Eval<'a>, v: Value<'a>, f: fn(f64) -> f64, name: &str) -> R<'a> {
@@ -73,26 +73,26 @@ fn round<'a>(ev: &Eval<'a>, v: Value<'a>, f: fn(f64) -> f64, name: &str) -> R<'a
     }
 }
 
-pub fn ceil<'a>(ev: &Eval<'a>, args: &[Value<'a>]) -> R<'a> {
-    round(ev, args[0], f64::ceil, "ceil")
+pub fn ceil<'a>(ev: &Eval<'a>, x: Value<'a>) -> R<'a> {
+    round(ev, x, f64::ceil, "ceil")
 }
 
-pub fn floor<'a>(ev: &Eval<'a>, args: &[Value<'a>]) -> R<'a> {
-    round(ev, args[0], f64::floor, "floor")
+pub fn floor<'a>(ev: &Eval<'a>, x: Value<'a>) -> R<'a> {
+    round(ev, x, f64::floor, "floor")
 }
 
-pub fn less_than<'a>(ev: &Eval<'a>, args: &[Value<'a>]) -> R<'a> {
-    Ok(Value::Bool(ev.less_than(args[0], args[1])?))
+pub fn less_than<'a>(ev: &Eval<'a>, a: Value<'a>, b: Value<'a>) -> R<'a> {
+    Ok(Value::Bool(ev.less_than(a, b)?))
 }
 
-pub fn seq<'a>(ev: &Eval<'a>, args: &[Value<'a>]) -> R<'a> {
-    ev.force(args[0])?;
-    ev.force(args[1])
+pub fn seq<'a>(ev: &Eval<'a>, a: Value<'a>, b: Value<'a>) -> R<'a> {
+    ev.force(a)?;
+    ev.force(b)
 }
 
-pub fn deep_seq<'a>(ev: &Eval<'a>, args: &[Value<'a>]) -> R<'a> {
-    ev.deep_force(args[0])?;
-    ev.force(args[1])
+pub fn deep_seq<'a>(ev: &Eval<'a>, a: Value<'a>, b: Value<'a>) -> R<'a> {
+    ev.deep_force(a)?;
+    ev.force(b)
 }
 
 fn message<'a>(ev: &Eval<'a>, v: Value<'a>, c: Coerce) -> R<'a, String> {
@@ -100,24 +100,24 @@ fn message<'a>(ev: &Eval<'a>, v: Value<'a>, c: Coerce) -> R<'a, String> {
     Ok(String::from_utf8_lossy(&s).into_owned())
 }
 
-pub fn throw<'a>(ev: &Eval<'a>, args: &[Value<'a>]) -> R<'a> {
-    let msg = message(ev, args[0], Coerce::INTERP)?;
+pub fn throw<'a>(ev: &Eval<'a>, msg: Value<'a>) -> R<'a> {
+    let msg = message(ev, msg, Coerce::INTERP)?;
     Err(error(ErrorKind::Throw, msg))
 }
 
-pub fn abort<'a>(ev: &Eval<'a>, args: &[Value<'a>]) -> R<'a> {
-    let msg = message(ev, args[0], Coerce::INTERP)?;
+pub fn abort<'a>(ev: &Eval<'a>, msg: Value<'a>) -> R<'a> {
+    let msg = message(ev, msg, Coerce::INTERP)?;
     Err(error(
         ErrorKind::Abort,
         format!("evaluation aborted with the following error message: '{msg}'"),
     ))
 }
 
-pub fn add_error_context<'a>(ev: &Eval<'a>, args: &[Value<'a>]) -> R<'a> {
-    ev.force(args[1]).map_err(|mut e| {
+pub fn add_error_context<'a>(ev: &Eval<'a>, context: Value<'a>, v: Value<'a>) -> R<'a> {
+    ev.force(v).map_err(|mut e| {
         // Coercing the message may fail, and that failure only goes in the
         // trace: the error keeps its kind, so `tryEval` still sees it.
-        let context = message(ev, args[0], Coerce::PLAIN).unwrap_or_else(|c| {
+        let context = message(ev, context, Coerce::PLAIN).unwrap_or_else(|c| {
             format!(
                 "while evaluating the error message passed to builtins.addErrorContext, \
                  another error occurred: {}",
@@ -129,8 +129,8 @@ pub fn add_error_context<'a>(ev: &Eval<'a>, args: &[Value<'a>]) -> R<'a> {
     })
 }
 
-pub fn try_eval<'a>(ev: &Eval<'a>, args: &[Value<'a>]) -> R<'a> {
-    let (success, value) = match ev.force(args[0]) {
+pub fn try_eval<'a>(ev: &Eval<'a>, v: Value<'a>) -> R<'a> {
+    let (success, value) = match ev.force(v) {
         Ok(v) => (true, v),
         Err(e) if matches!(e.kind, ErrorKind::Throw | ErrorKind::Assert) => {
             (false, Value::Bool(false))
@@ -143,32 +143,31 @@ pub fn try_eval<'a>(ev: &Eval<'a>, args: &[Value<'a>]) -> R<'a> {
     ]))
 }
 
-pub fn trace<'a>(ev: &Eval<'a>, args: &[Value<'a>]) -> R<'a> {
-    let v = ev.force(args[0])?;
-    let text = match v {
+pub fn trace<'a>(ev: &Eval<'a>, msg: Value<'a>, v: Value<'a>) -> R<'a> {
+    let text = match ev.force(msg)? {
         Value::Str(s) => s.as_str_lossy().into_owned(),
         other => crate::print::print_lazy(ev, other),
     };
     eprintln!("trace: {text}");
-    ev.force(args[1])
+    ev.force(v)
 }
 
-pub fn trace_verbose<'a>(ev: &Eval<'a>, args: &[Value<'a>]) -> R<'a> {
-    ev.force(args[1])
+pub fn trace_verbose<'a>(ev: &Eval<'a>, _msg: Value<'a>, v: Value<'a>) -> R<'a> {
+    ev.force(v)
 }
 
-pub fn warn<'a>(ev: &Eval<'a>, args: &[Value<'a>]) -> R<'a> {
-    let msg = ev.force_str(args[0])?;
+pub fn warn<'a>(ev: &Eval<'a>, msg: Value<'a>, v: Value<'a>) -> R<'a> {
+    let msg = ev.force_str(msg)?;
     eprintln!("evaluation warning: {}", msg.as_str_lossy());
-    ev.force(args[1])
+    ev.force(v)
 }
 
-pub fn break_<'a>(ev: &Eval<'a>, args: &[Value<'a>]) -> R<'a> {
-    ev.force(args[0])
+pub fn break_<'a>(ev: &Eval<'a>, v: Value<'a>) -> R<'a> {
+    ev.force(v)
 }
 
-pub fn type_of<'a>(ev: &Eval<'a>, args: &[Value<'a>]) -> R<'a> {
-    let v = ev.force(args[0])?;
+pub fn type_of<'a>(ev: &Eval<'a>, v: Value<'a>) -> R<'a> {
+    let v = ev.force(v)?;
     Ok(ev.string(v.type_of()))
 }
 
@@ -177,44 +176,44 @@ fn is<'a>(ev: &Eval<'a>, v: Value<'a>, f: fn(&Value<'a>) -> bool) -> R<'a> {
     Ok(Value::Bool(f(&v)))
 }
 
-pub fn is_attrs<'a>(ev: &Eval<'a>, args: &[Value<'a>]) -> R<'a> {
-    is(ev, args[0], |v| matches!(v, Value::Attrs(_)))
+pub fn is_attrs<'a>(ev: &Eval<'a>, v: Value<'a>) -> R<'a> {
+    is(ev, v, |v| matches!(v, Value::Attrs(_)))
 }
 
-pub fn is_bool<'a>(ev: &Eval<'a>, args: &[Value<'a>]) -> R<'a> {
-    is(ev, args[0], |v| matches!(v, Value::Bool(_)))
+pub fn is_bool<'a>(ev: &Eval<'a>, v: Value<'a>) -> R<'a> {
+    is(ev, v, |v| matches!(v, Value::Bool(_)))
 }
 
-pub fn is_float<'a>(ev: &Eval<'a>, args: &[Value<'a>]) -> R<'a> {
-    is(ev, args[0], |v| matches!(v, Value::Float(_)))
+pub fn is_float<'a>(ev: &Eval<'a>, v: Value<'a>) -> R<'a> {
+    is(ev, v, |v| matches!(v, Value::Float(_)))
 }
 
-pub fn is_function<'a>(ev: &Eval<'a>, args: &[Value<'a>]) -> R<'a> {
-    is(ev, args[0], |v| v.is_function())
+pub fn is_function<'a>(ev: &Eval<'a>, v: Value<'a>) -> R<'a> {
+    is(ev, v, |v| v.is_function())
 }
 
-pub fn is_int<'a>(ev: &Eval<'a>, args: &[Value<'a>]) -> R<'a> {
-    is(ev, args[0], |v| matches!(v, Value::Int(_)))
+pub fn is_int<'a>(ev: &Eval<'a>, v: Value<'a>) -> R<'a> {
+    is(ev, v, |v| matches!(v, Value::Int(_)))
 }
 
-pub fn is_list<'a>(ev: &Eval<'a>, args: &[Value<'a>]) -> R<'a> {
-    is(ev, args[0], |v| matches!(v, Value::List(_)))
+pub fn is_list<'a>(ev: &Eval<'a>, v: Value<'a>) -> R<'a> {
+    is(ev, v, |v| matches!(v, Value::List(_)))
 }
 
-pub fn is_null<'a>(ev: &Eval<'a>, args: &[Value<'a>]) -> R<'a> {
-    is(ev, args[0], |v| matches!(v, Value::Null))
+pub fn is_null<'a>(ev: &Eval<'a>, v: Value<'a>) -> R<'a> {
+    is(ev, v, |v| matches!(v, Value::Null))
 }
 
-pub fn is_path<'a>(ev: &Eval<'a>, args: &[Value<'a>]) -> R<'a> {
-    is(ev, args[0], |v| matches!(v, Value::Path(_)))
+pub fn is_path<'a>(ev: &Eval<'a>, v: Value<'a>) -> R<'a> {
+    is(ev, v, |v| matches!(v, Value::Path(_)))
 }
 
-pub fn is_string<'a>(ev: &Eval<'a>, args: &[Value<'a>]) -> R<'a> {
-    is(ev, args[0], |v| matches!(v, Value::Str(_)))
+pub fn is_string<'a>(ev: &Eval<'a>, v: Value<'a>) -> R<'a> {
+    is(ev, v, |v| matches!(v, Value::Str(_)))
 }
 
-pub fn function_args<'a>(ev: &Eval<'a>, args: &[Value<'a>]) -> R<'a> {
-    match ev.force(args[0])? {
+pub fn function_args<'a>(ev: &Eval<'a>, f: Value<'a>) -> R<'a> {
+    match ev.force(f)? {
         Value::Lambda(c) => match &c.def.param {
             Param::Ident(_) => Ok(Value::Attrs(ev.empty_attrs)),
             Param::Pattern { formals, .. } => Ok(ev.attrs(
@@ -233,8 +232,8 @@ pub fn function_args<'a>(ev: &Eval<'a>, args: &[Value<'a>]) -> R<'a> {
     }
 }
 
-pub fn get_env<'a>(ev: &Eval<'a>, args: &[Value<'a>]) -> R<'a> {
-    let name = ev.force_str_no_ctx(args[0])?;
+pub fn get_env<'a>(ev: &Eval<'a>, name: Value<'a>) -> R<'a> {
+    let name = ev.force_str_no_ctx(name)?;
     if ev.settings.pure {
         return Ok(ev.string(""));
     }
