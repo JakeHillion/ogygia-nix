@@ -454,11 +454,7 @@ mod tests {
     // --read-write-mode`.
 
     fn eval(expr: &str, pure: bool) -> Result<String, crate::Error> {
-        let settings = crate::Settings {
-            pure,
-            ..crate::Settings::default()
-        };
-        crate::eval_to_string(expr, "/", settings)
+        crate::eval_to_string(expr, "/", pure, crate::Settings::default())
     }
 
     #[test]

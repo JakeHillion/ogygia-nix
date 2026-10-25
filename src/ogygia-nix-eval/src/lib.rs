@@ -80,15 +80,16 @@ pub enum Error {
 }
 
 /// Evaluate the expression in `text`, deeply forcing it, and render it the
-/// way `nix-instantiate --eval --strict` does. Relative paths resolve
-/// against `base_dir`.
-pub fn eval_to_string(text: &str, base_dir: &str, settings: Settings) -> Result<String, Error> {
+/// way `nix-instantiate --eval --strict` does, in pure evaluation mode if
+/// `pure`. Relative paths resolve against `base_dir`.
+pub fn eval_to_string(
+    text: &str,
+    base_dir: &str,
+    pure: bool,
+    settings: Settings,
+) -> Result<String, Error> {
     run_with_stack(|| {
-        let ctx = Context::new(if settings.pure {
-            Io::pure()
-        } else {
-            Io::default()
-        });
+        let ctx = Context::new(if pure { Io::pure() } else { Io::default() });
         let bump = bumpalo::Bump::new();
         let ev = Eval::new(&ctx, &bump, settings);
         let result = ev

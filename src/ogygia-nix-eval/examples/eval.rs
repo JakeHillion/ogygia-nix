@@ -19,7 +19,7 @@ fn main() {
     }
     let expr = expr.expect("usage: eval [-I prefix=path]... <expr>");
     let cwd = std::env::current_dir().expect("current directory");
-    match ogygia_nix_eval::eval_to_string(&expr, &cwd.to_string_lossy(), settings) {
+    match ogygia_nix_eval::eval_to_string(&expr, &cwd.to_string_lossy(), false, settings) {
         Ok(s) => println!("{s}"),
         Err(e) => {
             eprintln!("{e}");
