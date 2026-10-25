@@ -121,7 +121,7 @@ fn run_ours(case: &Case, expr: &str) -> Result<String, String> {
         ..Settings::default()
     };
     let dir = case.path.parent().unwrap().to_string_lossy().into_owned();
-    ogygia_nix_eval::eval_to_string(expr, &dir, settings).map_err(|e| e.to_string())
+    ogygia_nix_eval::eval_to_string(expr, &dir, false, settings).map_err(|e| e.to_string())
 }
 
 fn run_case(case: &Case) -> Result<(), Failed> {

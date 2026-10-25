@@ -263,7 +263,7 @@ pub fn make_globals<'a>(ev: &Eval<'a>) -> HashMap<Sym, Value<'a>> {
     let self_ref: &'a Thunk<'a> = ev.bump.alloc(Thunk(Cell::new(ThunkState::Blackhole)));
     let mut entries = Vec::new();
     let mut globals = HashMap::new();
-    for b in BUILTINS.iter().filter(|b| !(ev.settings.pure && b.impure)) {
+    for b in BUILTINS.iter().filter(|b| !(ev.ctx.io.pure && b.impure)) {
         let value = match &b.kind {
             Kind::PrimOp(op) => Value::PrimOp(op),
             Kind::Const(f) => f(ev),

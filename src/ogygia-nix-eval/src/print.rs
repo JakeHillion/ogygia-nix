@@ -272,6 +272,7 @@ mod tests {
         let err = crate::eval_to_string(
             "{ b = throw \"first\"; a = throw \"second\"; }",
             "/",
+            false,
             crate::Settings::default(),
         )
         .unwrap_err()

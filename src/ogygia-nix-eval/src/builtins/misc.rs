@@ -234,7 +234,7 @@ pub fn function_args<'a>(ev: &Eval<'a>, f: Value<'a>) -> R<'a> {
 
 pub fn get_env<'a>(ev: &Eval<'a>, name: Value<'a>) -> R<'a> {
     let name = ev.force_str_no_ctx(name)?;
-    if ev.settings.pure {
+    if ev.ctx.io.pure {
         return Ok(ev.string(""));
     }
     let name = String::from_utf8_lossy(name);

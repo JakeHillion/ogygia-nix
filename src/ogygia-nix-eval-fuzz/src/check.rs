@@ -333,7 +333,6 @@ fn limited(stderr: &str) -> bool {
 
 fn settings() -> Settings {
     Settings {
-        pure: true,
         // Nix's regular expressions are libstdc++'s `std::regex`, whose
         // semantics are too broken to reasonably match, so inputs that use
         // one are not compared.
@@ -460,7 +459,7 @@ fn agree(theirs: &Run, ours: &Run) -> bool {
 pub fn check(src: &str, budget: Budget) -> Outcome {
     check_with(
         compile,
-        |expr| ogygia_nix_eval::eval_to_string(expr, "/", settings()),
+        |expr| ogygia_nix_eval::eval_to_string(expr, "/", true, settings()),
         |mode, expr| run_nix(mode, expr, budget),
         src,
     )
@@ -469,7 +468,7 @@ pub fn check(src: &str, budget: Budget) -> Outcome {
 fn compile(src: &str) -> Run {
     run_with_stack(|| {
         Context::new(Io::pure())
-            .compile_str(src, "/", true)
+            .compile_str(src, "/")
             .map(|_| String::new())
             .map_err(|e| e.msg)
     })

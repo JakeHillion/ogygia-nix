@@ -26,7 +26,7 @@ pub fn scoped_import<'a>(ev: &Eval<'a>, scope: Value<'a>, path: Value<'a>) -> R<
     let names: Vec<_> = scope.entries.iter().map(|e| e.name).collect();
     let expr = ev
         .ctx
-        .compile_file_scoped(&file, ev.settings.pure, &names)
+        .compile_file_scoped(&file, &names)
         .map_err(anyhow_err)?;
     let slots = ev
         .bump
@@ -173,7 +173,7 @@ pub fn to_path<'a>(ev: &Eval<'a>, path: Value<'a>) -> R<'a> {
 }
 
 pub fn store_path<'a>(ev: &Eval<'a>, path: Value<'a>) -> R<'a> {
-    if ev.settings.pure {
+    if ev.ctx.io.pure {
         return eval_err("'builtins.storePath' is not allowed in pure evaluation mode");
     }
     let path = ev.coerce_to_path(path)?;

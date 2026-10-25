@@ -50,7 +50,6 @@ pub struct Settings {
     pub current_system: String,
     /// Search path entries for `<...>` lookups, as `(prefix, path)`.
     pub nix_path: Vec<(String, String)>,
-    pub pure: bool,
     /// Features whose use fails evaluation with [`crate::Error::Disabled`],
     /// which `builtins.tryEval` does not catch.
     pub disabled: Vec<Feature>,
@@ -61,7 +60,6 @@ impl Default for Settings {
         Settings {
             current_system: crate::CURRENT_SYSTEM.to_owned(),
             nix_path: Vec::new(),
-            pure: false,
             disabled: Vec::new(),
         }
     }
@@ -1313,10 +1311,7 @@ impl<'a> Eval<'a> {
         if let Some(v) = cached {
             return self.force(v);
         }
-        let expr = self
-            .ctx
-            .compile_file(&path, self.settings.pure)
-            .map_err(anyhow_err)?;
+        let expr = self.ctx.compile_file(&path).map_err(anyhow_err)?;
         let v = self.thunk(ThunkState::Expr(expr, self.root_env()));
         self.import_cache.borrow_mut().insert(path.clone(), v);
         self.force(v).map_err(|mut e| {
@@ -1336,7 +1331,7 @@ impl<'a> Eval<'a> {
     pub fn eval_string(&self, text: &str, base_dir: &str) -> R<'a> {
         let expr = self
             .ctx
-            .compile_str(text, base_dir, self.settings.pure)
+            .compile_str(text, base_dir)
             .map_err(|e| error(ErrorKind::Eval, e.msg))?;
         self.eval(expr, self.root_env())
     }
