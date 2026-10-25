@@ -785,17 +785,9 @@ impl<'a> Compiler<'a> {
                 let text = p.content().map(|c| c.text().to_owned()).unwrap_or_default();
                 let name = text.trim_start_matches('<').trim_end_matches('>');
                 let s = &self.ctx.syms;
-                let find_file = self.resolve(s.find_file, 0, pos)?;
-                let nix_path = self.resolve(s.nix_path, 0, pos)?;
-                let args = vec![
-                    self.leak(nix_path),
-                    self.leak(Expr::Str(self.lit_str(name.as_bytes()))),
-                ];
-                Expr::Apply {
-                    func: self.leak(find_file),
-                    args: self.ctx.alloc_slice(args),
-                    pos,
-                }
+                let nix_path = self.leak(self.resolve(s.nix_path, 0, pos)?);
+                let name = self.leak(Expr::Str(self.lit_str(name.as_bytes())));
+                self.call(s.find_file, &[nix_path, name], pos)?
             }
             ast::Expr::List(l) => {
                 let items: Vec<ast::Expr> = l.items().collect();
@@ -858,7 +850,7 @@ impl<'a> Compiler<'a> {
             ast::Expr::UnaryOp(u) => {
                 let inner = self.expr(&child(u.expr())?)?;
                 match u.operator() {
-                    Some(ast::UnaryOpKind::Invert) => Expr::Not(inner, pos),
+                    Some(ast::UnaryOpKind::Invert) => Expr::Not(inner),
                     // `-e` is `__sub 0 e`.
                     Some(ast::UnaryOpKind::Negate) => {
                         let zero = self.leak(Expr::Int(0));
@@ -925,11 +917,11 @@ impl<'a> Compiler<'a> {
             ast::BinOpKind::More => return self.call(s.less_than, &[rhs, lhs], op_pos),
             ast::BinOpKind::LessOrEq => {
                 let gt = self.call(s.less_than, &[rhs, lhs], op_pos)?;
-                return Ok(Expr::Not(self.leak(gt), op_pos));
+                return Ok(Expr::Not(self.leak(gt)));
             }
             ast::BinOpKind::MoreOrEq => {
                 let lt = self.call(s.less_than, &[lhs, rhs], op_pos)?;
-                return Ok(Expr::Not(self.leak(lt), op_pos));
+                return Ok(Expr::Not(self.leak(lt)));
             }
             ast::BinOpKind::Concat => BinOp::Concat,
             ast::BinOpKind::Update => BinOp::Update,
