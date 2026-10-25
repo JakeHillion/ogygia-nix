@@ -137,8 +137,6 @@ pub enum ThunkState<'a> {
     Expr(ExprRef<'a>, &'a Env<'a>),
     /// A lazy function application.
     App(Value<'a>, Value<'a>),
-    /// A lazy attribute selection (`inherit (from) name`).
-    Select(Value<'a>, Sym, Pos<'a>),
     Native(NativeFn<'a>),
     Blackhole,
     Done(Value<'a>),

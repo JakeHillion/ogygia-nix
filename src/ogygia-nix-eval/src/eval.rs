@@ -17,7 +17,6 @@ use crate::ir::Expr;
 use crate::ir::ExprRef;
 use crate::ir::Param;
 use crate::ir::Pos;
-use crate::ir::SlotInit;
 use crate::path::canon_path;
 use crate::store::StorePath;
 use crate::symbol::Sym;
@@ -267,10 +266,6 @@ impl<'a> Eval<'a> {
                 t.0.set(ThunkState::Blackhole);
                 self.call(f, x)
             }
-            ThunkState::Select(v, name, pos) => {
-                t.0.set(ThunkState::Blackhole);
-                self.select_one(v, name, pos)
-            }
             ThunkState::Native(f) => {
                 t.0.set(ThunkState::Blackhole);
                 f(self)
@@ -285,14 +280,6 @@ impl<'a> Eval<'a> {
                 t.0.set(state);
                 Err(e)
             }
-        }
-    }
-
-    fn select_one(&self, v: Value<'a>, name: Sym, pos: Pos<'a>) -> R<'a> {
-        let attrs = self.force_attrs(v)?;
-        match attrs.get(name) {
-            Some(x) => self.force(x),
-            None => eval_err(format!("attribute '{}' missing at {pos}", self.name(name))),
         }
     }
 
@@ -656,7 +643,7 @@ impl<'a> Eval<'a> {
         }
     }
 
-    pub(crate) fn new_frame(&self, inits: &'a [SlotInit<'a>], parent: &'a Env<'a>) -> &'a Env<'a> {
+    pub(crate) fn new_frame(&self, inits: &'a [ExprRef<'a>], parent: &'a Env<'a>) -> &'a Env<'a> {
         let slots = self
             .bump
             .alloc_slice_fill_with(inits.len(), |_| Cell::new(Value::Null));
@@ -664,18 +651,8 @@ impl<'a> Eval<'a> {
             parent: Some(parent),
             slots,
         });
-        for (slot, init) in slots.iter().zip(inits) {
-            match init {
-                SlotInit::Expr(e) => slot.set(self.lazy_slot(e, env)),
-                SlotInit::Select(..) => {}
-            }
-        }
-        // Inherit-from sources are slots of their own, so fill those first.
-        for (slot, init) in slots.iter().zip(inits) {
-            if let SlotInit::Select(from, name, pos) = init {
-                let src = slots[*from as usize].get();
-                slot.set(self.thunk(ThunkState::Select(src, *name, *pos)));
-            }
+        for (slot, e) in slots.iter().zip(inits) {
+            slot.set(self.lazy_slot(e, env));
         }
         env
     }
