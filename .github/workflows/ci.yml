@@ -62,11 +62,12 @@ jobs:
           --test-threads num-cpus \
           --no-fail-fast
 
-  macos-app:
+  apple-apps:
     runs-on: xcode-27
 
     env:
-      APP: ogygia-macos/Applications/Ogygia.app
+      MACOS_APP: ogygia-macos/Applications/Ogygia.app
+      IOS_APP: ogygia-ios/Applications/Ogygia.app
 
     steps:
     - name: Checkout code
@@ -89,7 +90,8 @@ jobs:
 
     # Xcode cannot be downloaded without an Apple ID, so the runner's copy
     # is added under the hash nixpkgs pins. A runner image whose Xcode
-    # differs from the pin fails here rather than building with it.
+    # differs from the pin fails here rather than building with it. Both
+    # apps build with the same Xcode.
     - name: Add Xcode to the Nix store
       run: |
         expected="$(nix eval --raw .#packages.aarch64-darwin.ogygia-macos.xcode.outPath)"
@@ -101,31 +103,50 @@ jobs:
           exit 1
         fi
 
-    - name: Build
+    - name: Build the macOS app
       run: nix build -L --out-link ogygia-macos .#packages.aarch64-darwin.ogygia-macos
 
+    - name: Build the iOS app
+      run: nix build -L --out-link ogygia-ios .#packages.aarch64-darwin.ogygia-ios
+
     # The build number is the flake's commit count, which falls back to 0
-    # when history is missing; Sparkle would then never offer an update.
-    - name: Check the build number
-      run: test "$(plutil -extract CFBundleVersion raw "$APP/Contents/Info.plist")" = "$(git rev-list --count HEAD)"
+    # when history is missing; Sparkle would then never offer an update, and
+    # TestFlight would reject the upload.
+    - name: Check the build numbers
+      run: |
+        count="$(git rev-list --count HEAD)"
+        test "$(plutil -extract CFBundleVersion raw "$MACOS_APP/Contents/Info.plist")" = "$count"
+        test "$(plutil -extract CFBundleVersion raw "$IOS_APP/Info.plist")" = "$count"
 
     # ditto keeps the framework symlinks and code signatures, which the
     # artifact upload would otherwise flatten.
-    - name: Archive the app for release
+    - name: Archive the apps for release
       if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-      run: ditto -c -k --keepParent "$APP" "$RUNNER_TEMP/Ogygia.app.zip"
+      run: |
+        mkdir -p "$RUNNER_TEMP/macos" "$RUNNER_TEMP/ios"
+        ditto -c -k --keepParent "$MACOS_APP" "$RUNNER_TEMP/macos/Ogygia.app.zip"
+        ditto -c -k --keepParent "$IOS_APP" "$RUNNER_TEMP/ios/Ogygia.app.zip"
 
-    - name: Upload the app for release
+    - name: Upload the macOS app for release
       if: github.event_name == 'push' && github.ref == 'refs/heads/main'
       uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
       with:
         name: ogygia-macos
-        path: ${{ runner.temp }}/Ogygia.app.zip
+        path: ${{ runner.temp }}/macos/Ogygia.app.zip
+        compression-level: 0
+        retention-days: 1
+
+    - name: Upload the iOS app for release
+      if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+      uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+      with:
+        name: ogygia-ios
+        path: ${{ runner.temp }}/ios/Ogygia.app.zip
         compression-level: 0
         retention-days: 1
 
   macos-app-release:
-    needs: macos-app
+    needs: apple-apps
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: xcode-27
 
@@ -364,7 +385,7 @@ jobs:
         fi
 
   all-checks:
-    needs: [nix, macos-app, single-commit]
+    needs: [nix, apple-apps, single-commit]
     if: always()
     runs-on: ubuntu-24.04
 
@@ -372,7 +393,7 @@ jobs:
     - name: Require every check job to pass
       run: |
         test "${{ needs.nix.result }}" = success
-        test "${{ needs.macos-app.result }}" = success
+        test "${{ needs.apple-apps.result }}" = success
         if [ "${{ github.event_name }}" = merge_group ]; then
           test "${{ needs.single-commit.result }}" = success
         fi
