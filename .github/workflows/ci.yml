@@ -4,6 +4,7 @@ on:
   push:
     branches: [ main ]
   pull_request:
+  merge_group:
 
 jobs:
   nix:
@@ -343,13 +344,35 @@ jobs:
         aws s3 cp "$RUNNER_TEMP/appcast.xml" "s3://$ASSETS_BUCKET/macos/appcast.xml" \
           --content-type application/xml --cache-control "public, max-age=300"
 
+  single-commit:
+    if: github.event_name == 'merge_group'
+    runs-on: ubuntu-24.04
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      with:
+        fetch-depth: 2
+
+    # The queue rebase-merges, landing every commit of a PR. Each entry must
+    # add exactly one commit on top of the entry ahead of it.
+    - name: Require one commit per queued change
+      run: |
+        if [ "$(git log -1 --format=%P HEAD)" != "${{ github.event.merge_group.base_sha }}" ]; then
+          echo "::error::A queued change must be exactly one commit"
+          exit 1
+        fi
+
   all-checks:
-    needs: [nix, macos-app]
+    needs: [nix, macos-app, single-commit]
     if: always()
     runs-on: ubuntu-24.04
 
     steps:
-    - name: Require every build and test job to pass
+    - name: Require every check job to pass
       run: |
         test "${{ needs.nix.result }}" = success
         test "${{ needs.macos-app.result }}" = success
+        if [ "${{ github.event_name }}" = merge_group ]; then
+          test "${{ needs.single-commit.result }}" = success
+        fi
