@@ -14,14 +14,14 @@ use crate::value::anyhow_err;
 use crate::value::error;
 use crate::value::eval_err;
 
-pub fn import<'a>(ev: &Eval<'a>, args: &[Value<'a>]) -> R<'a> {
-    let path = ev.realise_path(args[0])?;
+pub fn import<'a>(ev: &Eval<'a>, path: Value<'a>) -> R<'a> {
+    let path = ev.realise_path(path)?;
     ev.import(&path)
 }
 
-pub fn scoped_import<'a>(ev: &Eval<'a>, args: &[Value<'a>]) -> R<'a> {
-    let path = ev.realise_path(args[1])?;
-    let scope = ev.force_attrs(args[0])?;
+pub fn scoped_import<'a>(ev: &Eval<'a>, scope: Value<'a>, path: Value<'a>) -> R<'a> {
+    let path = ev.realise_path(path)?;
+    let scope = ev.force_attrs(scope)?;
     let file = ev.ctx.io.resolve_import(&path).map_err(anyhow_err)?;
     let names: Vec<_> = scope.entries.iter().map(|e| e.name).collect();
     let expr = ev
@@ -38,14 +38,14 @@ pub fn scoped_import<'a>(ev: &Eval<'a>, args: &[Value<'a>]) -> R<'a> {
     ev.eval(expr, env)
 }
 
-pub fn read_file<'a>(ev: &Eval<'a>, args: &[Value<'a>]) -> R<'a> {
-    let path = ev.realise_path(args[0])?;
+pub fn read_file<'a>(ev: &Eval<'a>, path: Value<'a>) -> R<'a> {
+    let path = ev.realise_path(path)?;
     let bytes = ev.ctx.io.read(&path).map_err(anyhow_err)?;
     Ok(ev.str_val(&bytes, &[]))
 }
 
-pub fn read_dir<'a>(ev: &Eval<'a>, args: &[Value<'a>]) -> R<'a> {
-    let path = ev.realise_path(args[0])?;
+pub fn read_dir<'a>(ev: &Eval<'a>, path: Value<'a>) -> R<'a> {
+    let path = ev.realise_path(path)?;
     let entries = ev.ctx.io.read_dir(&path).map_err(anyhow_err)?;
     Ok(ev.attrs(
         entries
@@ -59,16 +59,16 @@ pub fn read_dir<'a>(ev: &Eval<'a>, args: &[Value<'a>]) -> R<'a> {
     ))
 }
 
-pub fn read_file_type<'a>(ev: &Eval<'a>, args: &[Value<'a>]) -> R<'a> {
-    let path = ev.realise_path(args[0])?;
+pub fn read_file_type<'a>(ev: &Eval<'a>, path: Value<'a>) -> R<'a> {
+    let path = ev.realise_path(path)?;
     match ev.ctx.io.file_type(&path) {
         Some(t) => Ok(ev.string(t.name())),
         None => eval_err(format!("path '{path}' does not exist")),
     }
 }
 
-pub fn path_exists<'a>(ev: &Eval<'a>, args: &[Value<'a>]) -> R<'a> {
-    let v = ev.force(args[0])?;
+pub fn path_exists<'a>(ev: &Eval<'a>, path: Value<'a>) -> R<'a> {
+    let v = ev.force(path)?;
     let (raw, _) = ev.coerce_to_string(v, Coerce::PLAIN)?;
     let path = ev.realise_path(v)?;
     let io = &ev.ctx.io;
@@ -79,17 +79,17 @@ pub fn path_exists<'a>(ev: &Eval<'a>, args: &[Value<'a>]) -> R<'a> {
     Ok(Value::Bool(io.exists(&path)))
 }
 
-pub fn hash_file<'a>(ev: &Eval<'a>, args: &[Value<'a>]) -> R<'a> {
-    let algo = super::strings::hash_algo(ev.force_str_no_ctx(args[0])?)?;
-    let path = ev.realise_path(args[1])?;
+pub fn hash_file<'a>(ev: &Eval<'a>, algo: Value<'a>, path: Value<'a>) -> R<'a> {
+    let algo = super::strings::hash_algo(ev.force_str_no_ctx(algo)?)?;
+    let path = ev.realise_path(path)?;
     let bytes = ev.ctx.io.read(&path).map_err(anyhow_err)?;
     Ok(ev.string(&hex::encode(algo.digest(&bytes))))
 }
 
-pub fn find_file<'a>(ev: &Eval<'a>, args: &[Value<'a>]) -> R<'a> {
+pub fn find_file<'a>(ev: &Eval<'a>, search_path: Value<'a>, name: Value<'a>) -> R<'a> {
     let syms = &ev.ctx.syms;
     let search = ev
-        .force_list(args[0])?
+        .force_list(search_path)?
         .iter()
         .map(|entry| {
             let entry = ev.force_attrs(*entry)?;
@@ -105,7 +105,7 @@ pub fn find_file<'a>(ev: &Eval<'a>, args: &[Value<'a>]) -> R<'a> {
             Ok((prefix, String::from_utf8_lossy(&path).into_owned()))
         })
         .collect::<Result<Vec<_>, _>>()?;
-    let name = ev.force_str_no_ctx(args[1])?;
+    let name = ev.force_str_no_ctx(name)?;
     let name = String::from_utf8_lossy(name).into_owned();
     for (prefix, path) in search {
         let rest = if prefix.is_empty() {
@@ -142,10 +142,10 @@ pub fn find_file<'a>(ev: &Eval<'a>, args: &[Value<'a>]) -> R<'a> {
     ))
 }
 
-pub fn to_file<'a>(ev: &Eval<'a>, args: &[Value<'a>]) -> R<'a> {
-    let name = ev.force_str_no_ctx(args[0])?;
+pub fn to_file<'a>(ev: &Eval<'a>, name: Value<'a>, contents: Value<'a>) -> R<'a> {
+    let name = ev.force_str_no_ctx(name)?;
     let name = String::from_utf8_lossy(name).into_owned();
-    let contents = ev.force_str(args[1])?;
+    let contents = ev.force_str(contents)?;
     let mut refs = Vec::new();
     for c in contents.ctx {
         match c {
@@ -167,16 +167,16 @@ pub fn to_file<'a>(ev: &Eval<'a>, args: &[Value<'a>]) -> R<'a> {
     Ok(ev.str_val(path.as_bytes(), &[Ctx::Opaque(path)]))
 }
 
-pub fn to_path<'a>(ev: &Eval<'a>, args: &[Value<'a>]) -> R<'a> {
-    let path = ev.coerce_to_path(args[0])?;
+pub fn to_path<'a>(ev: &Eval<'a>, path: Value<'a>) -> R<'a> {
+    let path = ev.coerce_to_path(path)?;
     Ok(ev.string(crate::path::abs(&path)))
 }
 
-pub fn store_path<'a>(ev: &Eval<'a>, args: &[Value<'a>]) -> R<'a> {
+pub fn store_path<'a>(ev: &Eval<'a>, path: Value<'a>) -> R<'a> {
     if ev.settings.pure {
         return eval_err("'builtins.storePath' is not allowed in pure evaluation mode");
     }
-    let path = ev.coerce_to_path(args[0])?;
+    let path = ev.coerce_to_path(path)?;
     let prefix = format!("{}/", crate::store::STORE_DIR);
     let Some(rest) = path.strip_prefix(&prefix) else {
         return eval_err(format!("path '{path}' is not in the Nix store"));
@@ -227,8 +227,8 @@ fn add_path<'a>(
     Ok(ev.str_val(sp.as_bytes(), &[Ctx::Opaque(sp)]))
 }
 
-pub fn path<'a>(ev: &Eval<'a>, args: &[Value<'a>]) -> R<'a> {
-    let set = ev.force_attrs(args[0])?;
+pub fn path<'a>(ev: &Eval<'a>, set: Value<'a>) -> R<'a> {
+    let set = ev.force_attrs(set)?;
     let (mut path, mut name, mut filter, mut recursive) = (None, None, None, true);
     for e in set.entries {
         match ev.ctx.name(e.name) {
@@ -255,9 +255,9 @@ pub fn path<'a>(ev: &Eval<'a>, args: &[Value<'a>]) -> R<'a> {
     add_path(ev, &path, name, filter)
 }
 
-pub fn filter_source<'a>(ev: &Eval<'a>, args: &[Value<'a>]) -> R<'a> {
-    let path = ev.realise_path(args[1])?;
-    let filter = ev.force_function(args[0])?;
+pub fn filter_source<'a>(ev: &Eval<'a>, filter: Value<'a>, path: Value<'a>) -> R<'a> {
+    let path = ev.realise_path(path)?;
+    let filter = ev.force_function(filter)?;
     add_path(ev, &path, None, Some(filter))
 }
 
@@ -267,8 +267,8 @@ fn unsupported<'a>(name: &str) -> R<'a> {
     ))
 }
 
-pub fn fetch_git<'a>(ev: &Eval<'a>, args: &[Value<'a>]) -> R<'a> {
-    match ev.force(args[0])? {
+pub fn fetch_git<'a>(ev: &Eval<'a>, arg: Value<'a>) -> R<'a> {
+    match ev.force(arg)? {
         Value::Attrs(set) => {
             if set.get(ev.ctx.syms.type_).is_some() {
                 return eval_err("unexpected argument 'type'");
@@ -358,8 +358,8 @@ fn check_git_url<'a>(url: &[u8]) -> R<'a, ()> {
     Ok(())
 }
 
-pub fn fetch_mercurial<'a>(ev: &Eval<'a>, args: &[Value<'a>]) -> R<'a> {
-    match ev.force(args[0])? {
+pub fn fetch_mercurial<'a>(ev: &Eval<'a>, arg: Value<'a>) -> R<'a> {
+    match ev.force(arg)? {
         Value::Attrs(set) => {
             for e in set.entries {
                 match ev.ctx.name(e.name) {
@@ -382,12 +382,12 @@ pub fn fetch_mercurial<'a>(ev: &Eval<'a>, args: &[Value<'a>]) -> R<'a> {
     unsupported("fetchMercurial")
 }
 
-pub fn fetch_tarball<'a>(ev: &Eval<'a>, args: &[Value<'a>]) -> R<'a> {
-    fetch(ev, args[0], "fetchTarball")
+pub fn fetch_tarball<'a>(ev: &Eval<'a>, arg: Value<'a>) -> R<'a> {
+    fetch(ev, arg, "fetchTarball")
 }
 
-pub fn fetchurl<'a>(ev: &Eval<'a>, args: &[Value<'a>]) -> R<'a> {
-    fetch(ev, args[0], "fetchurl")
+pub fn fetchurl<'a>(ev: &Eval<'a>, arg: Value<'a>) -> R<'a> {
+    fetch(ev, arg, "fetchurl")
 }
 
 fn fetch<'a>(ev: &Eval<'a>, arg: Value<'a>, who: &str) -> R<'a> {

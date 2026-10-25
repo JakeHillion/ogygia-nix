@@ -12,18 +12,18 @@ fn flakes_disabled<'a>() -> R<'a> {
     )
 }
 
-pub fn get_flake<'a>(ev: &Eval<'a>, args: &[Value<'a>]) -> R<'a> {
-    ev.force_str_no_ctx(args[0])?;
+pub fn get_flake<'a>(ev: &Eval<'a>, flake_ref: Value<'a>) -> R<'a> {
+    ev.force_str_no_ctx(flake_ref)?;
     flakes_disabled()
 }
 
-pub fn parse_flake_ref<'a>(ev: &Eval<'a>, args: &[Value<'a>]) -> R<'a> {
-    ev.force_str_no_ctx(args[0])?;
+pub fn parse_flake_ref<'a>(ev: &Eval<'a>, flake_ref: Value<'a>) -> R<'a> {
+    ev.force_str_no_ctx(flake_ref)?;
     flakes_disabled()
 }
 
-pub fn flake_ref_to_string<'a>(ev: &Eval<'a>, args: &[Value<'a>]) -> R<'a> {
-    let set = ev.force_attrs(args[0])?;
+pub fn flake_ref_to_string<'a>(ev: &Eval<'a>, set: Value<'a>) -> R<'a> {
+    let set = ev.force_attrs(set)?;
     for e in set.entries {
         match ev.force(e.value)? {
             Value::Str(_) | Value::Int(_) | Value::Bool(_) => {}
@@ -36,7 +36,11 @@ pub fn flake_ref_to_string<'a>(ev: &Eval<'a>, args: &[Value<'a>]) -> R<'a> {
             }
         }
     }
-    match set.get(ev.sym("type")).map(|v| ev.force(v)).transpose()? {
+    match set
+        .get(ev.ctx.syms.type_)
+        .map(|v| ev.force(v))
+        .transpose()?
+    {
         None => eval_err("'type' attribute to specify input scheme is required but not provided"),
         Some(Value::Str(_)) => flakes_disabled(),
         Some(_) => eval_err("input attribute 'type' is not a string"),

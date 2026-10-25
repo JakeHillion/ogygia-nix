@@ -52,8 +52,8 @@ pub fn derivation_lambda<'a>(ev: &Eval<'a>) -> R<'a> {
     ev.eval(expr, ev.root_env())
 }
 
-pub fn placeholder<'a>(ev: &Eval<'a>, args: &[Value<'a>]) -> R<'a> {
-    let output = ev.force_str_no_ctx(args[0])?;
+pub fn placeholder<'a>(ev: &Eval<'a>, output: Value<'a>) -> R<'a> {
+    let output = ev.force_str_no_ctx(output)?;
     let mut data = b"nix-output:".to_vec();
     data.extend_from_slice(output);
     let h = Sha256::digest(&data);
@@ -92,8 +92,8 @@ fn parse_hash_mode<'a>(mode: &str, name: &str) -> R<'a, bool> {
     }
 }
 
-pub fn derivation_strict<'a>(ev: &Eval<'a>, args: &[Value<'a>]) -> R<'a> {
-    let attrs = ev.force_attrs(args[0])?;
+pub fn derivation_strict<'a>(ev: &Eval<'a>, attrs: Value<'a>) -> R<'a> {
+    let attrs = ev.force_attrs(attrs)?;
     let syms = &ev.ctx.syms;
     let Some(name_v) = attrs.get(syms.name) else {
         return eval_err("required attribute 'name' missing");

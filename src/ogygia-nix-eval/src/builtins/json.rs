@@ -9,10 +9,10 @@ use crate::value::R;
 use crate::value::Value;
 use crate::value::eval_err;
 
-pub fn to_json<'a>(ev: &Eval<'a>, args: &[Value<'a>]) -> R<'a> {
+pub fn to_json<'a>(ev: &Eval<'a>, v: Value<'a>) -> R<'a> {
     let mut out = Vec::new();
     let mut ctx = Vec::new();
-    write_json(ev, args[0], &mut out, &mut ctx)?;
+    write_json(ev, v, &mut out, &mut ctx)?;
     Ok(ev.str_with_ctx(&out, ctx))
 }
 
@@ -140,8 +140,8 @@ fn write_json_level<'a>(
     Ok(())
 }
 
-pub fn from_json<'a>(ev: &Eval<'a>, args: &[Value<'a>]) -> R<'a> {
-    let s = ev.force_str_no_ctx(args[0])?;
+pub fn from_json<'a>(ev: &Eval<'a>, s: Value<'a>) -> R<'a> {
+    let s = ev.force_str_no_ctx(s)?;
     let Ok(text) = std::str::from_utf8(s) else {
         return eval_err("JSON parse error: invalid UTF-8");
     };
@@ -405,8 +405,8 @@ impl JsonParser<'_> {
     }
 }
 
-pub fn from_toml<'a>(ev: &Eval<'a>, args: &[Value<'a>]) -> R<'a> {
-    let s = ev.force_str_no_ctx(args[0])?;
+pub fn from_toml<'a>(ev: &Eval<'a>, s: Value<'a>) -> R<'a> {
+    let s = ev.force_str_no_ctx(s)?;
     let text = String::from_utf8_lossy(s);
     if let Some(e) = toml_1_1_syntax(&text) {
         return eval_err(format!("while parsing TOML: {e}"));

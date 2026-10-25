@@ -10,18 +10,18 @@ use crate::value::Value;
 use crate::value::anyhow_err;
 use crate::value::eval_err;
 
-pub fn has_context<'a>(ev: &Eval<'a>, args: &[Value<'a>]) -> R<'a> {
-    let s = ev.force_str(args[0])?;
+pub fn has_context<'a>(ev: &Eval<'a>, s: Value<'a>) -> R<'a> {
+    let s = ev.force_str(s)?;
     Ok(Value::Bool(!s.ctx.is_empty()))
 }
 
-pub fn unsafe_discard_string_context<'a>(ev: &Eval<'a>, args: &[Value<'a>]) -> R<'a> {
-    let (s, _) = ev.coerce_to_string(args[0], crate::eval::Coerce::INTERP)?;
+pub fn unsafe_discard_string_context<'a>(ev: &Eval<'a>, s: Value<'a>) -> R<'a> {
+    let (s, _) = ev.coerce_to_string(s, crate::eval::Coerce::INTERP)?;
     Ok(ev.str_val(&s, &[]))
 }
 
-pub fn unsafe_discard_output_dependency<'a>(ev: &Eval<'a>, args: &[Value<'a>]) -> R<'a> {
-    let (s, ctx) = ev.coerce_to_string(args[0], crate::eval::Coerce::INTERP)?;
+pub fn unsafe_discard_output_dependency<'a>(ev: &Eval<'a>, s: Value<'a>) -> R<'a> {
+    let (s, ctx) = ev.coerce_to_string(s, crate::eval::Coerce::INTERP)?;
     let ctx = ctx
         .into_iter()
         .map(|c| match c {
@@ -32,8 +32,8 @@ pub fn unsafe_discard_output_dependency<'a>(ev: &Eval<'a>, args: &[Value<'a>]) -
     Ok(ev.str_with_ctx(&s, ctx))
 }
 
-pub fn add_drv_output_dependencies<'a>(ev: &Eval<'a>, args: &[Value<'a>]) -> R<'a> {
-    let (s, ctx) = ev.coerce_to_string(args[0], crate::eval::Coerce::INTERP)?;
+pub fn add_drv_output_dependencies<'a>(ev: &Eval<'a>, s: Value<'a>) -> R<'a> {
+    let (s, ctx) = ev.coerce_to_string(s, crate::eval::Coerce::INTERP)?;
     let [Ctx::Opaque(p)] = ctx.as_slice() else {
         return eval_err(
             "context of string passed to 'addDrvOutputDependencies' must refer to exactly one derivation",
@@ -54,8 +54,8 @@ struct Info<'a> {
     outputs: Vec<&'a str>,
 }
 
-pub fn get_context<'a>(ev: &Eval<'a>, args: &[Value<'a>]) -> R<'a> {
-    let s = ev.force_str(args[0])?;
+pub fn get_context<'a>(ev: &Eval<'a>, s: Value<'a>) -> R<'a> {
+    let s = ev.force_str(s)?;
     let mut infos: BTreeMap<&'a str, Info<'a>> = BTreeMap::new();
     for c in s.ctx {
         match *c {
@@ -90,9 +90,9 @@ pub fn get_context<'a>(ev: &Eval<'a>, args: &[Value<'a>]) -> R<'a> {
     Ok(ev.attrs(entries))
 }
 
-pub fn append_context<'a>(ev: &Eval<'a>, args: &[Value<'a>]) -> R<'a> {
-    let s = ev.force_str(args[0])?;
-    let set = ev.force_attrs(args[1])?;
+pub fn append_context<'a>(ev: &Eval<'a>, s: Value<'a>, set: Value<'a>) -> R<'a> {
+    let s = ev.force_str(s)?;
+    let set = ev.force_attrs(set)?;
     let mut ctx = s.ctx.to_vec();
     let syms = &ev.ctx.syms;
     for e in set.entries {
