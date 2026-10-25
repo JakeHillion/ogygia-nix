@@ -4,8 +4,10 @@
 //! reused across evaluations; each evaluation runs in a session ([`Eval`])
 //! whose values live in an arena dropped when the session ends.
 //!
-//! Evaluation recurses on the native stack, so run it through
-//! [`run_with_stack`] rather than on a thread with a default-sized stack.
+//! Compiling recurses on the native stack, and builtins and walks over
+//! values nest evaluation on it a bounded number of times, so run both
+//! through [`run_with_stack`] rather than on a thread with a default-sized
+//! stack.
 //! Equivalence with the real Nix evaluator is checked by the tests in
 //! `tests/equiv`.
 
@@ -50,9 +52,8 @@ const fn current_system() -> &'static str {
     }
 }
 
-/// Stack size for evaluation threads. Deeply nested evaluation (the NixOS
-/// module system, long `foldl'` chains of thunks) needs far more than the
-/// default.
+/// Stack size for evaluation threads. Compiling deeply nested syntax (long
+/// chains of binary operators) needs far more than the default.
 const STACK_SIZE: usize = 1 << 30;
 
 /// Run `f` on a fresh thread with a stack large enough for evaluation.

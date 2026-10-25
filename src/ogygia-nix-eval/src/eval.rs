@@ -10,15 +10,9 @@ use enum_map::EnumMap;
 
 use crate::builtins;
 use crate::builtins::Builtin;
-use crate::builtins::Kind;
 use crate::context::Context;
-use crate::ir::AttrKey;
-use crate::ir::AttrValue;
-use crate::ir::AttrsDef;
-use crate::ir::BinOp;
 use crate::ir::Expr;
 use crate::ir::ExprRef;
-use crate::ir::Param;
 use crate::ir::Pos;
 use crate::path::canon_path;
 use crate::store::StorePath;
@@ -32,8 +26,6 @@ use crate::value::ErrorKind;
 use crate::value::List;
 use crate::value::NixStr;
 use crate::value::PathV;
-use crate::value::PrimOpApp;
-use crate::value::PrimOpFn;
 use crate::value::R;
 use crate::value::Thunk;
 use crate::value::ThunkState;
@@ -41,6 +33,11 @@ use crate::value::Value;
 use crate::value::anyhow_err;
 use crate::value::error;
 use crate::value::eval_err;
+
+mod machine;
+
+use machine::Frame;
+use machine::Step;
 
 /// Nix's default `max-call-depth`.
 const MAX_CALL_DEPTH: usize = 10_000;
@@ -92,6 +89,10 @@ pub struct Eval<'a> {
     globals: EnumMap<Builtin, Value<'a>>,
     import_cache: RefCell<HashMap<String, Value<'a>>>,
     depth: Cell<usize>,
+    /// Emptied frame stacks of finished evaluation loops, for reuse.
+    spare_stacks: RefCell<Vec<Vec<Frame<'a>>>>,
+    /// The depth the innermost evaluation loop started at.
+    run_depth: Cell<Option<usize>>,
     pub(crate) empty_attrs: &'a Attrs<'a>,
     pub(crate) empty_list: &'a List<'a>,
 }
@@ -144,6 +145,8 @@ impl<'a> Eval<'a> {
             globals: EnumMap::from_fn(|_| Value::Null),
             import_cache: RefCell::new(HashMap::new()),
             depth: Cell::new(0),
+            spare_stacks: RefCell::new(Vec::new()),
+            run_depth: Cell::new(None),
             empty_attrs: bump.alloc(Attrs { entries: &[] }),
             empty_list: bump.alloc(List { items: &[] }),
         };
@@ -240,40 +243,9 @@ impl<'a> Eval<'a> {
     // ---- forcing ----------------------------------------------------------
 
     pub fn force(&self, v: Value<'a>) -> R<'a> {
-        match v {
-            Value::Thunk(t) => self.force_thunk(t),
-            v => Ok(v),
-        }
-    }
-
-    fn force_thunk(&self, t: &'a Thunk<'a>) -> R<'a> {
-        let state = t.0.get();
-        let result = match state {
-            ThunkState::Done(v) => return Ok(v),
-            ThunkState::Blackhole => {
-                return Err(error(
-                    ErrorKind::InfiniteRecursion,
-                    "infinite recursion encountered",
-                ));
-            }
-            ThunkState::Expr(e, env) => {
-                t.0.set(ThunkState::Blackhole);
-                self.eval(e, env)
-            }
-            ThunkState::App(f, x) => {
-                t.0.set(ThunkState::Blackhole);
-                self.call(f, &[x], None)
-            }
-        };
-        match result {
-            Ok(v) => {
-                t.0.set(ThunkState::Done(v));
-                Ok(v)
-            }
-            Err(e) => {
-                t.0.set(state);
-                Err(e)
-            }
+        match machine::whnf(v) {
+            Some(v) => Ok(v),
+            None => self.run(Step::Force(v)),
         }
     }
 
@@ -411,164 +383,7 @@ impl<'a> Eval<'a> {
     }
 
     pub fn eval(&self, e: ExprRef<'a>, env: &'a Env<'a>) -> R<'a> {
-        match e {
-            Expr::Null => Ok(Value::Null),
-            Expr::Bool(b) => Ok(Value::Bool(*b)),
-            Expr::Int(i) => Ok(Value::Int(*i)),
-            Expr::Float(f) => Ok(Value::Float(*f)),
-            Expr::Str(s) => Ok(Value::Str(s)),
-            Expr::Path(p) => Ok(Value::Path(p)),
-            Expr::Var(d, i) => self.force(env.up(*d).slots[*i as usize].get()),
-            Expr::Global(b) => self.force(self.globals[*b]),
-            Expr::WithVar { name, withs, pos } => {
-                for &depth in withs.iter() {
-                    let ns = env.up(depth).slots[0].get();
-                    let attrs = self.force_attrs(ns)?;
-                    if let Some(v) = attrs.get(*name) {
-                        return self.force(v);
-                    }
-                }
-                eval_err(format!(
-                    "undefined variable '{}' at {pos}",
-                    self.name(*name)
-                ))
-            }
-            Expr::Lambda(def) => Ok(Value::Lambda(self.bump.alloc(Closure { def, env }))),
-            Expr::List(items) => {
-                if items.is_empty() {
-                    return Ok(Value::List(self.empty_list));
-                }
-                let items = self
-                    .bump
-                    .alloc_slice_fill_iter(items.iter().map(|i| self.lazy(i, env)));
-                Ok(Value::List(self.bump.alloc(List { items })))
-            }
-            Expr::Attrs(def) => self.eval_attrs(def, env),
-            Expr::Select {
-                expr,
-                path,
-                default,
-                pos,
-            } => {
-                // Each name is evaluated before the value it selects from is
-                // forced.
-                let mut v = self.eval(expr, env)?;
-                for key in path.iter() {
-                    let name = self.attr_key(key, env)?;
-                    v = self.force(v)?;
-                    let found = match v {
-                        Value::Attrs(a) => a.get(name),
-                        _ => None,
-                    };
-                    match found {
-                        Some(x) => v = x,
-                        None => {
-                            if let Some(d) = default {
-                                return self.eval(d, env);
-                            }
-                            return match v {
-                                Value::Attrs(_) => eval_err(format!(
-                                    "attribute '{}' missing at {pos}",
-                                    self.name(name)
-                                )),
-                                other => eval_err(format!(
-                                    "expected a set but found {} while selecting attribute '{}' at {pos}",
-                                    self.describe(other),
-                                    self.name(name)
-                                )),
-                            };
-                        }
-                    }
-                }
-                self.force(v)
-            }
-            Expr::HasAttr { expr, path } => {
-                // Only the sets along the path are forced, never the value of
-                // the last attribute, and each set is forced before the name
-                // looked up in it is evaluated.
-                let mut v = self.lazy(expr, env);
-                for key in path.iter() {
-                    let set = self.force(v)?;
-                    let name = self.attr_key(key, env)?;
-                    match set {
-                        Value::Attrs(a) => match a.get(name) {
-                            Some(x) => v = x,
-                            None => return Ok(Value::Bool(false)),
-                        },
-                        _ => return Ok(Value::Bool(false)),
-                    }
-                }
-                Ok(Value::Bool(true))
-            }
-            Expr::Apply { func, args, pos } => {
-                let mut f = self.eval(func, env)?;
-                for arg in args.iter() {
-                    let a = self.lazy(arg, env);
-                    f = self.call(f, &[a], Some(*pos))?;
-                }
-                Ok(f)
-            }
-            Expr::Let(def) => {
-                let env2 = self.new_frame(def.slots, env);
-                self.eval(def.body, env2)
-            }
-            Expr::With { namespace, body } => {
-                let ns = self.lazy(namespace, env);
-                let slots = self.bump.alloc_slice_fill_with(1, |_| Cell::new(ns));
-                let env2 = self.bump.alloc(Env {
-                    parent: Some(env),
-                    slots,
-                });
-                self.eval(body, env2)
-            }
-            Expr::If(c, t, f) => match self.eval(c, env)? {
-                Value::Bool(true) => self.eval(t, env),
-                Value::Bool(false) => self.eval(f, env),
-                other => self.type_error("a Boolean", other),
-            },
-            Expr::Assert { cond, body, pos } => match self.eval(cond, env)? {
-                Value::Bool(true) => self.eval(body, env),
-                Value::Bool(false) => Err(error(
-                    ErrorKind::Assert,
-                    format!("assertion failed at {pos}"),
-                )),
-                other => self.type_error("a Boolean", other),
-            },
-            Expr::Not(e) => match self.eval(e, env)? {
-                Value::Bool(b) => Ok(Value::Bool(!b)),
-                other => self.type_error("a Boolean", other),
-            },
-            Expr::Bin(op, l, r, pos) => self.eval_bin(*op, l, r, env, *pos),
-            Expr::InterpStr(parts, _) => {
-                let mut buf = Vec::new();
-                let mut ctx = Vec::new();
-                for p in parts.iter() {
-                    let v = self.eval(p, env)?;
-                    self.coerce_into(v, Coerce::INTERP, &mut buf, &mut ctx)?;
-                }
-                Ok(self.str_with_ctx(&buf, ctx))
-            }
-            Expr::InterpPath(parts, _) => {
-                let mut buf = Vec::new();
-                let mut ctx = Vec::new();
-                for (i, p) in parts.iter().enumerate() {
-                    let v = self.eval(p, env)?;
-                    match (i, v) {
-                        (0, Value::Path(p)) => {
-                            buf.extend_from_slice(crate::path::abs(p.0).as_bytes())
-                        }
-                        _ => self.coerce_into(v, Coerce::PLAIN, &mut buf, &mut ctx)?,
-                    }
-                }
-                if !ctx.is_empty() {
-                    return eval_err(
-                        "a string that refers to a store path cannot be appended to a path",
-                    );
-                }
-                Ok(self.path_val(&canon_path(&String::from_utf8_lossy(&buf))))
-            }
-            Expr::CurPos(pos) => Ok(self.pos_value(*pos)),
-        }
+        self.run(Step::Eval(e, env))
     }
 
     /// `{ file, line, column }` for `pos`, or null for positions not in a file.
@@ -603,17 +418,6 @@ impl<'a> Eval<'a> {
         self.str_val(buf, &ctx)
     }
 
-    fn attr_key(&self, key: &'a AttrKey<'a>, env: &'a Env<'a>) -> R<'a, Sym> {
-        match key {
-            AttrKey::Static(s) => Ok(*s),
-            AttrKey::Dynamic(e) => {
-                let v = self.eval(e, env)?;
-                let s = self.force_str_no_ctx(v)?;
-                Ok(self.ctx.interner.intern_bytes(s))
-            }
-        }
-    }
-
     pub(crate) fn new_frame(&self, inits: &'a [ExprRef<'a>], parent: &'a Env<'a>) -> &'a Env<'a> {
         let slots = self
             .bump
@@ -628,48 +432,6 @@ impl<'a> Eval<'a> {
         env
     }
 
-    fn eval_attrs(&self, def: &'a AttrsDef<'a>, env: &'a Env<'a>) -> R<'a> {
-        let env2 = match def.frame {
-            Some(inits) => self.new_frame(inits, env),
-            None => env,
-        };
-        let mut entries: Vec<Entry<'a>> = def
-            .statics
-            .iter()
-            .map(|a| Entry {
-                name: a.name,
-                pos: Some(a.pos),
-                value: match &a.value {
-                    AttrValue::Expr(e) => self.lazy(e, env2),
-                    AttrValue::Slot(i) => env2.slots[*i as usize].get(),
-                },
-            })
-            .collect();
-        if def.dynamics.is_empty() {
-            return Ok(self.attrs_sorted(&entries));
-        }
-        for d in def.dynamics {
-            let name = match self.eval(d.name, env2)? {
-                Value::Null => continue,
-                v => self.ctx.interner.intern_bytes(self.force_str_no_ctx(v)?),
-            };
-            if entries.iter().any(|e| e.name == name) {
-                return eval_err(format!(
-                    "dynamic attribute '{}' already defined at {}",
-                    self.name(name),
-                    d.pos
-                ));
-            }
-            entries.push(Entry {
-                name,
-                value: self.lazy(d.value, env2),
-                pos: Some(d.pos),
-            });
-        }
-        entries.sort_by_key(|e| e.name);
-        Ok(self.attrs_sorted(&entries))
-    }
-
     // ---- function calls ---------------------------------------------------
 
     /// Apply `f` to each of `args` in turn. `pos` is where the application
@@ -677,133 +439,31 @@ impl<'a> Eval<'a> {
     pub fn call(&self, f: Value<'a>, args: &[Value<'a>], pos: Option<Pos<'a>>) -> R<'a> {
         let mut f = f;
         for &arg in args {
-            f = self.force(f)?;
-            f = self.deeper(|| match f {
-                Value::Lambda(c) => self.call_lambda(c, arg),
-                Value::PrimOp(op) => self.call_primop(op, &[], arg),
-                Value::PrimOpApp(app) => self.call_primop(app.op, app.args, arg),
-                Value::Attrs(a) if a.get(self.ctx.syms.functor).is_some() => {
-                    let functor = a.get(self.ctx.syms.functor).unwrap();
-                    let g = self.call(functor, &[f], None)?;
-                    self.call(g, &[arg], pos)
-                }
-                other => eval_err(format!(
-                    "attempt to call something which is not a function but {}{}",
-                    self.describe(other),
-                    pos.map(|p| format!(" at {p}")).unwrap_or_default()
-                )),
-            })?;
+            f = self.run(Step::Call(f, arg, pos))?;
         }
         Ok(f)
     }
 
-    /// Run `f` one level deeper: in a call, or one level down a walk over a
-    /// value (deep forcing, comparison, coercion, serialisation). Each level
-    /// counts towards `max-call-depth`.
+    /// Run `f` one level down a walk over a value (deep forcing, comparison,
+    /// coercion, serialisation), which counts towards `max-call-depth` like
+    /// a call.
     pub(crate) fn deeper<T>(&self, f: impl FnOnce() -> R<'a, T>) -> R<'a, T> {
+        let depth = self.enter()?;
+        let r = f();
+        self.depth.set(depth);
+        r
+    }
+
+    /// Count one level towards `max-call-depth`, returning the depth to
+    /// restore on leaving it.
+    fn enter(&self) -> R<'a, usize> {
         let depth = self.depth.get();
         // Like Nix, fail only once the depth is already past the limit.
         if depth > MAX_CALL_DEPTH {
             return eval_err("stack overflow; max-call-depth exceeded");
         }
         self.depth.set(depth + 1);
-        let r = f();
-        self.depth.set(depth);
-        r
-    }
-
-    /// Apply `op`, already given `prev`, to one more argument.
-    fn call_primop(&self, op: Builtin, prev: &[Value<'a>], arg: Value<'a>) -> R<'a> {
-        let Kind::PrimOp(f) = op.kind() else {
-            unreachable!("only a primop is applied")
-        };
-        let r = match (f, prev) {
-            (PrimOpFn::F1(f), []) => f(self, arg)?,
-            (PrimOpFn::F2(f), [a]) => f(self, *a, arg)?,
-            (PrimOpFn::F3(f), [a, b]) => f(self, *a, *b, arg)?,
-            _ => {
-                let args = self
-                    .bump
-                    .alloc_slice_fill_with(prev.len() + 1, |i| prev.get(i).copied().unwrap_or(arg));
-                return Ok(Value::PrimOpApp(self.bump.alloc(PrimOpApp { op, args })));
-            }
-        };
-        self.force(r)
-    }
-
-    fn call_lambda(&self, c: &'a Closure<'a>, arg: Value<'a>) -> R<'a> {
-        let def = c.def;
-        let slots = self
-            .bump
-            .alloc_slice_fill_with(def.nslots(), |_| Cell::new(Value::Null));
-        let env: &'a Env<'a> = self.bump.alloc(Env {
-            parent: Some(c.env),
-            slots,
-        });
-        match &def.param {
-            Param::Ident(_) => slots[0].set(arg),
-            Param::Pattern {
-                formals,
-                ellipsis,
-                at,
-            } => {
-                let attrs = match self.force(arg)? {
-                    Value::Attrs(a) => a,
-                    other => {
-                        return eval_err(format!(
-                            "expected a set but found {} while evaluating the value passed for the lambda argument at {}",
-                            self.describe(other),
-                            def.pos
-                        ));
-                    }
-                };
-                let mut used = 0;
-                for (slot, formal) in slots.iter().zip(formals.iter()) {
-                    match attrs.get(formal.name) {
-                        Some(v) => {
-                            used += 1;
-                            slot.set(v);
-                        }
-                        None => match formal.default {
-                            Some(d) => slot.set(self.lazy_slot(d, env)),
-                            None => {
-                                return eval_err(format!(
-                                    "function '{}' called without required argument '{}' at {}",
-                                    self.lambda_name(def.name),
-                                    self.name(formal.name),
-                                    def.pos
-                                ));
-                            }
-                        },
-                    }
-                }
-                if !ellipsis && used != attrs.len() {
-                    let bad = attrs
-                        .sorted(self.ctx)
-                        .into_iter()
-                        .find(|e| !formals.iter().any(|f| f.name == e.name));
-                    if let Some(bad) = bad {
-                        return eval_err(format!(
-                            "function '{}' called with unexpected argument '{}' at {}",
-                            self.lambda_name(def.name),
-                            self.name(bad.name),
-                            def.pos
-                        ));
-                    }
-                }
-                if at.is_some() {
-                    slots[formals.len()].set(arg);
-                }
-            }
-        }
-        self.eval(def.body, env).map_err(|mut e| {
-            e.trace.push(format!(
-                "while calling '{}' defined at {}",
-                self.lambda_name(def.name),
-                def.pos
-            ));
-            e
-        })
+        Ok(depth)
     }
 
     fn lambda_name(&self, name: Option<Sym>) -> &'a str {
@@ -814,71 +474,6 @@ impl<'a> Eval<'a> {
     }
 
     // ---- operators --------------------------------------------------------
-
-    fn eval_bin(
-        &self,
-        op: BinOp,
-        l: ExprRef<'a>,
-        r: ExprRef<'a>,
-        env: &'a Env<'a>,
-        pos: Pos<'a>,
-    ) -> R<'a> {
-        let operands =
-            || -> R<'a, (Value<'a>, Value<'a>)> { Ok((self.eval(l, env)?, self.eval(r, env)?)) };
-        match op {
-            BinOp::And => Ok(Value::Bool(
-                self.bool_operand(l, env)? && self.bool_operand(r, env)?,
-            )),
-            BinOp::Or => Ok(Value::Bool(
-                self.bool_operand(l, env)? || self.bool_operand(r, env)?,
-            )),
-            BinOp::Impl => Ok(Value::Bool(
-                !self.bool_operand(l, env)? || self.bool_operand(r, env)?,
-            )),
-            BinOp::Eq => {
-                let (a, b) = operands()?;
-                Ok(Value::Bool(self.eq(a, b)?))
-            }
-            BinOp::Neq => {
-                let (a, b) = operands()?;
-                Ok(Value::Bool(!self.eq(a, b)?))
-            }
-            BinOp::Concat => {
-                let (a, b) = operands()?;
-                let a = self.force_list(a)?;
-                let b = self.force_list(b)?;
-                if a.is_empty() {
-                    return Ok(self.list(b));
-                }
-                if b.is_empty() {
-                    return Ok(self.list(a));
-                }
-                let mut v = Vec::with_capacity(a.len() + b.len());
-                v.extend_from_slice(a);
-                v.extend_from_slice(b);
-                Ok(self.list(&v))
-            }
-            // Nix evaluates `b` as a set before `a`.
-            BinOp::Update => {
-                let b = self.eval(r, env)?;
-                let b = self.force_attrs(b)?;
-                let a = self.eval(l, env)?;
-                let a = self.force_attrs(a)?;
-                Ok(self.update(a, b))
-            }
-            BinOp::Add => {
-                let a = self.eval(l, env)?;
-                self.add(a, || self.eval(r, env), pos)
-            }
-        }
-    }
-
-    fn bool_operand(&self, e: ExprRef<'a>, env: &'a Env<'a>) -> R<'a, bool> {
-        match self.eval(e, env)? {
-            Value::Bool(b) => Ok(b),
-            other => self.type_error("a Boolean", other),
-        }
-    }
 
     /// `a // b`.
     pub fn update(&self, a: &'a Attrs<'a>, b: &'a Attrs<'a>) -> Value<'a> {
@@ -911,41 +506,6 @@ impl<'a> Eval<'a> {
         out.extend_from_slice(&ae[i..]);
         out.extend_from_slice(&be[j..]);
         self.attrs_sorted(&out)
-    }
-
-    /// `a + b`, where `b` is evaluated only after a string-like `a` is
-    /// coerced, as Nix does.
-    pub fn add(&self, a: Value<'a>, b: impl FnOnce() -> R<'a>, pos: Pos<'a>) -> R<'a> {
-        let a = self.force(a)?;
-        match a {
-            Value::Int(_) | Value::Float(_) => self.arith(Arith::Add, a, b()?, Some(pos)),
-            Value::Path(p) => {
-                let b = self.force(b()?)?;
-                let mut buf = crate::path::abs(p.0).as_bytes().to_vec();
-                let mut ctx = Vec::new();
-                self.coerce_into(b, Coerce::PLAIN, &mut buf, &mut ctx)?;
-                if !ctx.is_empty() {
-                    return eval_err(
-                        "a string that refers to a store path cannot be appended to a path",
-                    );
-                }
-                Ok(self.path_val(&canon_path(&String::from_utf8_lossy(&buf))))
-            }
-            // Only a string on the left copies paths to the store; a set
-            // that coerces to a string concatenates without copying.
-            _ => {
-                let how = match a {
-                    Value::Str(_) => Coerce::INTERP,
-                    _ => Coerce::PLAIN,
-                };
-                let mut buf = Vec::new();
-                let mut ctx = Vec::new();
-                self.coerce_into(a, how, &mut buf, &mut ctx)?;
-                let b = self.force(b()?)?;
-                self.coerce_into(b, how, &mut buf, &mut ctx)?;
-                Ok(self.str_with_ctx(&buf, ctx))
-            }
-        }
     }
 
     /// `a op b` on numbers. `pos` is where the operator is written, if it is
