@@ -1,8 +1,8 @@
 //! Arithmetic, type predicates, control flow and other small builtins.
 
+use crate::eval::Arith;
 use crate::eval::Coerce;
 use crate::eval::Eval;
-use crate::ir::BinOp;
 use crate::ir::Param;
 use crate::value::Entry;
 use crate::value::ErrorKind;
@@ -11,7 +11,7 @@ use crate::value::Value;
 use crate::value::error;
 use crate::value::eval_err;
 
-fn arith<'a>(ev: &Eval<'a>, op: BinOp, a: Value<'a>, b: Value<'a>) -> R<'a> {
+fn arith<'a>(ev: &Eval<'a>, op: Arith, a: Value<'a>, b: Value<'a>) -> R<'a> {
     let a = ev.force(a)?;
     let b = ev.force(b)?;
     match (a, b) {
@@ -23,19 +23,19 @@ fn arith<'a>(ev: &Eval<'a>, op: BinOp, a: Value<'a>, b: Value<'a>) -> R<'a> {
 }
 
 pub fn add<'a>(ev: &Eval<'a>, a: Value<'a>, b: Value<'a>) -> R<'a> {
-    arith(ev, BinOp::Add, a, b)
+    arith(ev, Arith::Add, a, b)
 }
 
 pub fn sub<'a>(ev: &Eval<'a>, a: Value<'a>, b: Value<'a>) -> R<'a> {
-    arith(ev, BinOp::Sub, a, b)
+    arith(ev, Arith::Sub, a, b)
 }
 
 pub fn mul<'a>(ev: &Eval<'a>, a: Value<'a>, b: Value<'a>) -> R<'a> {
-    arith(ev, BinOp::Mul, a, b)
+    arith(ev, Arith::Mul, a, b)
 }
 
 pub fn div<'a>(ev: &Eval<'a>, a: Value<'a>, b: Value<'a>) -> R<'a> {
-    arith(ev, BinOp::Div, a, b)
+    arith(ev, Arith::Div, a, b)
 }
 
 fn bits<'a>(ev: &Eval<'a>, a: Value<'a>, b: Value<'a>, f: fn(i64, i64) -> i64) -> R<'a> {

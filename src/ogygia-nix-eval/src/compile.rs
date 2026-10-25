@@ -859,7 +859,11 @@ impl<'a> Compiler<'a> {
                 let inner = self.expr(&child(u.expr())?)?;
                 match u.operator() {
                     Some(ast::UnaryOpKind::Invert) => Expr::Not(inner, pos),
-                    Some(ast::UnaryOpKind::Negate) => Expr::Neg(inner, pos),
+                    // `-e` is `__sub 0 e`.
+                    Some(ast::UnaryOpKind::Negate) => {
+                        let zero = self.leak(Expr::Int(0));
+                        self.call(self.ctx.syms.sub, &[zero, inner], pos)?
+                    }
                     None => return err(format!("syntax error: unknown unary operator at {pos}")),
                 }
             }
@@ -908,20 +912,31 @@ impl<'a> Compiler<'a> {
             .find(|t| ast::BinOpKind::from_kind(t.kind()).is_some())
             .map(|t| self.at(u32::from(t.text_range().start())))
             .unwrap_or(pos);
+        let s = &self.ctx.syms;
+        // Nix desugars these operators to calls of builtins named by
+        // variables, which lexical bindings can shadow. `a > b` is
+        // `__lessThan b a`, which evaluates `b` first, and `a <= b` and
+        // `a >= b` are the negations of `a > b` and `a < b`.
         let op = match op {
+            ast::BinOpKind::Sub => return self.call(s.sub, &[lhs, rhs], op_pos),
+            ast::BinOpKind::Mul => return self.call(s.mul, &[lhs, rhs], op_pos),
+            ast::BinOpKind::Div => return self.call(s.div, &[lhs, rhs], op_pos),
+            ast::BinOpKind::Less => return self.call(s.less_than, &[lhs, rhs], op_pos),
+            ast::BinOpKind::More => return self.call(s.less_than, &[rhs, lhs], op_pos),
+            ast::BinOpKind::LessOrEq => {
+                let gt = self.call(s.less_than, &[rhs, lhs], op_pos)?;
+                return Ok(Expr::Not(self.leak(gt), op_pos));
+            }
+            ast::BinOpKind::MoreOrEq => {
+                let lt = self.call(s.less_than, &[lhs, rhs], op_pos)?;
+                return Ok(Expr::Not(self.leak(lt), op_pos));
+            }
             ast::BinOpKind::Concat => BinOp::Concat,
             ast::BinOpKind::Update => BinOp::Update,
             ast::BinOpKind::Add => BinOp::Add,
-            ast::BinOpKind::Sub => BinOp::Sub,
-            ast::BinOpKind::Mul => BinOp::Mul,
-            ast::BinOpKind::Div => BinOp::Div,
             ast::BinOpKind::And => BinOp::And,
             ast::BinOpKind::Equal => BinOp::Eq,
             ast::BinOpKind::Implication => BinOp::Impl,
-            ast::BinOpKind::Less => BinOp::Lt,
-            ast::BinOpKind::LessOrEq => BinOp::Le,
-            ast::BinOpKind::More => BinOp::Gt,
-            ast::BinOpKind::MoreOrEq => BinOp::Ge,
             ast::BinOpKind::NotEqual => BinOp::Neq,
             ast::BinOpKind::Or => BinOp::Or,
             ast::BinOpKind::PipeRight | ast::BinOpKind::PipeLeft => {
@@ -931,6 +946,16 @@ impl<'a> Compiler<'a> {
             }
         };
         Ok(Expr::Bin(op, lhs, rhs, op_pos))
+    }
+
+    /// A call of the function the variable `name` resolves to.
+    fn call(&self, name: Sym, args: &[ExprRef<'a>], pos: Pos<'a>) -> CResult<Expr<'a>> {
+        let func = self.resolve(name, 0, pos)?;
+        Ok(Expr::Apply {
+            func: self.leak(func),
+            args: self.ctx.alloc_slice(args.to_vec()),
+            pos,
+        })
     }
 
     fn lambda(&mut self, l: &ast::Lambda, name: Option<Sym>) -> CResult<&'a LambdaDef<'a>> {
