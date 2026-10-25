@@ -137,8 +137,10 @@ corpus the inputs that add coverage within their shard, and moves to
 `DIR/crashed` those that crashed, hung or ran out of memory, so that a
 broken revision cannot shrink the corpus and fuzzing is not handed inputs
 that kill it. A fresh split each time catches inputs whose coverage
-duplicates another's in a different shard. It uses `DIR/minimise/` for
-scratch space, and leaves the corpus as it was if anything fails.
+duplicates another's in a different shard. It merges in a scratch
+directory under `$TMPDIR`, builds the new corpus in a short-lived
+`DIR/.minimise-*` to swap it in, and leaves the corpus as it was if
+anything fails.
 
 `run` does this after the recheck, then fuzzes with `-keep_seed=1`, so
 that libFuzzer does not first replay the whole corpus in one process.
