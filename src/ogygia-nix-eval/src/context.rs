@@ -107,52 +107,51 @@ impl Context {
     /// a directory, as [`compile_str`](Self::compile_str) does. Repeated calls
     /// return the same expression.
     pub fn compile_file(&self, path: &str) -> Result<ExprRef<'_>> {
-        if let Some(e) = self.files.borrow().get(path) {
-            return Ok(e);
-        }
-        let text = self.io.read_to_string(path)?;
-        let dir = crate::path::dir_of(path);
-        let expr = compile::compile(
-            self,
-            self.source(Some(path), &text),
-            dir,
-            self.io.pure,
-            None,
-        )
-        .map_err(|e| anyhow::anyhow!("{}", e.msg))?;
-        // SAFETY: `expr` lives in `self.arena`, which is neither reset nor
-        // dropped while `self` is alive, and the cache only returns it with the
-        // lifetime of a borrow of `self`.
-        let stored: ExprRef<'static> = unsafe { std::mem::transmute(expr) };
-        self.files.borrow_mut().insert(path.to_owned(), stored);
-        Ok(expr)
+        self.cached(path, || self.compile_path(path, None))
     }
 
     /// Compile Nix source that ships with the evaluator, once per context.
     pub fn compile_internal(&self, name: &str, text: &str) -> Result<ExprRef<'_>, CompileError> {
         let key = format!("<nix/{name}>");
-        if let Some(e) = self.files.borrow().get(&key) {
-            return Ok(e);
-        }
-        let expr = compile::compile(self, self.source(Some(&key), text), "/", true, None)?;
-        // SAFETY: as in `compile_file`.
-        let stored: ExprRef<'static> = unsafe { std::mem::transmute(expr) };
-        self.files.borrow_mut().insert(key, stored);
-        Ok(expr)
+        self.cached(&key, || {
+            compile::compile(self, self.source(Some(&key), text), "/", true, None)
+        })
     }
 
     /// Compile a file with extra names in scope (`scopedImport`). Not cached:
     /// the names differ per call.
     pub fn compile_file_scoped(&self, path: &str, names: &[Sym]) -> Result<ExprRef<'_>> {
+        self.compile_path(path, Some(names))
+    }
+
+    fn compile_path(&self, path: &str, extra_scope: Option<&[Sym]>) -> Result<ExprRef<'_>> {
         let text = self.io.read_to_string(path)?;
-        let dir = crate::path::dir_of(path);
         compile::compile(
             self,
             self.source(Some(path), &text),
-            dir,
+            crate::path::dir_of(path),
             self.io.pure,
-            Some(names),
+            extra_scope,
         )
         .map_err(|e| anyhow::anyhow!("{}", e.msg))
+    }
+
+    /// Return the expression cached under `key`, running `compile` and
+    /// caching its result on a miss.
+    fn cached<'c, E>(
+        &'c self,
+        key: &str,
+        compile: impl FnOnce() -> Result<ExprRef<'c>, E>,
+    ) -> Result<ExprRef<'c>, E> {
+        if let Some(e) = self.files.borrow().get(key) {
+            return Ok(e);
+        }
+        let expr = compile()?;
+        // SAFETY: `expr` lives in `self.arena`, which is neither reset nor
+        // dropped while `self` is alive, and the cache only returns it with the
+        // lifetime of a borrow of `self`.
+        let stored: ExprRef<'static> = unsafe { std::mem::transmute(expr) };
+        self.files.borrow_mut().insert(key.to_owned(), stored);
+        Ok(expr)
     }
 }
