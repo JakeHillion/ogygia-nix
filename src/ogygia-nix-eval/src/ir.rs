@@ -72,17 +72,10 @@ impl std::fmt::Debug for Pos<'_> {
 pub enum BinOp {
     Eq,
     Neq,
-    Lt,
-    Le,
-    Gt,
-    Ge,
     And,
     Or,
     Impl,
     Add,
-    Sub,
-    Mul,
-    Div,
     Concat,
     Update,
 }
@@ -206,6 +199,5 @@ pub enum Expr<'a> {
     },
     Bin(BinOp, ExprRef<'a>, ExprRef<'a>, Pos<'a>),
     Not(ExprRef<'a>, Pos<'a>),
-    Neg(ExprRef<'a>, Pos<'a>),
     CurPos(Pos<'a>),
 }

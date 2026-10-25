@@ -104,6 +104,15 @@ pub struct Coerce {
     pub copy: bool,
 }
 
+/// An arithmetic operator.
+#[derive(Clone, Copy)]
+pub enum Arith {
+    Add,
+    Sub,
+    Mul,
+    Div,
+}
+
 impl Coerce {
     pub const INTERP: Coerce = Coerce {
         more: false,
@@ -540,11 +549,6 @@ impl<'a> Eval<'a> {
                 Value::Bool(b) => Ok(Value::Bool(!b)),
                 other => self.type_error("a Boolean", other),
             },
-            // Nix desugars `-e` to `__sub 0 e`.
-            Expr::Neg(e, pos) => self.deeper(|| {
-                let v = self.eval(e, env)?;
-                self.arith(BinOp::Sub, Value::Int(0), v, *pos)
-            }),
             Expr::Bin(op, l, r, pos) => self.eval_bin(*op, l, r, env, *pos),
             Expr::InterpStr(parts, _) => {
                 let mut buf = Vec::new();
@@ -865,19 +869,6 @@ impl<'a> Eval<'a> {
                 let (a, b) = operands()?;
                 Ok(Value::Bool(!self.eq(a, b)?))
             }
-            // Nix desugars `a < b` to `__lessThan a b` and `a >= b` to its
-            // negation, and `a > b` to `__lessThan b a`, which evaluates `b`
-            // first, and `a <= b` to its negation.
-            BinOp::Lt | BinOp::Gt | BinOp::Le | BinOp::Ge => self.deeper(|| {
-                let (x, y) = if matches!(op, BinOp::Lt | BinOp::Ge) {
-                    operands()?
-                } else {
-                    let b = self.eval(r, env)?;
-                    (b, self.eval(l, env)?)
-                };
-                let negate = matches!(op, BinOp::Le | BinOp::Ge);
-                Ok(Value::Bool(self.less_than(x, y)? != negate))
-            }),
             BinOp::Concat => {
                 let (a, b) = operands()?;
                 let a = self.force_list(a)?;
@@ -905,11 +896,6 @@ impl<'a> Eval<'a> {
                 let a = self.eval(l, env)?;
                 self.add(a, || self.eval(r, env), pos)
             }
-            // Nix desugars these to calls of `__sub`, `__mul` and `__div`.
-            BinOp::Sub | BinOp::Mul | BinOp::Div => self.deeper(|| {
-                let (a, b) = operands()?;
-                self.arith(op, a, b, pos)
-            }),
         }
     }
 
@@ -958,7 +944,7 @@ impl<'a> Eval<'a> {
     pub fn add(&self, a: Value<'a>, b: impl FnOnce() -> R<'a>, pos: Pos<'a>) -> R<'a> {
         let a = self.force(a)?;
         match a {
-            Value::Int(_) | Value::Float(_) => self.arith(BinOp::Add, a, b()?, pos),
+            Value::Int(_) | Value::Float(_) => self.arith(Arith::Add, a, b()?, pos),
             Value::Path(p) => {
                 let b = self.force(b()?)?;
                 let mut buf = crate::path::abs(p.0).as_bytes().to_vec();
@@ -989,24 +975,24 @@ impl<'a> Eval<'a> {
     }
 
     /// Arithmetic from a builtin, where there is no source position.
-    pub fn arith_nopos(&self, op: BinOp, a: Value<'a>, b: Value<'a>) -> R<'a> {
+    pub fn arith_nopos(&self, op: Arith, a: Value<'a>, b: Value<'a>) -> R<'a> {
         self.arith_inner(op, a, b, String::new())
     }
 
-    pub fn arith(&self, op: BinOp, a: Value<'a>, b: Value<'a>, pos: Pos<'a>) -> R<'a> {
+    pub fn arith(&self, op: Arith, a: Value<'a>, b: Value<'a>, pos: Pos<'a>) -> R<'a> {
         self.arith_inner(op, a, b, format!(" at {pos}"))
     }
 
-    fn arith_inner(&self, op: BinOp, a: Value<'a>, b: Value<'a>, at: String) -> R<'a> {
+    fn arith_inner(&self, op: Arith, a: Value<'a>, b: Value<'a>, at: String) -> R<'a> {
         let a = self.force(a)?;
         let b = self.force(b)?;
         match (a, b) {
             (Value::Int(x), Value::Int(y)) => {
                 let (r, verb, sym) = match op {
-                    BinOp::Add => (x.checked_add(y), "adding", "+"),
-                    BinOp::Sub => (x.checked_sub(y), "subtracting", "-"),
-                    BinOp::Mul => (x.checked_mul(y), "multiplying", "*"),
-                    _ => {
+                    Arith::Add => (x.checked_add(y), "adding", "+"),
+                    Arith::Sub => (x.checked_sub(y), "subtracting", "-"),
+                    Arith::Mul => (x.checked_mul(y), "multiplying", "*"),
+                    Arith::Div => {
                         if y == 0 {
                             return eval_err(format!("division by zero{at}"));
                         }
@@ -1021,10 +1007,10 @@ impl<'a> Eval<'a> {
             (Value::Int(_) | Value::Float(_), Value::Int(_) | Value::Float(_)) => {
                 let (x, y) = (as_f64(a), as_f64(b));
                 Ok(Value::Float(match op {
-                    BinOp::Add => x + y,
-                    BinOp::Sub => x - y,
-                    BinOp::Mul => x * y,
-                    _ => {
+                    Arith::Add => x + y,
+                    Arith::Sub => x - y,
+                    Arith::Mul => x * y,
+                    Arith::Div => {
                         if y == 0.0 {
                             return eval_err(format!("division by zero{at}"));
                         }
