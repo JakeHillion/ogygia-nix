@@ -91,15 +91,6 @@ pub enum AttrKey<'a> {
     Dynamic(ExprRef<'a>),
 }
 
-/// How a slot of a `rec`/`let`/inherit-from environment frame is initialised.
-pub enum SlotInit<'a> {
-    /// Evaluate the expression in the new frame.
-    Expr(ExprRef<'a>),
-    /// Select a name from the value in another slot of the same frame
-    /// (`inherit (from) name;`).
-    Select(u32, Sym, Pos<'a>),
-}
-
 pub enum AttrValue<'a> {
     /// Evaluate in the attribute set's environment.
     Expr(ExprRef<'a>),
@@ -122,14 +113,14 @@ pub struct DynamicAttr<'a> {
 pub struct AttrsDef<'a> {
     /// The frame the attribute set introduces, or `None` if its values are
     /// evaluated directly in the enclosing environment.
-    pub frame: Option<&'a [SlotInit<'a>]>,
+    pub frame: Option<&'a [ExprRef<'a>]>,
     /// Sorted by symbol.
     pub statics: &'a [StaticAttr<'a>],
     pub dynamics: &'a [DynamicAttr<'a>],
 }
 
 pub struct LetDef<'a> {
-    pub slots: &'a [SlotInit<'a>],
+    pub slots: &'a [ExprRef<'a>],
     pub body: ExprRef<'a>,
 }
 

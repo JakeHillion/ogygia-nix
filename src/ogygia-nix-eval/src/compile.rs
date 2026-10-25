@@ -23,7 +23,6 @@ use crate::ir::LambdaDef;
 use crate::ir::LetDef;
 use crate::ir::Param;
 use crate::ir::Pos;
-use crate::ir::SlotInit;
 use crate::ir::Source;
 use crate::ir::StaticAttr;
 use crate::path::canon_path;
@@ -868,24 +867,23 @@ impl<'a> Compiler<'a> {
             ast::Expr::Lambda(l) => Expr::Lambda(self.lambda(l, None)?),
             ast::Expr::AttrSet(a) => {
                 let set = self.preset(a.entries())?;
-                if a.rec_token().is_some() {
-                    self.rec_attrs(set)?
-                } else {
-                    self.attrs(set)?
-                }
+                self.attrs(set, a.rec_token().is_some())?
             }
             ast::Expr::LetIn(l) => {
                 let set = self.preset(l.entries())?;
                 if !set.dynamics.is_empty() {
                     return err(format!("dynamic attributes not allowed in let at {pos}"));
                 }
-                let ((slots, body), _) = self.frame(set, |c| c.expr(&child(l.body())?))?;
-                Expr::Let(self.ctx.alloc(LetDef { slots, body }))
+                let b = self.bindings(set, true, |c| c.expr(&child(l.body())?))?;
+                Expr::Let(self.ctx.alloc(LetDef {
+                    slots: b.frame.expect("a let has a frame"),
+                    body: b.body,
+                }))
             }
             ast::Expr::LegacyLet(l) => {
                 // `let { ...; body = e; }` is `rec { ...; body = e; }.body`.
                 let set = self.preset(l.entries())?;
-                let attrs = self.rec_attrs(set)?;
+                let attrs = self.attrs(set, true)?;
                 let body = self.ctx.syms.body;
                 Expr::Select {
                     expr: self.leak(attrs),
@@ -1237,14 +1235,8 @@ impl<'a> Compiler<'a> {
         }
     }
 
-    /// Compile a value of a set. `from_base` is the frame slot of the set's
-    /// first inherit-from source.
-    fn pre_attr(
-        &mut self,
-        attr: PreAttr,
-        name: Option<Sym>,
-        from_base: Option<u32>,
-    ) -> CResult<ExprRef<'a>> {
+    /// Compile a value of a set or `let`, other than an `inherit`.
+    fn pre_attr(&mut self, attr: PreAttr, name: Option<Sym>) -> CResult<ExprRef<'a>> {
         Ok(match attr {
             PreAttr::Expr(ast::Expr::Lambda(l)) => {
                 let def = self.lambda(&l, name)?;
@@ -1252,154 +1244,126 @@ impl<'a> Compiler<'a> {
             }
             PreAttr::Expr(e) => self.expr(&e)?,
             PreAttr::Nested(set) => {
-                let e = self.attrs(set)?;
+                let e = self.attrs(set, false)?;
                 self.leak(e)
             }
-            PreAttr::Inherit(n, off) => {
-                let e = self.resolve(n, 0, self.at(off))?;
-                self.leak(e)
-            }
-            PreAttr::InheritFrom(i, n, off) => {
-                let base = from_base.expect("inherit-from requires a frame");
-                let var = self.leak(Expr::Var(0, base + i as u32));
-                self.leak(Expr::Select {
-                    expr: var,
-                    path: self.ctx.alloc_slice(vec![AttrKey::Static(n)]),
-                    default: None,
-                    pos: self.at(off),
-                })
+            PreAttr::Inherit(..) | PreAttr::InheritFrom(..) => {
+                unreachable!("inherit only binds a name of its own set")
             }
         })
     }
 
-    /// A non-recursive attribute set.
-    fn attrs(&mut self, set: PreSet) -> CResult<Expr<'a>> {
-        let has_frame = !set.froms.is_empty();
+    /// An attribute set.
+    fn attrs(&mut self, set: PreSet, recursive: bool) -> CResult<Expr<'a>> {
+        let b = self.bindings(set, recursive, |_| Ok(()))?;
+        Ok(Expr::Attrs(self.ctx.alloc(AttrsDef {
+            frame: b.frame,
+            statics: self.ctx.alloc_slice(b.statics),
+            dynamics: self.ctx.alloc_slice(b.dynamics),
+        })))
+    }
+
+    /// Compile the bindings of a set or `let`, and then `body` in their scope.
+    ///
+    /// Recursive bindings (`rec` and `let`) are the first slots of a new
+    /// frame, in which every value is compiled. The `inherit (from)` sources
+    /// take the slots after them, so that each is evaluated once; a
+    /// non-recursive set has a frame only if it has such sources.
+    fn bindings<T>(
+        &mut self,
+        set: PreSet,
+        recursive: bool,
+        body: impl FnOnce(&mut Self) -> CResult<T>,
+    ) -> CResult<Bindings<'a, T>> {
+        let has_frame = recursive || !set.froms.is_empty();
         if has_frame {
-            // A frame with no visible names holds the inherit-from sources so
-            // that each is evaluated once.
-            self.scopes.push(Scope::Names(HashMap::new()));
+            let names: Vec<Sym> = match recursive {
+                true => set.statics.iter().map(|(n, _, _)| *n).collect(),
+                false => Vec::new(),
+            };
+            self.scopes.push(scope_of(&names));
         }
-        let result = self.attrs_body(set, has_frame);
+        let result = self.bindings_in_scope(set, recursive, has_frame, body);
         if has_frame {
             self.scopes.pop();
         }
         result
     }
 
-    fn attrs_body(&mut self, set: PreSet, has_frame: bool) -> CResult<Expr<'a>> {
-        let frame = if has_frame {
-            let froms = set
-                .froms
-                .iter()
-                .map(|f| Ok(SlotInit::Expr(self.expr(f)?)))
-                .collect::<CResult<Vec<_>>>()?;
-            Some(self.ctx.alloc_slice(froms))
+    fn bindings_in_scope<T>(
+        &mut self,
+        set: PreSet,
+        recursive: bool,
+        has_frame: bool,
+        body: impl FnOnce(&mut Self) -> CResult<T>,
+    ) -> CResult<Bindings<'a, T>> {
+        let froms_base = if recursive {
+            set.statics.len() as u32
         } else {
-            None
+            0
         };
-        let base = has_frame.then_some(0);
+        let mut slots = Vec::new();
         let mut statics = Vec::new();
         for (name, off, attr) in set.statics {
-            let value = AttrValue::Expr(self.pre_attr(attr, Some(name), base)?);
+            let value = match attr {
+                // `inherit x;` refers to the scope around the bindings.
+                PreAttr::Inherit(n, off) => {
+                    let e = self.resolve(n, usize::from(has_frame), self.at(off))?;
+                    self.leak(e)
+                }
+                PreAttr::InheritFrom(i, n, off) => {
+                    let from = self.leak(Expr::Var(0, froms_base + i as u32));
+                    self.leak(Expr::Select {
+                        expr: from,
+                        path: self.ctx.alloc_slice(vec![AttrKey::Static(n)]),
+                        default: None,
+                        pos: self.at(off),
+                    })
+                }
+                other => self.pre_attr(other, Some(name))?,
+            };
+            let value = if recursive {
+                slots.push(value);
+                AttrValue::Slot(slots.len() as u32 - 1)
+            } else {
+                AttrValue::Expr(value)
+            };
             statics.push(StaticAttr {
                 name,
                 pos: self.at(off),
                 value,
             });
         }
+        for from in &set.froms {
+            slots.push(self.expr(from)?);
+        }
         let mut dynamics = Vec::new();
         for (name, off, attr) in set.dynamics {
             dynamics.push(DynamicAttr {
                 name: self.expr(&name)?,
-                value: self.pre_attr(attr, None, base)?,
+                value: self.pre_attr(attr, None)?,
                 pos: self.at(off),
             });
         }
+        let body = body(self)?;
         statics.sort_by_key(|s| s.name);
-        Ok(Expr::Attrs(self.ctx.alloc(AttrsDef {
-            frame,
-            statics: self.ctx.alloc_slice(statics),
-            dynamics: self.ctx.alloc_slice(dynamics),
-        })))
+        Ok(Bindings {
+            frame: has_frame.then(|| self.ctx.alloc_slice(slots)),
+            statics,
+            dynamics,
+            body,
+        })
     }
+}
 
-    /// Compile the bindings of a `rec` set or `let` into a frame: the static
-    /// names in order, then the inherit-from sources. `body` is compiled with
-    /// the frame in scope.
-    #[allow(clippy::type_complexity)]
-    fn frame<T>(
-        &mut self,
-        set: PreSet,
-        body: impl FnOnce(&mut Self) -> CResult<T>,
-    ) -> CResult<((&'a [SlotInit<'a>], T), Vec<(Sym, u32, u32)>)> {
-        let names: Vec<Sym> = set.statics.iter().map(|(n, _, _)| *n).collect();
-        self.scopes.push(scope_of(&names));
-        let result = self.frame_body(set, body);
-        self.scopes.pop();
-        result
-    }
-
-    #[allow(clippy::type_complexity)]
-    fn frame_body<T>(
-        &mut self,
-        set: PreSet,
-        body: impl FnOnce(&mut Self) -> CResult<T>,
-    ) -> CResult<((&'a [SlotInit<'a>], T), Vec<(Sym, u32, u32)>)> {
-        let nstatic = set.statics.len() as u32;
-        let mut slots = Vec::new();
-        let mut slot_names = Vec::new();
-        for (i, (name, off, attr)) in set.statics.into_iter().enumerate() {
-            let init = match attr {
-                // `inherit x;` refers to the enclosing scope, not the frame.
-                PreAttr::Inherit(n, off) => {
-                    let e = self.resolve(n, 1, self.at(off))?;
-                    SlotInit::Expr(self.leak(e))
-                }
-                PreAttr::InheritFrom(f, n, off) => {
-                    SlotInit::Select(nstatic + f as u32, n, self.at(off))
-                }
-                other => SlotInit::Expr(self.pre_attr(other, Some(name), Some(nstatic))?),
-            };
-            slots.push(init);
-            slot_names.push((name, off, i as u32));
-        }
-        for from in &set.froms {
-            slots.push(SlotInit::Expr(self.expr(from)?));
-        }
-        let b = body(self)?;
-        Ok(((self.ctx.alloc_slice(slots), b), slot_names))
-    }
-
-    fn rec_attrs(&mut self, mut set: PreSet) -> CResult<Expr<'a>> {
-        let dynamics = std::mem::take(&mut set.dynamics);
-        let ((slots, dynamics), names) = self.frame(set, |c| {
-            dynamics
-                .into_iter()
-                .map(|(name, off, attr)| {
-                    Ok(DynamicAttr {
-                        name: c.expr(&name)?,
-                        value: c.pre_attr(attr, None, None)?,
-                        pos: c.at(off),
-                    })
-                })
-                .collect::<CResult<Vec<_>>>()
-        })?;
-        let mut statics: Vec<_> = names
-            .into_iter()
-            .map(|(name, off, slot)| StaticAttr {
-                name,
-                pos: self.at(off),
-                value: AttrValue::Slot(slot),
-            })
-            .collect();
-        statics.sort_by_key(|s| s.name);
-        Ok(Expr::Attrs(self.ctx.alloc(AttrsDef {
-            frame: Some(slots),
-            statics: self.ctx.alloc_slice(statics),
-            dynamics: self.ctx.alloc_slice(dynamics),
-        })))
-    }
+/// Compiled bindings of a set or `let`.
+struct Bindings<'a, T> {
+    /// The frame the bindings introduce, if any.
+    frame: Option<&'a [ExprRef<'a>]>,
+    /// Sorted by symbol.
+    statics: Vec<StaticAttr<'a>>,
+    dynamics: Vec<DynamicAttr<'a>>,
+    body: T,
 }
 
 fn scope_of(names: &[Sym]) -> Scope {
