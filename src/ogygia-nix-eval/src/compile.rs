@@ -775,7 +775,7 @@ impl<'a> Compiler<'a> {
                 self.resolve(name, 0, pos)?
             }
             ast::Expr::CurPos(_) => Expr::CurPos(pos),
-            ast::Expr::Str(s) => self.string(s, pos)?,
+            ast::Expr::Str(s) => self.string(s)?,
             ast::Expr::PathAbs(_) | ast::Expr::PathRel(_) | ast::Expr::PathHome(_) => {
                 let p = ast::Path::cast(e.syntax().clone()).unwrap();
                 self.path(&p, pos)?
@@ -1025,7 +1025,7 @@ impl<'a> Compiler<'a> {
         }))
     }
 
-    fn string(&mut self, s: &ast::Str, pos: Pos<'a>) -> CResult<Expr<'a>> {
+    fn string(&mut self, s: &ast::Str) -> CResult<Expr<'a>> {
         let mut out = Vec::new();
         let mut lit: Option<String> = None;
         for part in str_parts(s) {
@@ -1048,7 +1048,7 @@ impl<'a> Compiler<'a> {
         Ok(match out.as_slice() {
             [] => Expr::Str(self.lit_str(b"")),
             [Expr::Str(s)] => Expr::Str(s),
-            _ => Expr::InterpStr(self.ctx.alloc_slice(out), pos),
+            _ => Expr::InterpStr(self.ctx.alloc_slice(out)),
         })
     }
 
@@ -1076,7 +1076,7 @@ impl<'a> Compiler<'a> {
         }
         Ok(match out.as_slice() {
             [Expr::Path(p)] => Expr::Path(p),
-            _ => Expr::InterpPath(self.ctx.alloc_slice(out), pos),
+            _ => Expr::InterpPath(self.ctx.alloc_slice(out)),
         })
     }
 

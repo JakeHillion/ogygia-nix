@@ -383,7 +383,7 @@ impl<'a> Eval<'a> {
                 });
                 Step::Eval(first, env)
             }
-            Expr::InterpStr(parts, _) | Expr::InterpPath(parts, _) => {
+            Expr::InterpStr(parts) | Expr::InterpPath(parts) => {
                 let s = Interp {
                     path: matches!(e, Expr::InterpPath(..)),
                     parts,
