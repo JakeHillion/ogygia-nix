@@ -322,11 +322,18 @@ impl<'a> Eval<'a> {
 
     pub fn force_function(&self, v: Value<'a>) -> R<'a> {
         let v = self.force(v)?;
-        if v.is_function() || matches!(v, Value::Attrs(a) if a.get(self.ctx.syms.functor).is_some())
-        {
+        if v.is_function() || self.functor(v).is_some() {
             Ok(v)
         } else {
             self.type_error("a function", v)
+        }
+    }
+
+    /// The `__functor` of `v`, if `v` is a set that has one.
+    pub(crate) fn functor(&self, v: Value<'a>) -> Option<Value<'a>> {
+        match v {
+            Value::Attrs(a) => a.get(self.ctx.syms.functor),
+            _ => None,
         }
     }
 

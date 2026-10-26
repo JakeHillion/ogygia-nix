@@ -147,6 +147,7 @@ pub(super) enum Frame<'a> {
 }
 
 /// A string being built, with its context.
+#[derive(Default)]
 pub(super) struct StrAcc<'a> {
     buf: Vec<u8>,
     ctx: Vec<Ctx<'a>>,
@@ -389,10 +390,7 @@ impl<'a> Eval<'a> {
                     parts,
                     env,
                     i: 0,
-                    acc: StrAcc {
-                        buf: Vec::new(),
-                        ctx: Vec::new(),
-                    },
+                    acc: StrAcc::default(),
                 };
                 return self.interp(stack, Box::new(s));
             }
@@ -546,8 +544,7 @@ impl<'a> Eval<'a> {
             Value::Lambda(c) => self.enter_lambda(stack, c, arg),
             Value::PrimOp(op) => self.call_primop(op, &[], arg),
             Value::PrimOpApp(app) => self.call_primop(app.op, app.args, arg),
-            Value::Attrs(a) if a.get(self.ctx.syms.functor).is_some() => {
-                let functor = a.get(self.ctx.syms.functor).unwrap();
+            _ if let Some(functor) = self.functor(f) => {
                 stack.push(Frame::Call { arg, pos });
                 Ok(Step::Call(functor, f, None))
             }
@@ -727,10 +724,7 @@ impl<'a> Eval<'a> {
                     Value::Str(_) => Coerce::INTERP,
                     _ => Coerce::PLAIN,
                 };
-                let mut acc = Box::new(StrAcc {
-                    buf: Vec::new(),
-                    ctx: Vec::new(),
-                });
+                let mut acc = Box::<StrAcc>::default();
                 self.coerce_into(a, how, &mut acc.buf, &mut acc.ctx)?;
                 Frame::AddStr(acc, how)
             }
