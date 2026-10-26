@@ -1,7 +1,9 @@
 #![doc = include_str!("../README.md")]
 
+mod bundle;
 mod check;
 mod findings;
+mod flake;
 mod minimise;
 mod mutate;
 mod stats;

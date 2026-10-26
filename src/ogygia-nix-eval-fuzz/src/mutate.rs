@@ -1,7 +1,10 @@
 //! Mutations that edit whole nodes and tokens of rnix's syntax tree, so
 //! changes to an input stay meaningful Nix more often than byte edits do.
 //! They only make some inputs likelier: libFuzzer's byte-level mutations,
-//! which can turn any input into any other, run alongside them.
+//! which can turn any input into any other, run alongside them. In a flake
+//! bundle they edit the Nix files it holds, one at a time.
+
+use std::ops::Range;
 
 use ogygia_nix_eval::run_with_stack;
 use rnix::TextRange;
@@ -32,6 +35,12 @@ fn elements(text: &str) -> Vec<TextRange> {
             .map(|e| e.text_range())
             .collect()
     })
+}
+
+/// One of the parts of `text` holding Nix source, picked at random.
+fn nix_part(text: &str, rng: &mut Rng) -> Option<Range<usize>> {
+    let parts = crate::bundle::nix_ranges(text);
+    (!parts.is_empty()).then(|| parts[rng.below(parts.len())].clone())
 }
 
 fn splice(text: &str, range: TextRange, with: &str) -> String {
@@ -85,8 +94,14 @@ pub fn mutate(
     let mut rng = Rng::new(seed);
     if rng.below(2) == 0
         && let Ok(text) = std::str::from_utf8(&data[..size])
+        && let Some(part) = nix_part(text, &mut rng)
     {
-        let out = mutate_tree(text, &mut rng);
+        let out = [
+            &text[..part.start],
+            mutate_tree(&text[part.clone()], &mut rng).as_str(),
+            &text[part.end..],
+        ]
+        .concat();
         if out.len() <= max_size {
             data[..out.len()].copy_from_slice(out.as_bytes());
             return out.len();
@@ -101,14 +116,23 @@ pub fn mutate(
 /// `data2`'s; otherwise a prefix of one joined to a suffix of the other.
 pub fn crossover(data1: &[u8], data2: &[u8], out: &mut [u8], seed: u32) -> usize {
     let mut rng = Rng::new(seed);
-    let spliced = match (std::str::from_utf8(data1), std::str::from_utf8(data2)) {
-        (Ok(a), Ok(b)) => {
-            let to = elements(a);
+    let texts = std::str::from_utf8(data1)
+        .ok()
+        .zip(std::str::from_utf8(data2).ok());
+    let parts = texts.and_then(|(a, b)| {
+        let to = nix_part(a, &mut rng)?;
+        let from = nix_part(b, &mut rng)?;
+        Some((a, to, &b[from]))
+    });
+    let spliced = match parts {
+        Some((a, to, b)) => {
+            let into = elements(&a[to.clone()]);
             let from = elements(b);
             let piece = &b[from[rng.below(from.len())]];
-            splice(a, to[rng.below(to.len())], piece).into_bytes()
+            let at = into[rng.below(into.len())] + rnix::TextSize::from(to.start as u32);
+            splice(a, at, piece).into_bytes()
         }
-        _ => {
+        None => {
             let cut1 = rng.below(data1.len() + 1);
             let cut2 = rng.below(data2.len() + 1);
             [&data1[..cut1], &data2[cut2..]].concat()
@@ -175,6 +199,25 @@ mod tests {
             .find(|&s| Rng::new(s).below(2) == 0)
             .expect("some seed picks a tree mutation");
         mutate(&mut data, 5, 4096, seed, no_fallback);
+    }
+
+    #[test]
+    fn tree_mutations_keep_bundle_directives() {
+        let bundle = "#~flake path:@dir(r)#x\n#~tree r path\n#~file flake.nix\n{ outputs = _: { x = [ 1 2 ]; }; }\n#~file flake.lock\n{ }\n";
+        let directives = |s: &str| -> Vec<String> {
+            s.lines()
+                .filter(|l| l.starts_with("#~"))
+                .map(str::to_owned)
+                .collect()
+        };
+        for seed in 0..500 {
+            let mut data = bundle.as_bytes().to_vec();
+            data.resize(4096, 0);
+            let size = mutate(&mut data, bundle.len(), 4096, seed, |_, size, _| size);
+            let out = std::str::from_utf8(&data[..size]).unwrap();
+            assert_eq!(directives(out), directives(bundle), "seed {seed}");
+            assert!(out.ends_with("{ }\n"), "seed {seed}: {out:?}");
+        }
     }
 
     #[test]

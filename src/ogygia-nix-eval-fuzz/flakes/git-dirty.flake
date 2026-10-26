@@ -1,0 +1,12 @@
+#~flake git+file://@dir(root)#.
+#~tree root git
+#~file flake.nix
+{ outputs = { self }: { info = removeAttrs self [ "outputs" "info" "files" ]; files = builtins.readDir self; }; }
+#~file a
+a
+#~file a unstaged
+changed
+#~file b staged
+b
+#~file c unstaged
+untracked

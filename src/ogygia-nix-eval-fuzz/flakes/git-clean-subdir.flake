@@ -1,0 +1,6 @@
+#~flake @dir(root)/sub#x
+#~tree root git
+#~file sub/flake.nix
+{ outputs = { self }: { x = { inherit (self) outPath rev revCount shortRev lastModified; src = self.sourceInfo.outPath; }; }; }
+#~file README
+r

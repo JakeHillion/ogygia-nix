@@ -160,7 +160,7 @@ impl Outcome {
 }
 
 /// Standard output on success, standard error on failure.
-type Run = Result<String, String>;
+pub(crate) type Run = Result<String, String>;
 
 /// What Nix did with one expression.
 struct Theirs {
@@ -178,7 +178,7 @@ impl From<Run> for Theirs {
     }
 }
 
-fn scratch() -> &'static PathBuf {
+pub(crate) fn scratch() -> &'static PathBuf {
     static DIR: OnceLock<PathBuf> = OnceLock::new();
     DIR.get_or_init(|| {
         let dir = std::env::temp_dir().join("ogygia-nix-eval-fuzz");
@@ -189,10 +189,10 @@ fn scratch() -> &'static PathBuf {
 
 /// An empty chroot store for one Nix run, deleted on drop. Its store
 /// directory is still `/nix/store`, so store paths match ogygia-nix-eval's.
-struct Store(tempfile::TempDir);
+pub(crate) struct Store(tempfile::TempDir);
 
 impl Store {
-    fn new() -> Store {
+    pub(crate) fn new() -> Store {
         Store(
             tempfile::Builder::new()
                 .prefix("store-")
@@ -236,7 +236,7 @@ fn make_writable(path: &Path) {
     }
 }
 
-fn nix_instantiate() -> String {
+pub(crate) fn nix_instantiate() -> String {
     std::env::var("OGYGIA_NIX_EVAL_NIX_INSTANTIATE")
         .ok()
         .or_else(|| option_env!("OGYGIA_NIX_INSTANTIATE_BIN").map(str::to_owned))
@@ -246,25 +246,18 @@ fn nix_instantiate() -> String {
 fn read_all(mut r: impl Read + Send + 'static) -> std::thread::JoinHandle<Vec<u8>> {
     std::thread::spawn(move || {
         let mut buf = Vec::new();
-        r.read_to_end(&mut buf)
-            .expect("reading nix-instantiate output");
+        r.read_to_end(&mut buf).expect("reading Nix's output");
         buf
     })
 }
 
-/// Fails with [`Outcome::Skipped`] or [`Outcome::Limited`] when what Nix
-/// did says nothing about equivalence.
-fn run_nix(mode: &[&str], expr: &str, budget: Budget) -> Result<Theirs, Outcome> {
+/// `program`, one of the reference Nix's commands, set up to use `store` and
+/// nothing of the environment it runs in.
+pub(crate) fn nix_command(program: &str, store: &Store) -> Command {
     let s = scratch();
-    let store = Store::new();
-    let mut cmd = Command::new(nix_instantiate());
-    cmd.args(mode)
-        .args(NIX_ARGS)
-        .arg("--store")
+    let mut cmd = Command::new(program);
+    cmd.arg("--store")
         .arg(store.uri())
-        // On standard input, the expression cannot be mistaken for a flag and
-        // may contain NUL bytes.
-        .arg("-")
         .current_dir("/")
         .env_clear()
         .env("HOME", s)
@@ -272,8 +265,28 @@ fn run_nix(mode: &[&str], expr: &str, budget: Budget) -> Result<Theirs, Outcome>
         .env("NIX_CONF_DIR", s.join("conf"))
         .env("NIX_LOG_DIR", s.join("log"))
         .env("XDG_CACHE_HOME", s.join("cache"))
-        .envs(PROXY_VARS.iter().map(|v| (v, DEAD_PROXY)))
-        .stdin(Stdio::piped())
+        .envs(PROXY_VARS.iter().map(|v| (v, DEAD_PROXY)));
+    cmd
+}
+
+/// What a Nix command did, with its output's chroot store paths made store
+/// paths.
+pub(crate) struct Ran {
+    pub success: bool,
+    pub stdout: String,
+    pub stderr: String,
+}
+
+/// Run `cmd`, made by [`nix_command`] for `store`, within `budget`, writing
+/// `input` to its standard input. Fails with [`Outcome::Skipped`] or
+/// [`Outcome::Limited`] when what Nix did says nothing about equivalence.
+pub(crate) fn run_command(
+    mut cmd: Command,
+    input: &[u8],
+    store: &Store,
+    budget: Budget,
+) -> Result<Ran, Outcome> {
+    cmd.stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     if let Budget::Fuzzing = budget {
@@ -292,17 +305,17 @@ fn run_nix(mode: &[&str], expr: &str, budget: Budget) -> Result<Theirs, Outcome>
             });
         }
     }
-    let mut child = cmd.spawn().expect("running nix-instantiate");
+    let mut child = cmd.spawn().expect("running Nix");
     let stdout = read_all(child.stdout.take().unwrap());
     let stderr = read_all(child.stderr.take().unwrap());
     let mut stdin = child.stdin.take().unwrap();
-    let input = expr.as_bytes().to_vec();
+    let input = input.to_vec();
     let stdin = std::thread::spawn(move || {
         // Nix stops reading early when it is killed.
         if let Err(e) = stdin.write_all(&input)
             && e.kind() != std::io::ErrorKind::BrokenPipe
         {
-            panic!("writing nix-instantiate input: {e}");
+            panic!("writing Nix's input: {e}");
         }
     });
     let deadline = match budget {
@@ -310,12 +323,12 @@ fn run_nix(mode: &[&str], expr: &str, budget: Budget) -> Result<Theirs, Outcome>
         Budget::Unlimited => None,
     };
     let status = loop {
-        if let Some(status) = child.try_wait().expect("waiting for nix-instantiate") {
+        if let Some(status) = child.try_wait().expect("waiting for Nix") {
             break Ok(status);
         }
         if deadline.is_some_and(|d| Instant::now() > d) {
-            child.kill().expect("killing nix-instantiate");
-            child.wait().expect("waiting for nix-instantiate");
+            child.kill().expect("killing Nix");
+            child.wait().expect("waiting for Nix");
             break Err(Outcome::Skipped);
         }
         std::thread::sleep(Duration::from_millis(5));
@@ -331,19 +344,40 @@ fn run_nix(mode: &[&str], expr: &str, budget: Budget) -> Result<Theirs, Outcome>
     if limited(&stderr) {
         return Err(Outcome::Limited);
     }
-    Ok(if status.success() {
-        Ok(stdout.strip_suffix('\n').unwrap_or(&stdout).to_owned()).into()
+    Ok(Ran {
+        success: status.success(),
+        stdout,
+        stderr,
+    })
+}
+
+/// Fails with [`Outcome::Skipped`] or [`Outcome::Limited`] when what Nix
+/// did says nothing about equivalence.
+fn run_nix(mode: &[&str], expr: &str, budget: Budget) -> Result<Theirs, Outcome> {
+    let store = Store::new();
+    let mut cmd = nix_command(&nix_instantiate(), &store);
+    // On standard input, the expression cannot be mistaken for a flag and
+    // may contain NUL bytes.
+    cmd.args(mode).args(NIX_ARGS).arg("-");
+    let ran = run_command(cmd, expr.as_bytes(), &store, budget)?;
+    Ok(if ran.success {
+        Ok(ran
+            .stdout
+            .strip_suffix('\n')
+            .unwrap_or(&ran.stdout)
+            .to_owned())
+        .into()
     } else {
         Theirs {
-            misread: misread_platform(&store, &stderr),
-            run: Err(stderr),
+            misread: misread_platform(&store, &ran.stderr),
+            run: Err(ran.stderr),
         }
     })
 }
 
 /// Whether Nix's standard error says it failed as [`Outcome::Misread`]
 /// describes, reading back a `.drv` file in `store`.
-fn misread_platform(store: &Store, stderr: &str) -> bool {
+pub(crate) fn misread_platform(store: &Store, stderr: &str) -> bool {
     stderr
         .lines()
         .rfind(|l| !l.trim().is_empty())
@@ -450,7 +484,7 @@ fn strip_list(s: &str, strip_elem: impl Fn(&str) -> Option<&str>) -> Option<&str
 }
 
 /// Whether Nix's standard error says it ran out of memory or stack.
-fn exhausted(stderr: &str) -> bool {
+pub(crate) fn exhausted(stderr: &str) -> bool {
     let stderr = stderr.to_lowercase();
     [
         "out of memory",
@@ -468,7 +502,7 @@ fn limited(stderr: &str) -> bool {
     stderr.contains("memory limit exceeded by regular expression")
 }
 
-fn settings() -> Settings {
+pub(crate) fn settings() -> Settings {
     Settings {
         // Nix's regular expressions are libstdc++'s `std::regex`, whose
         // semantics are too broken to reasonably match, so inputs that use
@@ -478,7 +512,7 @@ fn settings() -> Settings {
     }
 }
 
-fn show(r: &Run) -> String {
+pub(crate) fn show(r: &Run) -> String {
     match r {
         Ok(s) => s.clone(),
         Err(e) => format!("error: {}", e.trim_end()),
@@ -493,7 +527,7 @@ fn diverged(step: &str, src: &str, expr: &str, theirs: &Run, ours: &Run) -> Outc
     ))
 }
 
-fn panicked(src: &str, expr: &str, panic: &str) -> Outcome {
+pub(crate) fn panicked(src: &str, expr: &str, panic: &str) -> Outcome {
     Outcome::Diverged(format!(
         "step: panic\n--- input\n{src}\n--- expression\n{expr}\n--- ours\n{panic}\n"
     ))
@@ -519,7 +553,7 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 /// message of a panic on one of ogygia-nix-eval's threads, which is neither
 /// reported nor, under libFuzzer, an abort. Any other panic is the
 /// fuzzer's own, and propagates as it would without this.
-fn catch_ours<T>(f: impl FnOnce() -> T) -> Result<T, String> {
+pub(crate) fn catch_ours<T>(f: impl FnOnce() -> T) -> Result<T, String> {
     static HOOK: Once = Once::new();
     HOOK.call_once(|| {
         // Set after libFuzzer's hook, which reports a panic and aborts, so
@@ -563,7 +597,7 @@ fn run_ours(
 }
 
 /// Both sides succeed with the same output, or both fail.
-fn agree(theirs: &Run, ours: &Run) -> bool {
+pub(crate) fn agree(theirs: &Run, ours: &Run) -> bool {
     match (theirs, ours) {
         (Ok(a), Ok(b)) => a == b,
         (Err(_), Err(_)) => true,
@@ -593,7 +627,13 @@ fn agree(theirs: &Run, ours: &Run) -> bool {
 /// happens, ending the check there. ogygia-nix-eval runs before Nix in the
 /// parse step, so a panic there runs no Nix at all. A panic in the fuzzer
 /// itself propagates.
+///
+/// A flake bundle is instead compared with `nix eval` in the evaluate and
+/// catch steps, as the README describes.
 pub fn check(src: &str, budget: Budget) -> Outcome {
+    if crate::bundle::is_bundle(src) && !src.contains('\0') {
+        return crate::flake::check(src, budget);
+    }
     check_with(
         compile,
         |expr| ogygia_nix_eval::eval_to_string(expr, "/", true, settings()),

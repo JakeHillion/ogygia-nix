@@ -121,6 +121,7 @@
                 ./src/ogygia-clevis/tests/fixtures/sss.jwe
                 ./src/ogygia-nix-eval/tests/cases
                 ./src/ogygia-nix-eval-fuzz/README.md
+                ./src/ogygia-nix-eval-fuzz/flakes
               ];
             };
             inherit (craneLib.crateNameFromCargoToml { inherit src; }) version;
@@ -356,8 +357,8 @@
             '';
 
             # Real Nix code for the fuzzer to start from: our equivalence cases,
-            # nixpkgs' lib, and rnix's parser tests. The dictionary adds the
-            # name of every builtin of the pinned Nix.
+            # nixpkgs' lib, rnix's parser tests, and flake bundles. The
+            # dictionary adds the name of every builtin of the pinned Nix.
             fuzzSeeds =
               let
                 lock = builtins.fromTOML (builtins.readFile ./Cargo.lock);
@@ -369,7 +370,8 @@
                 ''
                   mkdir -p $out/seeds
                   find ${./src/ogygia-nix-eval/tests/cases} ${nixpkgs}/lib \
-                    ${rnix}/test_data/parser -name '*.nix' -print0 |
+                    ${rnix}/test_data/parser ${./src/ogygia-nix-eval-fuzz/flakes} \
+                    \( -name '*.nix' -o -name '*.flake' \) -print0 |
                     while IFS= read -r -d "" f; do
                       # Named by content, so duplicates are kept once.
                       seed=$out/seeds/$(sha1sum < "$f" | cut -c1-40)

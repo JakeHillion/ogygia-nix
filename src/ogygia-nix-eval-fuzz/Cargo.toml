@@ -10,6 +10,7 @@ cargo-fuzz = true
 
 [dependencies]
 clap = { workspace = true }
+git2 = { workspace = true }
 hex = { workspace = true }
 libc = { workspace = true }
 libfuzzer-sys = { workspace = true }

@@ -1,8 +1,9 @@
 # ogygia-nix-eval-fuzz
 
-A differential fuzzer for ogygia-nix-eval. It generates Nix source,
-evaluates it with both ogygia-nix-eval and a pinned `nix-instantiate`, and
-records every input on which they disagree. The equivalence tests in
+A differential fuzzer for ogygia-nix-eval. It generates Nix source and
+flakes, evaluates them with both ogygia-nix-eval and a pinned Nix
+(`nix-instantiate` for expressions, `nix eval` for flakes), and records
+every input on which they disagree. The equivalence tests in
 `src/ogygia-nix-eval/tests` cover the expressions someone thought to write;
 this covers the rest, for as long as it is left running.
 
@@ -45,6 +46,55 @@ ogygia-nix-eval only accepts text, and so are inputs containing a NUL byte:
 Nix stops reading at the first one outside a string, so it evaluates only
 a prefix of the input.
 
+### Flakes
+
+An input whose first line is `#~flake REF` is a flake bundle instead: a
+flake, its inputs and its lock file as one text, compared against `nix
+eval`. Its directives, each a line of its own, describe source trees and
+their files:
+
+```text
+#~flake path:@dir(root)#x
+#~lock
+#~tree root git
+#~file flake.nix
+{ inputs.dep.url = "path:@dir(dep)"; outputs = { self, dep }: { x = dep.v; }; }
+#~file notes unstaged
+not committed
+#~tree dep path
+#~file flake.nix
+{ outputs = _: { v = 1; }; }
+```
+
+- `#~tree NAME KIND` starts a tree: a plain directory (`path`), a Git
+  repository (`git`), or a directory added to the store (`store`), which
+  stands in for an input fetched from elsewhere, such as GitHub.
+- `#~file PATH FLAG...` starts a file of the current tree, holding every
+  line up to the next directive. `x` makes it executable and `link` a
+  symlink to its contents; in a Git tree, files are committed unless
+  `staged` (added to the index after the commit) or `unstaged` (written
+  after it and not added: untracked, or a modification).
+- `#~lock` locks the flake with `nix flake lock` first.
+- `@dir(NAME)` in the reference or any file is the absolute path of tree
+  `NAME`, and `@narHash(NAME)` the NAR hash of a store tree declared before,
+  so that a lock file can name an input in the store.
+
+The trees are written out with every modification and commit time fixed,
+and each check has a store and Nix caches of its own, so nothing depends on
+when or where it runs. Locking is a precondition, not something compared:
+an input that asks for it is locked by Nix before either side evaluates
+it, and every evaluation then runs with `--no-update-lock-file`, so a lock
+file that needs changing must fail on both sides. A bundle that is not
+well formed, or whose trees cannot be written, is ignored.
+
+The steps are the evaluate and catch steps above. The reference is `nix
+eval --json --no-update-lock-file --apply ENCODE REF`, where `ENCODE` turns
+every value into one that prints in full as JSON (each set, list, function,
+path or string tagged with its type, and strings with their context), and
+the catch step applies `builtins.tryEval (builtins.deepSeq v null)` before
+encoding. Nix quotes its own source in the errors of flakes, so reports
+leave out every quoted source line.
+
 ## How inputs are found
 
 libFuzzer drives the search. It keeps an input in the corpus when it
@@ -52,12 +102,14 @@ reaches code in ogygia-nix-eval (or rnix) that no earlier input reached,
 and makes new inputs by mutating and combining corpus entries. Its own
 byte-level mutations, which can turn any input into any other, run
 alongside mutations that replace, delete, copy, swap and splice whole nodes
-and tokens of rnix's syntax tree. Those make meaningful Nix likelier but
-never make any input unreachable.
+and tokens of rnix's syntax tree, within one of the Nix files of a flake
+bundle. Those make meaningful Nix likelier but never make any input
+unreachable.
 
 The Nix package ships seed inputs to start from (the equivalence cases,
-nixpkgs' `lib`, and rnix's parser tests) and a dictionary of Nix tokens and
-the name of every builtin of the pinned Nix.
+nixpkgs' `lib`, rnix's parser tests, and the flake bundles in `flakes`)
+and a dictionary of Nix tokens, bundle directives and the name of every
+builtin of the pinned Nix.
 
 ## Running it
 
@@ -72,8 +124,8 @@ nix run .#ogygia-nix-eval-fuzz -- run DIR
 below), then fuzzes until stopped. All three run one job per CPU unless
 `--jobs N` says otherwise. It keeps:
 
-- `DIR/corpus/`: libFuzzer's corpus. It is plain Nix source, so it stays
-  useful across revisions.
+- `DIR/corpus/`: libFuzzer's corpus. It is plain Nix source and flake
+  bundles, so it stays useful across revisions.
 - `DIR/crashed/`: inputs that crashed, hung or ran out of memory in
   ogygia-nix-eval when the corpus was last minimised, kept out of the
   corpus until they no longer do.
@@ -179,3 +231,6 @@ and Nix is the reference. What a run actually explores is another matter.
 - Impure behaviour (the clock, the environment, the filesystem outside the
   input, the network) is excluded by pure mode, and error messages are not
   compared. Divergences there need other tests.
+- A flake's inputs are local directories, local Git repositories, or
+  sources already in the store: neither side fetches anything over the
+  network, and lock files are written by Nix, not compared.
