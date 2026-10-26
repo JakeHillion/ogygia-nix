@@ -362,8 +362,19 @@ impl Io {
             root: root.into_owned(),
             kept,
         });
-        let sp = self.store.add_source(name, tree)?;
+        let (sp, _) = self.store.add_source(name, tree)?;
         self.allow(sp)
+    }
+
+    /// Add `tree` to the store under `name`, returning its store path and the
+    /// SHA-256 of its NAR serialisation. Pure evaluation may read it.
+    pub(crate) fn add_tree(
+        &self,
+        name: &str,
+        tree: Rc<dyn Accessor>,
+    ) -> Result<(String, [u8; 32])> {
+        let (sp, hash) = self.store.add_source(name, tree)?;
+        Ok((self.allow(sp)?, hash))
     }
 
     /// Add a file holding `contents` to the store, as `builtins.toFile` does,

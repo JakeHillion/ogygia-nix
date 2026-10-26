@@ -6,7 +6,7 @@ mod derivation;
 mod flake;
 mod fs;
 mod grisu2;
-mod json;
+pub(crate) mod json;
 mod lists;
 mod misc;
 pub(crate) mod regex;

@@ -2318,6 +2318,7 @@ dependencies = [
  "base64 0.22.1",
  "bumpalo",
  "enum-map",
+ "git2",
  "hex",
  "lasso",
  "libtest-mimic",

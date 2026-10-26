@@ -33,6 +33,7 @@ use crate::value::Value;
 use crate::value::anyhow_err;
 use crate::value::error;
 use crate::value::eval_err;
+use crate::value::type_err;
 
 mod machine;
 
@@ -286,7 +287,7 @@ impl<'a> Eval<'a> {
     }
 
     pub fn type_error<T>(&self, expected: &str, got: Value<'a>) -> R<'a, T> {
-        eval_err(format!(
+        type_err(format!(
             "expected {expected} but found {}",
             self.describe(got)
         ))
@@ -722,7 +723,7 @@ impl<'a> Eval<'a> {
                 if let Some(out) = a.get(s.out_path) {
                     return self.coerce_level(out, c, buf, ctx);
                 }
-                return eval_err(format!(
+                return type_err(format!(
                     "cannot coerce a set to a string: {}",
                     crate::print::short(self, v)
                 ));
@@ -744,7 +745,7 @@ impl<'a> Eval<'a> {
                 }
             }
             other => {
-                return eval_err(format!(
+                return type_err(format!(
                     "cannot coerce {} to a string: {}",
                     other.show_type(),
                     crate::print::short(self, other)

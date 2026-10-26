@@ -17,6 +17,7 @@ mod compile;
 mod context;
 mod derivation;
 mod eval;
+mod flake;
 mod io;
 mod ir;
 mod nar;
@@ -30,6 +31,7 @@ pub use context::Context;
 pub use eval::Eval;
 pub use eval::Feature;
 pub use eval::Settings;
+pub use flake::FlakeEnv;
 pub use io::Io;
 pub use print::print_strict;
 pub use value::EvalError;
@@ -97,6 +99,31 @@ pub fn eval_to_string(
             .eval_string(text, base_dir)
             .and_then(|v| print_strict(&ev, v));
         match result {
+            Ok(bytes) => Ok(String::from_utf8_lossy(&bytes).into_owned()),
+            Err(e) => Err(match e.kind {
+                value::ErrorKind::Disabled(feature) => Error::Disabled(feature),
+                _ => Error::Eval(e.to_string()),
+            }),
+        }
+    })
+}
+
+/// Evaluate the installable `installable`, a flake reference and an
+/// attribute path, as `nix eval --json --no-update-lock-file --apply apply
+/// installable` does, in `env`, and return what it prints, without the
+/// final newline.
+pub fn eval_flake_json(
+    installable: &str,
+    apply: &str,
+    env: &FlakeEnv,
+    settings: Settings,
+) -> Result<String, Error> {
+    run_with_stack(|| {
+        let ctx = Context::new(Io::pure());
+        let bump = bumpalo::Bump::new();
+        let flakes = std::cell::OnceCell::new();
+        let ev = Eval::new(&ctx, &bump, settings);
+        match flake::eval_json(&ev, installable, apply, env, &flakes) {
             Ok(bytes) => Ok(String::from_utf8_lossy(&bytes).into_owned()),
             Err(e) => Err(match e.kind {
                 value::ErrorKind::Disabled(feature) => Error::Disabled(feature),

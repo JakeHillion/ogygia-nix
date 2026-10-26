@@ -188,8 +188,8 @@ pub trait Store {
     fn add_text(&self, name: &str, contents: &[u8], refs: &[&str]) -> Result<StorePath>;
 
     /// Add the tree rooted at the empty path in `tree`, addressed by the hash
-    /// of its NAR serialisation.
-    fn add_source(&self, name: &str, tree: Rc<dyn Accessor>) -> Result<StorePath>;
+    /// of its NAR serialisation, which is returned too.
+    fn add_source(&self, name: &str, tree: Rc<dyn Accessor>) -> Result<(StorePath, [u8; 32])>;
 }
 
 /// A hash algorithm Nix supports.
