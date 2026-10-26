@@ -11,9 +11,6 @@
 , tzdata
 , nebula
 , ogygia-macos-nebulad
-, version
-, buildNumber
-, gitRevision
 }:
 
 let
@@ -80,7 +77,7 @@ let
 in
 buildXcodeApp {
   pname = "ogygia-macos";
-  inherit version buildNumber gitRevision packages;
+  inherit packages;
 
   src = lib.fileset.toSource {
     root = ./.;

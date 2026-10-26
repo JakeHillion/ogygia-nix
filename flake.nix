@@ -52,19 +52,30 @@
             # build is signed differently and does not match.
             xcode = pkgs.darwin.requireXcode "27.0" "sha256-k0YuMjPbP5Adnnx6KhQXGRi8kRLPpXJN+EUxpqYHwOE=";
           };
-          callApp = pkgs.lib.callPackageWith (pkgs // xcodeBuild // {
+          callApp = pkgs.lib.callPackageWith (pkgs // xcodeBuild);
+          stamp = app: infoPlist: xcodeBuild.stampXcodeApp {
+            inherit app infoPlist;
             version = (nixpkgs.lib.importTOML ./Cargo.toml).workspace.package.version;
             # Sparkle and TestFlight both order builds by CFBundleVersion, so
             # it must grow with every commit on main; the commit count does.
             buildNumber = self.revCount or 0;
             gitRevision = self.shortRev or self.dirtyShortRev or "unknown";
-          });
-        in
-        {
-          packages.ogygia-macos = callApp ./app/macos {
+          };
+
+          # The xcodebuild outputs, which only change when an app's own inputs
+          # do. Only they need Xcode.
+          ogygia-macos-unstamped = callApp ./app/macos {
             inherit (self.packages.${system}) ogygia-macos-nebulad;
           };
-          packages.ogygia-ios = callApp ./app/ios { };
+          ogygia-ios-unstamped = callApp ./app/ios { };
+        in
+        {
+          packages = {
+            inherit ogygia-macos-unstamped ogygia-ios-unstamped;
+            # The apps as released, which change with every commit.
+            ogygia-macos = stamp ogygia-macos-unstamped "Contents/Info.plist";
+            ogygia-ios = stamp ogygia-ios-unstamped "Info.plist";
+          };
         });
     in
     nixpkgs.lib.recursiveUpdate darwinOutputs
@@ -422,7 +433,7 @@
 
             # The apps need Xcode in the store, which only CI's apple-apps job
             # adds, so they are built there rather than as checks.
-            checks = builtins.removeAttrs self.packages.${system} [ "ogygia-macos" "ogygia-ios" ] // self.devShells.${system} // linuxOnly {
+            checks = builtins.removeAttrs self.packages.${system} [ "ogygia-macos" "ogygia-ios" "ogygia-macos-unstamped" "ogygia-ios-unstamped" ] // self.devShells.${system} // linuxOnly {
 
               ogygia-clippy = craneLib.cargoClippy (commonArgs // {
                 inherit cargoArtifacts;
