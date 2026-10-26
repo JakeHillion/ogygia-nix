@@ -1,0 +1,42 @@
+#~flake path:@dir(root)#.
+#~tree dep store
+#~file flake.nix
+{ outputs = { self }: { v = 1; }; }
+#~tree root path
+#~file flake.nix
+{
+  inputs.gh.url = "github:someone/dep";
+  inputs.tb.url = "https://example.com/x.tar.xz";
+  inputs.nf = { url = "github:o/nf"; flake = false; };
+  inputs.missing.url = "github:o/missing";
+  outputs = { self, missing, ... }@i: {
+    gh = removeAttrs i.gh [ "outputs" ];
+    tb = removeAttrs i.tb [ "outputs" ];
+    nf = i.nf;
+  };
+}
+#~file flake.lock
+{
+  "nodes": {
+    "gh": {
+      "locked": { "lastModified": 1700000000, "narHash": "@narHash(dep)", "owner": "someone", "repo": "dep", "rev": "0123456789abcdef0123456789abcdef01234567", "type": "github" },
+      "original": { "owner": "someone", "repo": "dep", "type": "github" }
+    },
+    "missing": {
+      "locked": { "lastModified": 1700000000, "narHash": "sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=", "owner": "o", "repo": "missing", "rev": "1123456789abcdef0123456789abcdef01234567", "type": "github" },
+      "original": { "owner": "o", "repo": "missing", "type": "github" }
+    },
+    "nf": {
+      "flake": false,
+      "locked": { "lastModified": 1700000002, "narHash": "@narHash(dep)", "owner": "o", "repo": "nf", "rev": "2123456789abcdef0123456789abcdef01234567", "type": "github" },
+      "original": { "owner": "o", "repo": "nf", "type": "github" }
+    },
+    "tb": {
+      "locked": { "lastModified": 1700000003, "narHash": "@narHash(dep)", "type": "tarball", "url": "https://example.com/x.tar.xz" },
+      "original": { "type": "tarball", "url": "https://example.com/x.tar.xz" }
+    },
+    "root": { "inputs": { "gh": "gh", "missing": "missing", "nf": "nf", "tb": "tb" } }
+  },
+  "root": "root",
+  "version": 7
+}

@@ -2341,6 +2341,7 @@ name = "ogygia-nix-eval-fuzz"
 version = "0.1.0"
 dependencies = [
  "clap",
+ "git2",
  "hex",
  "libc",
  "libfuzzer-sys",

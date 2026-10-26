@@ -65,7 +65,8 @@ enum Command {
         #[arg(long)]
         jobs: Option<NonZero<usize>>,
     },
-    /// Compare ogygia-nix-eval with Nix on the Nix expression in FILE.
+    /// Compare ogygia-nix-eval with Nix on the Nix expression or flake
+    /// bundle in FILE.
     Check { file: PathBuf },
 }
 

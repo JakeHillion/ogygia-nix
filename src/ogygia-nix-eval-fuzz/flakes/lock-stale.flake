@@ -1,0 +1,9 @@
+#~flake path:@dir(root)#x
+#~tree root path
+#~file flake.nix
+{ inputs.a.url = "path:@dir(a)"; outputs = { self, a }: { x = a.v; }; }
+#~file flake.lock
+{ "nodes": { "root": { "inputs": { } } }, "root": "root", "version": 7 }
+#~tree a path
+#~file flake.nix
+{ outputs = _: { v = 1; }; }

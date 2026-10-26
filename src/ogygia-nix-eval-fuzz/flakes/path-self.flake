@@ -1,0 +1,10 @@
+#~flake path:@dir(root)#.
+#~tree root path
+#~file flake.nix
+{
+  description = "a flake";
+  outputs = { self }: {
+    info = removeAttrs self [ "outputs" "info" ];
+    names = builtins.attrNames self;
+  };
+}
