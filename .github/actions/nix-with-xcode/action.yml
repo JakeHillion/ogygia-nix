@@ -1,0 +1,36 @@
+name: Nix with Xcode
+description: >-
+  Installs Nix for building the apple apps, and adds the runner's Xcode to
+  the store under the hash nixpkgs pins.
+
+# No S3 cache here: this adds Xcode to the store, and Xcode's licence
+# forbids pushing it to the public cache.
+runs:
+  using: composite
+  steps:
+  - name: Install Nix
+    uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24 # v31
+    with:
+      extra_nix_config: |
+        accept-flake-config = true
+        extra-substituters = https://nixcache.jakehillion.me
+        extra-trusted-public-keys = nixcache.jakehillion.me-1:HQsjYdrcs3ilS/ngtlbTQXU4Xfsm+va5NN7yoK0wKMg=
+        sandbox = true
+        # The host paths app/xcode-build declares in __impureHostDeps.
+        allowed-impure-host-deps = /System/Library /bin/sh /dev /usr/lib /usr/share/firmlinks /Library/Developer/PrivateFrameworks /Library/Apple/System/Library/PrivateFrameworks /Library/Preferences/com.apple.dt.Xcode.plist /usr/bin/codesign /usr/bin/touch
+
+  # Xcode cannot be downloaded without an Apple ID, so the runner's copy
+  # is added under the hash nixpkgs pins. A runner image whose Xcode
+  # differs from the pin fails here rather than building with it. Both
+  # apps build with the same Xcode.
+  - name: Add Xcode to the Nix store
+    shell: bash
+    run: |
+      expected="$(nix eval --raw .#packages.aarch64-darwin.ogygia-macos.xcode.outPath)"
+      cp -cR /Applications/Xcode_27.app "$RUNNER_TEMP/Xcode.app"
+      added="$(nix-store --add-fixed --recursive sha256 "$RUNNER_TEMP/Xcode.app")"
+      rm -rf "$RUNNER_TEMP/Xcode.app"
+      if [ "$added" != "$expected" ]; then
+        echo "::error::Runner Xcode is $added, but the pin expects $expected"
+        exit 1
+      fi
