@@ -18,6 +18,7 @@ use crate::value::ThunkState;
 use crate::value::Value;
 use crate::value::anyhow_err;
 use crate::value::eval_err;
+use crate::value::type_err;
 
 /// `derivation` is a thin Nix wrapper around `derivationStrict` that turns its
 /// result into one attribute set per output.
@@ -96,7 +97,7 @@ pub fn derivation_strict<'a>(ev: &Eval<'a>, attrs: Value<'a>) -> R<'a> {
     let attrs = ev.force_attrs(attrs)?;
     let syms = &ev.ctx.syms;
     let Some(name_v) = attrs.get(syms.name) else {
-        return eval_err("required attribute 'name' missing");
+        return type_err("required attribute 'name' missing");
     };
     let name = to_str(ev.force_str_no_ctx(name_v)?);
     if let Err(e) = crate::store::check_name(&name) {
@@ -222,10 +223,10 @@ pub fn derivation_strict<'a>(ev: &Eval<'a>, attrs: Value<'a>) -> R<'a> {
         drv.env.insert("__json".to_owned(), json);
     }
     if drv.builder.is_empty() {
-        return eval_err("required attribute 'builder' missing");
+        return type_err("required attribute 'builder' missing");
     }
     if drv.platform.is_empty() {
-        return eval_err("required attribute 'system' missing");
+        return type_err("required attribute 'system' missing");
     }
 
     for c in &ctx {

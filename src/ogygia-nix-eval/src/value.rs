@@ -121,6 +121,9 @@ pub enum ThunkState<'a> {
     Expr(ExprRef<'a>, &'a Env<'a>),
     /// A lazy function application.
     App(Value<'a>, Value<'a>),
+    /// Computed by native code, as part of evaluating something other than
+    /// an expression, such as a flake.
+    Native(&'a dyn Fn(&Eval<'a>) -> R<'a>),
     Blackhole,
     Done(Value<'a>),
 }
@@ -153,6 +156,9 @@ pub enum ErrorKind {
     /// `abort`.
     Abort,
     InfiniteRecursion,
+    /// A value of the wrong type, or a function called with the wrong
+    /// arguments.
+    Type,
     /// Any other evaluation error.
     Eval,
     /// Use of a feature in [`crate::Settings::disabled`].
@@ -190,6 +196,11 @@ pub fn error(kind: ErrorKind, msg: impl Into<String>) -> Box<EvalError> {
 
 pub fn eval_err<T>(msg: impl Into<String>) -> Result<T, Box<EvalError>> {
     Err(error(ErrorKind::Eval, msg))
+}
+
+/// An [`ErrorKind::Type`] error.
+pub fn type_err<T>(msg: impl Into<String>) -> Result<T, Box<EvalError>> {
+    Err(error(ErrorKind::Type, msg))
 }
 
 /// An [`ErrorKind::Eval`] error whose message is `e` and its causes.

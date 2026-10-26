@@ -41,6 +41,7 @@ use crate::value::ThunkState;
 use crate::value::Value;
 use crate::value::error;
 use crate::value::eval_err;
+use crate::value::type_err;
 
 /// What the loop does next.
 pub(super) enum Step<'a> {
@@ -272,6 +273,14 @@ impl<'a> Eval<'a> {
             }
             ThunkState::Expr(e, env) => Step::Eval(e, env),
             ThunkState::App(f, x) => Step::Call(f, x, None),
+            ThunkState::Native(f) => {
+                t.0.set(ThunkState::Blackhole);
+                stack.push(Frame::Thunk(t, state));
+                // Like a primop, one call deeper.
+                let depth = self.enter()?;
+                stack.push(Frame::Leave(depth, None));
+                return Ok(Step::Force(f(self)?));
+            }
         };
         t.0.set(ThunkState::Blackhole);
         stack.push(Frame::Thunk(t, state));
@@ -543,7 +552,7 @@ impl<'a> Eval<'a> {
                 stack.push(Frame::Call { arg, pos });
                 Ok(Step::Call(functor, f, None))
             }
-            other => eval_err(format!(
+            other => type_err(format!(
                 "attempt to call something which is not a function but {}{}",
                 self.describe(other),
                 pos.map(|p| format!(" at {p}")).unwrap_or_default()
@@ -614,7 +623,7 @@ impl<'a> Eval<'a> {
         let attrs = match set {
             Value::Attrs(a) => a,
             other => {
-                return eval_err(format!(
+                return type_err(format!(
                     "expected a set but found {} while evaluating the value passed for the lambda argument at {}",
                     self.describe(other),
                     def.pos
@@ -632,7 +641,7 @@ impl<'a> Eval<'a> {
                 None => match formal.default {
                     Some(d) => slot.set(self.lazy_slot(d, env)),
                     None => {
-                        return eval_err(format!(
+                        return type_err(format!(
                             "function '{}' called without required argument '{}' at {}",
                             self.lambda_name(def.name),
                             self.name(formal.name),
@@ -648,7 +657,7 @@ impl<'a> Eval<'a> {
                 .into_iter()
                 .find(|e| !formals.iter().any(|f| f.name == e.name));
             if let Some(bad) = bad {
-                return eval_err(format!(
+                return type_err(format!(
                     "function '{}' called with unexpected argument '{}' at {}",
                     self.lambda_name(def.name),
                     self.name(bad.name),
@@ -737,7 +746,14 @@ impl<'a> Eval<'a> {
                     self.list(&v)
                 }
             }
-            _ => self.arith(Arith::Add, a, b, Some(pos))?,
+            // Unlike `builtins.add`, `+` fails on a number and a non-number
+            // with a plain evaluation error.
+            _ => self.arith(Arith::Add, a, b, Some(pos)).map_err(|mut e| {
+                if e.kind == ErrorKind::Type {
+                    e.kind = ErrorKind::Eval;
+                }
+                e
+            })?,
         }))
     }
 
