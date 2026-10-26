@@ -157,9 +157,9 @@ pub enum Expr<'a> {
     Str(&'a NixStr<'a>),
     Path(&'a PathV<'a>),
     /// A path with interpolations; the first part evaluates to a path.
-    InterpPath(&'a [ExprRef<'a>], Pos<'a>),
+    InterpPath(&'a [ExprRef<'a>]),
     /// String interpolation; the result is always a string.
-    InterpStr(&'a [ExprRef<'a>], Pos<'a>),
+    InterpStr(&'a [ExprRef<'a>]),
     Var(u32, u32),
     WithVar {
         name: Sym,
