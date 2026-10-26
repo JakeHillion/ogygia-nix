@@ -1,13 +1,9 @@
 { lib
 , buildXcodeApp
-, version
-, buildNumber
-, gitRevision
 }:
 
 buildXcodeApp {
   pname = "ogygia-ios";
-  inherit version buildNumber gitRevision;
 
   src = lib.fileset.toSource {
     root = ./.;

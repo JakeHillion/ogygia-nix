@@ -1,6 +1,7 @@
 { lib
 , stdenvNoCC
 , fetchurl
+, python3
 , unzip
 , writeText
 , xcode
@@ -93,19 +94,22 @@ let
   # Builds one scheme of an Xcode project with xcodebuild, inside the
   # sandbox and unsigned; the caller's installPhase copies the products out
   # of $derivedData. Signing happens after the build, outside the sandbox.
+  #
+  # The bundle keeps the project's placeholder version, build number and git
+  # revision, so the build depends only on the app's own inputs and stays the
+  # same derivation across commits that leave them alone. stampXcodeApp sets
+  # the real values afterwards.
   buildXcodeApp =
     { project
     , scheme
-    , version
-    , buildNumber
-    , gitRevision
     , packages ? [ ]
     , xcodebuildFlags ? [ ]
     , nativeBuildInputs ? [ ]
     , passthru ? { }
     , ...
     }@args:
-    stdenvNoCC.mkDerivation (builtins.removeAttrs args [ "project" "scheme" "buildNumber" "gitRevision" "packages" "xcodebuildFlags" ] // {
+    stdenvNoCC.mkDerivation (builtins.removeAttrs args [ "project" "scheme" "packages" "xcodebuildFlags" ] // {
+      version = "unstamped";
       nativeBuildInputs = nativeBuildInputs ++ lib.optional (packages != [ ]) unzip;
 
       # Host paths xcodebuild cannot run without. They are readable only, and
@@ -184,10 +188,7 @@ let
           -IDEPackageSupportDisableManifestSandbox=YES \
           build \
           CODE_SIGNING_ALLOWED=NO \
-          OTHER_SWIFT_FLAGS='$(inherited) -disable-sandbox' \
-          MARKETING_VERSION=${version} \
-          CURRENT_PROJECT_VERSION=${toString buildNumber} \
-          OGYGIA_GIT_REVISION=${gitRevision}
+          OTHER_SWIFT_FLAGS='$(inherited) -disable-sandbox'
 
         runHook postBuild
       '';
@@ -205,7 +206,45 @@ let
         platforms = [ "aarch64-darwin" ];
       } // args.meta or { };
     });
+
+  # Sets the version, build number and git revision of an app that
+  # buildXcodeApp built. They live only in Info.plist, so this needs no Xcode
+  # and takes seconds. Nothing in the bundle is sealed yet: xcodebuild signs
+  # nothing, and the linker's ad-hoc signature of an executable does not bind
+  # Info.plist.
+  stampXcodeApp =
+    { app
+    , infoPlist
+    , version
+    , buildNumber
+    , gitRevision
+    }:
+    stdenvNoCC.mkDerivation {
+      inherit (app) pname meta;
+      inherit version;
+      nativeBuildInputs = [ python3 ];
+
+      dontUnpack = true;
+      installPhase = ''
+        runHook preInstall
+
+        mkdir -p "$out/Applications"
+        cp -R ${app}/Applications/Ogygia.app "$out/Applications/Ogygia.app"
+        plist="$out/Applications/Ogygia.app/${infoPlist}"
+        chmod u+w "$(dirname "$plist")" "$plist"
+        python3 ${./stamp.py} "$plist" ${lib.escapeShellArgs [ version (toString buildNumber) gitRevision ]}
+
+        runHook postInstall
+      '';
+
+      # Fixup would strip binaries the app ships already signed, such as
+      # Sparkle's.
+      dontFixup = true;
+      allowedReferences = [ ];
+
+      passthru = app.passthru // { unstamped = app; };
+    };
 in
 {
-  inherit swiftPackages buildXcodeApp;
+  inherit swiftPackages buildXcodeApp stampXcodeApp;
 }
