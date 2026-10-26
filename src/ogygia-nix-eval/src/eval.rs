@@ -418,15 +418,20 @@ impl<'a> Eval<'a> {
         self.str_val(buf, &ctx)
     }
 
-    pub(crate) fn new_frame(&self, inits: &'a [ExprRef<'a>], parent: &'a Env<'a>) -> &'a Env<'a> {
+    /// A frame of `n` slots under `parent`, to be filled in.
+    fn alloc_env(&self, n: usize, parent: &'a Env<'a>) -> &'a Env<'a> {
         let slots = self
             .bump
-            .alloc_slice_fill_with(inits.len(), |_| Cell::new(Value::Null));
-        let env: &'a Env<'a> = self.bump.alloc(Env {
+            .alloc_slice_fill_with(n, |_| Cell::new(Value::Null));
+        self.bump.alloc(Env {
             parent: Some(parent),
             slots,
-        });
-        for (slot, e) in slots.iter().zip(inits) {
+        })
+    }
+
+    pub(crate) fn new_frame(&self, inits: &'a [ExprRef<'a>], parent: &'a Env<'a>) -> &'a Env<'a> {
+        let env = self.alloc_env(inits.len(), parent);
+        for (slot, e) in env.slots.iter().zip(inits) {
             slot.set(self.lazy_slot(e, env));
         }
         env

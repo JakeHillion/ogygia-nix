@@ -8,8 +8,6 @@
 //! counts towards max-call-depth, which bounds how many loops are nested on
 //! the native stack.
 
-use std::cell::Cell;
-
 use super::Arith;
 use super::Coerce;
 use super::Eval;
@@ -342,11 +340,8 @@ impl<'a> Eval<'a> {
             Expr::Let(def) => Step::Eval(def.body, self.new_frame(def.slots, env)),
             Expr::With { namespace, body } => {
                 let ns = self.lazy(namespace, env);
-                let slots = self.bump.alloc_slice_fill_with(1, |_| Cell::new(ns));
-                let env = self.bump.alloc(Env {
-                    parent: Some(env),
-                    slots,
-                });
+                let env = self.alloc_env(1, env);
+                env.slots[0].set(ns);
                 Step::Eval(body, env)
             }
             Expr::If(c, t, f) => {
@@ -588,7 +583,7 @@ impl<'a> Eval<'a> {
     ) -> R<'a, Step<'a>> {
         match &c.def.param {
             Param::Ident(_) => {
-                let env = self.lambda_env(c);
+                let env = self.alloc_env(c.def.nslots(), c.env);
                 env.slots[0].set(arg);
                 self.body(stack, c.def, env)
             }
@@ -600,16 +595,6 @@ impl<'a> Eval<'a> {
                 }
             },
         }
-    }
-
-    fn lambda_env(&self, c: &'a Closure<'a>) -> &'a Env<'a> {
-        let slots = self
-            .bump
-            .alloc_slice_fill_with(c.def.nslots(), |_| Cell::new(Value::Null));
-        self.bump.alloc(Env {
-            parent: Some(c.env),
-            slots,
-        })
     }
 
     /// Bind the formals of `c` to `set`, the forced value of `arg`.
@@ -639,7 +624,7 @@ impl<'a> Eval<'a> {
                 ));
             }
         };
-        let env = self.lambda_env(c);
+        let env = self.alloc_env(c.def.nslots(), c.env);
         let mut used = 0;
         for (slot, formal) in env.slots.iter().zip(formals.iter()) {
             match attrs.get(formal.name) {
