@@ -194,8 +194,8 @@ fn add_path<'a>(
     filter: Option<Value<'a>>,
 ) -> R<'a> {
     let name = match name {
-        Some(n) => n,
-        None => crate::path::store_name(path),
+        Some(n) if !n.is_empty() => n,
+        _ => crate::path::store_name(path),
     };
     let io = &ev.ctx.io;
     let sp = match filter {
