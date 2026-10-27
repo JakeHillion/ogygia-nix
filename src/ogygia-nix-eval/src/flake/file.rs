@@ -169,28 +169,21 @@ fn input_spec<'a>(ev: &Eval<'a>, name: &str, field: Field<'a>, top: bool) -> R<'
                 }
             }
             _ => {
-                let value = f.expect(ev, "a string, integer or Boolean", &at, |v| match v {
-                    Value::Str(s) => Some(Attr::Str(s.as_str_lossy().into_owned())),
-                    Value::Bool(b) => Some(Attr::Bool(b)),
-                    Value::Int(i) if i >= 0 => Some(Attr::Int(i as u64)),
-                    _ => None,
-                })?;
+                let value = f.expect(ev, "a string, integer or Boolean", &at, Attr::from_value)?;
                 extra.insert(attr.to_owned(), value);
             }
         }
     }
-    let mut attrs = match url {
-        Some(url) => Some(flakeref::parse(&url, None).map_err(anyhow_err)?),
-        None if !extra.is_empty() => Some(Attrs::new()),
+    spec.attrs = match url {
+        Some(url) => {
+            let mut attrs = flakeref::parse(&url, None).map_err(anyhow_err)?;
+            attrs.extend(extra);
+            Some(attrs)
+        }
+        None if !extra.is_empty() => Some(extra),
+        None if top && spec.follows.is_none() => Some(indirect(name)),
         None => None,
     };
-    if let Some(attrs) = &mut attrs {
-        attrs.extend(extra);
-    }
-    if top && attrs.is_none() && spec.follows.is_none() {
-        attrs = Some(indirect(name));
-    }
-    spec.attrs = attrs;
     Ok(spec)
 }
 

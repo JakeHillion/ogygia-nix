@@ -7,12 +7,27 @@ use std::path::Path;
 use anyhow::Result;
 use anyhow::bail;
 
+use crate::value::Value;
+
 /// The value of an attribute of an input.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Attr {
     Str(String),
     Int(u64),
     Bool(bool),
+}
+
+impl Attr {
+    /// The attribute `v` holds, if it is a string, Boolean or non-negative
+    /// integer.
+    pub fn from_value(v: Value<'_>) -> Option<Attr> {
+        match v {
+            Value::Str(s) => Some(Attr::Str(s.as_str_lossy().into_owned())),
+            Value::Bool(b) => Some(Attr::Bool(b)),
+            Value::Int(i) if i >= 0 => Some(Attr::Int(i as u64)),
+            _ => None,
+        }
+    }
 }
 
 /// An input as a set of attributes, as a lock file's `original` and

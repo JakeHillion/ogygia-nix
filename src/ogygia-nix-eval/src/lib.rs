@@ -95,17 +95,21 @@ pub fn eval_to_string(
         let ctx = Context::new(if pure { Io::pure() } else { Io::default() });
         let bump = bumpalo::Bump::new();
         let ev = Eval::new(&ctx, &bump, settings);
-        let result = ev
-            .eval_string(text, base_dir)
-            .and_then(|v| print_strict(&ev, v));
-        match result {
-            Ok(bytes) => Ok(String::from_utf8_lossy(&bytes).into_owned()),
-            Err(e) => Err(match e.kind {
-                value::ErrorKind::Disabled(feature) => Error::Disabled(feature),
-                _ => Error::Eval(e.to_string()),
-            }),
-        }
+        printed(
+            ev.eval_string(text, base_dir)
+                .and_then(|v| print_strict(&ev, v)),
+        )
     })
+}
+
+fn printed(result: Result<Vec<u8>, Box<EvalError>>) -> Result<String, Error> {
+    match result {
+        Ok(bytes) => Ok(String::from_utf8_lossy(&bytes).into_owned()),
+        Err(e) => Err(match e.kind {
+            value::ErrorKind::Disabled(feature) => Error::Disabled(feature),
+            _ => Error::Eval(e.to_string()),
+        }),
+    }
 }
 
 /// Evaluate the installable `installable`, a flake reference and an
@@ -123,12 +127,6 @@ pub fn eval_flake_json(
         let bump = bumpalo::Bump::new();
         let flakes = std::cell::OnceCell::new();
         let ev = Eval::new(&ctx, &bump, settings);
-        match flake::eval_json(&ev, installable, apply, env, &flakes) {
-            Ok(bytes) => Ok(String::from_utf8_lossy(&bytes).into_owned()),
-            Err(e) => Err(match e.kind {
-                value::ErrorKind::Disabled(feature) => Error::Disabled(feature),
-                _ => Error::Eval(e.to_string()),
-            }),
-        }
+        printed(flake::eval_json(&ev, installable, apply, env, &flakes))
     })
 }
