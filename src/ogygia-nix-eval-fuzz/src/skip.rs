@@ -29,6 +29,7 @@ pub(crate) enum Evidence<'a> {
     Disagreement {
         theirs: &'a Run,
         store: Option<&'a Store>,
+        ours: &'a Run,
     },
 }
 
@@ -62,6 +63,13 @@ pub enum Skip {
     /// failure, until NixOS/nix#16525
     /// (<https://github.com/NixOS/nix/issues/16525>) is fixed.
     UnescapedPlatform,
+    /// ogygia-nix-eval failed reading `/` or `/nix/store`, as forbidden in
+    /// pure evaluation or as not existing, where Nix succeeded after adding
+    /// a path to its store. Once it has added one, Nix lets pure evaluation
+    /// see the parents of store paths, `/` as an empty directory; that is a
+    /// harmless artefact of its implementation, which ogygia-nix-eval does
+    /// not match and which is not reported upstream.
+    StoreRoot,
 }
 
 impl Skip {
@@ -82,7 +90,11 @@ impl Skip {
             ),
             Skip::UnescapedPlatform => matches!(
                 evidence,
-                Evidence::Disagreement { theirs, store } if misread_platform(theirs, *store)
+                Evidence::Disagreement { theirs, store, .. } if misread_platform(theirs, *store)
+            ),
+            Skip::StoreRoot => matches!(
+                evidence,
+                Evidence::Disagreement { theirs, store, ours } if hidden_root(theirs, *store, ours)
             ),
         }
     }
@@ -215,6 +227,27 @@ fn strip_list(s: &str, strip_elem: impl Fn(&str) -> Option<&str>) -> Option<&str
     }
 }
 
+/// Whether the two disagree only as [`Skip::StoreRoot`] describes: Nix
+/// succeeded after adding a path to its store, and ogygia-nix-eval's last
+/// error is that pure evaluation forbids `/` or `/nix/store`, or that it
+/// does not exist.
+fn hidden_root(theirs: &Run, store: Option<&Store>, ours: &Run) -> bool {
+    let Err(err) = ours else { return false };
+    let Some(last) = err.lines().rfind(|l| !l.trim().is_empty()).map(|l| {
+        let l = l.trim();
+        l.strip_prefix("error: ").unwrap_or(l)
+    }) else {
+        return false;
+    };
+    let hidden = |path| {
+        last == format!(
+            "access to absolute path '{path}' is forbidden in pure evaluation mode \
+             (use '--impure' to override)"
+        ) || last == format!("path '{path}' does not exist")
+    };
+    theirs.is_ok() && store.is_some_and(Store::stored) && (hidden("/") || hidden("/nix/store"))
+}
+
 #[cfg(test)]
 mod tests {
     use ogygia_nix_eval::Error;
@@ -222,6 +255,8 @@ mod tests {
 
     use super::*;
     use crate::Budget;
+    use crate::Outcome;
+    use crate::check::Theirs;
     use crate::check::check_with;
     use crate::check::compile;
     use crate::check::run_nix;
@@ -376,5 +411,84 @@ mod tests {
             &format!("({bad}).drvPath"),
         ));
         assert!(panicked.starts_with("step: panic\n"), "{panicked}");
+    }
+
+    #[test]
+    fn skips_the_root_once_nix_has_stored_a_path() {
+        let stored = r#"builtins.seq (builtins.toFile "x" "y")"#;
+        for expr in [
+            format!("{stored} (builtins.readDir /.)"),
+            format!(r#"{stored} "${{/sub/..}}""#),
+            format!("{stored} (builtins.filterSource (p: t: true) /.)"),
+            format!("{stored} (builtins.readFileType /.)"),
+            format!("{stored} (builtins.readFileType /nix/store)"),
+            r#"builtins.seq "${<nix/fetchurl.nix>}" (builtins.readDir /.)"#.to_owned(),
+            // Where both fail, but only ours fails uncatchably.
+            format!(r#"[ ({stored} (builtins.readDir /.)) (throw "t") ]"#),
+        ] {
+            assert_eq!(outcome(&expr), "deliberate-divergence store-root", "{expr}");
+        }
+        // Nix fails listing or copying the store directory uncatchably, as
+        // ours does.
+        assert_eq!(
+            outcome(&format!("{stored} (builtins.readDir /nix/store)")),
+            "uncaught"
+        );
+        assert_eq!(
+            outcome(&format!(r#"{stored} "${{/nix/store}}""#)),
+            "uncaught"
+        );
+    }
+
+    #[test]
+    fn reports_other_failures_beside_the_root() {
+        let stored = r#"builtins.seq (builtins.toFile "x" "y")"#;
+        assert_eq!(outcome("builtins.readDir /."), "uncaught");
+        assert_eq!(
+            outcome(&format!("{stored} (builtins.readDir /etc)")),
+            "uncaught"
+        );
+        let nix = |stored| {
+            move |mode: &[&str], _: &str| -> Result<Theirs, Outcome> {
+                Ok(Theirs {
+                    run: Ok(String::new()),
+                    store: (stored && mode != ["--parse"]).then(|| {
+                        let store = Store::new();
+                        std::fs::create_dir_all(store.dir().join("x")).unwrap();
+                        store
+                    }),
+                })
+            }
+        };
+        let diverges = |stored, err: &str| {
+            let err = format!("… while calling 'dc'\nerror: {err}\n");
+            matches!(
+                check_with(compile, |_| Err(Error::Eval(err.clone())), nix(stored), "1"),
+                Outcome::Diverged(_)
+            )
+        };
+        let forbidden = |path: &str| {
+            format!(
+                "access to absolute path '{path}' is forbidden in pure evaluation mode \
+                 (use '--impure' to override)"
+            )
+        };
+        for path in ["/", "/nix/store"] {
+            assert!(!diverges(true, &forbidden(path)), "{path}");
+            assert!(
+                !diverges(true, &format!("path '{path}' does not exist")),
+                "{path}"
+            );
+            assert!(diverges(false, &forbidden(path)), "{path}");
+        }
+        for path in ["/etc", "/nix", "/nix/store/x", "//"] {
+            assert!(diverges(true, &forbidden(path)), "{path}");
+            assert!(
+                diverges(true, &format!("path '{path}' does not exist")),
+                "{path}"
+            );
+        }
+        assert!(diverges(true, "path '/' is not a valid store path"));
+        assert!(diverges(true, &format!("{} x", forbidden("/"))));
     }
 }
