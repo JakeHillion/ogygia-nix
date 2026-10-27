@@ -17,15 +17,15 @@ use crate::check::Ran;
 use crate::check::Run;
 use crate::check::Store;
 use crate::check::agree;
-use crate::check::catch_ours;
-use crate::check::misread_platform;
+use crate::check::disagreed;
 use crate::check::nix_command;
 use crate::check::nix_instantiate;
-use crate::check::panicked;
 use crate::check::run_command;
+use crate::check::run_ours;
 use crate::check::scratch;
 use crate::check::settings;
-use crate::check::show;
+use crate::skip::Evidence;
+use crate::skip::Skip;
 
 /// Turns any value into one `--json` prints in full: every value becomes a
 /// set naming its type, so that sets with an `outPath`, functions and paths
@@ -99,7 +99,7 @@ fn flake_command(store: &Store, cache: &Path, cwd: &Path) -> std::process::Comma
 }
 
 /// Write `bundle`'s trees under `work`, adding its store trees to `store`.
-/// Fails with [`Outcome::Ignored`] if they cannot be written, or as
+/// Fails with a deliberate divergence if they cannot be written, or as
 /// [`run_command`] does if Nix cannot finish.
 fn materialise(
     bundle: &Bundle<'_>,
@@ -131,7 +131,7 @@ fn materialise(
                 .is_ok(),
         };
         if !written {
-            return Err(Outcome::Ignored);
+            return Err(malformed());
         }
         set_mtimes(&dir);
         if tree.kind == Kind::Store {
@@ -246,7 +246,7 @@ fn copy_tree(from: &Path, to: &Path) -> std::io::Result<()> {
 }
 
 /// Run a `nix` command whose standard output is all that matters, failing
-/// with [`Outcome::Ignored`] if it fails.
+/// with a deliberate divergence if it fails.
 fn nix_output(
     args: &[&str],
     store: &Store,
@@ -257,7 +257,7 @@ fn nix_output(
     cmd.args(args);
     let ran = run_command(cmd, b"", store, budget)?;
     if !ran.success {
-        return Err(Outcome::Ignored);
+        return Err(malformed());
     }
     Ok(ran.stdout.trim_end().to_owned())
 }
@@ -291,8 +291,7 @@ fn strip_quotes(stderr: &str) -> String {
         .collect()
 }
 
-/// What Nix did with one `nix eval`: its output, and whether it failed as
-/// [`Outcome::Misread`] describes.
+/// What Nix did with one `nix eval`.
 fn nix_eval(
     reference: &str,
     apply: &str,
@@ -300,7 +299,7 @@ fn nix_eval(
     store: &Store,
     work: &Path,
     budget: Budget,
-) -> Result<(Run, bool), Outcome> {
+) -> Result<Run, Outcome> {
     let mut cmd = flake_command(store, &work.join("cache"), &trees.cwd);
     cmd.args([
         "eval",
@@ -316,22 +315,18 @@ fn nix_eval(
         stderr,
     } = run_command(cmd, b"", store, budget)?;
     Ok(if success {
-        (
-            Ok(stdout.strip_suffix('\n').unwrap_or(&stdout).to_owned()),
-            false,
-        )
+        Ok(stdout.strip_suffix('\n').unwrap_or(&stdout).to_owned())
     } else {
-        let misread = misread_platform(store, &stderr);
-        (Err(strip_quotes(&stderr)), misread)
+        Err(strip_quotes(&stderr))
     })
 }
 
-fn diverged(step: &str, src: &str, command: &str, theirs: &Run, ours: &Run) -> Outcome {
-    Outcome::Diverged(format!(
-        "step: {step}\n--- input\n{src}\n--- expression\n{command}\n--- nix\n{}\n--- ours\n{}\n",
-        show(theirs),
-        show(ours)
-    ))
+/// The [deliberate divergence](Outcome::DeliberateDivergence) of a bundle
+/// that is not well formed or whose trees cannot be written out.
+fn malformed() -> Outcome {
+    Outcome::DeliberateDivergence(
+        Skip::find(&Evidence::MalformedBundle).expect("a skip matches malformed bundles"),
+    )
 }
 
 /// Compare ogygia-nix-eval with `nix eval --json --no-update-lock-file`
@@ -345,10 +340,10 @@ fn diverged(step: &str, src: &str, command: &str, theirs: &Run, ours: &Run) -> O
 /// flake is locked by Nix, which is not compared: an input on which locking
 /// fails is still evaluated, and fails on both sides if the lock it needs
 /// is missing. A bundle that is not well formed, or whose trees cannot be
-/// written, is [ignored](Outcome::Ignored).
+/// written, is a [deliberate divergence](Outcome::DeliberateDivergence).
 pub fn check(src: &str, budget: Budget) -> Outcome {
     let Some(bundle) = bundle::parse(src) else {
-        return Outcome::Ignored;
+        return malformed();
     };
     let work = tempfile::Builder::new()
         .prefix("flake-")
@@ -391,21 +386,14 @@ fn check_bundle(
     for (step, apply) in steps {
         let command =
             format!("nix eval --json --no-update-lock-file --apply '{apply}' '{reference}'");
-        let (theirs, misread) = nix_eval(&reference, &apply, &trees, store, work, budget)?;
-        let ours = match catch_ours(|| {
-            ogygia_nix_eval::eval_flake_json(&reference, &apply, &env, settings())
-        }) {
-            Ok(Ok(out)) => Ok(out),
-            Ok(Err(ogygia_nix_eval::Error::Disabled(_))) => return Ok(Outcome::Ignored),
-            Ok(Err(ogygia_nix_eval::Error::Eval(e))) => Err(e),
-            Err(panic) => return Ok(panicked(src, &command, &panic)),
-        };
+        let theirs = nix_eval(&reference, &apply, &trees, store, work, budget)?;
+        let ours = run_ours(
+            |_| ogygia_nix_eval::eval_flake_json(&reference, &apply, &env, settings()),
+            src,
+            &command,
+        )?;
         if !agree(&theirs, &ours) {
-            return Ok(if misread {
-                Outcome::Misread
-            } else {
-                diverged(step, src, &command, &theirs, &ours)
-            });
+            return Ok(disagreed(step, src, &command, &theirs, Some(store), &ours));
         }
         if ours.is_ok() {
             return Ok(if step == "eval" {
@@ -434,22 +422,12 @@ mod tests {
             let src = std::fs::read_to_string(&path).expect("read bundle");
             match check(&src, Budget::Fuzzing) {
                 Outcome::Diverged(report) => panic!("{}:\n{report}", path.display()),
-                Outcome::Ignored | Outcome::Skipped => panic!("{} is not compared", path.display()),
+                Outcome::DeliberateDivergence(_) | Outcome::Skipped => {
+                    panic!("{} is not compared", path.display())
+                }
                 _ => {}
             }
         }
-    }
-
-    #[test]
-    fn ignores_malformed_bundles() {
-        assert!(matches!(
-            check("#~flake x\n", Budget::Fuzzing),
-            Outcome::Ignored
-        ));
-        assert!(matches!(
-            check("#~flake x\n#~tree a path\n#~file ../b\n", Budget::Fuzzing),
-            Outcome::Ignored
-        ));
     }
 
     #[test]

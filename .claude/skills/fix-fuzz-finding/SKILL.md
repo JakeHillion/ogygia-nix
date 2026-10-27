@@ -12,10 +12,12 @@ where Nix's behaviour looks wrong.
 
 The rare exception is a finding where Nix is clearly acting on an
 artefact of its implementation rather than the language, such as
-evaluating input that it should reject. There the right fix is to make the fuzzer skip such inputs,
-not to copy the behaviour. If you conclude a finding is one of these,
-stop and confirm with the user before changing anything, explaining
-what Nix does and why it should not be matched.
+evaluating input that it should reject. There the right fix is to make the
+fuzzer skip such inputs, with a new `Skip` in
+`src/ogygia-nix-eval-fuzz/src/skip.rs`, not to copy the behaviour. If you
+conclude a finding is one of these, stop and confirm with the user before
+changing anything, explaining what Nix does and why it should not be
+matched.
 
 ## The fuzzing directory
 

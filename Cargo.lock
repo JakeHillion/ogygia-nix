@@ -2348,6 +2348,7 @@ dependencies = [
  "ogygia-nix-eval",
  "rnix",
  "sha2",
+ "strum",
  "tempfile",
 ]
 
