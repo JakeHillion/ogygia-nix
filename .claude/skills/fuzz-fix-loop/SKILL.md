@@ -153,9 +153,13 @@ give:
   mechanism) or another Rust library.
 
 When it reports, confirm the new commit's only parent is `M` and the
-working copy is clean, then start the placement agent. Relay the result
-to the user once placement is done: the commit, what was wrong, how
-it's tested, and where it was placed.
+working copy is clean, then start the placement agent. Do this even if
+you doubt the fix, for instance because it matches behaviour that should
+have been reported as a Nix bug or artefact. Every commit under `M`
+waits for the user's review anyway; raise the doubt with them when
+relaying the result, and never move a commit off `M` yourself. Relay the
+result to the user once placement is done: the commit, what was wrong,
+how it's tested, and where it was placed.
 
 ## The placement agent
 
