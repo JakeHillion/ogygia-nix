@@ -207,6 +207,16 @@ impl Store {
     pub(crate) fn dir(&self) -> PathBuf {
         self.0.path().join("nix/store")
     }
+
+    /// Whether Nix added any path to the store.
+    pub(crate) fn stored(&self) -> bool {
+        std::fs::read_dir(self.dir()).is_ok_and(|mut entries| {
+            entries.any(|entry| {
+                let name = entry.expect("read store dir").file_name();
+                !name.as_encoded_bytes().starts_with(b".")
+            })
+        })
+    }
 }
 
 impl Drop for Store {
@@ -485,7 +495,11 @@ pub(crate) fn disagreed(
     store: Option<&Store>,
     ours: &Run,
 ) -> Outcome {
-    match Skip::find(&Evidence::Disagreement { theirs, store }) {
+    match Skip::find(&Evidence::Disagreement {
+        theirs,
+        store,
+        ours,
+    }) {
         Some(skip) => Outcome::DeliberateDivergence(skip),
         None => diverged(step, src, expr, theirs, ours),
     }
