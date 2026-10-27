@@ -65,6 +65,18 @@ impl Lock {
         self.resolve_depth(path, 0)
     }
 
+    /// The key of the node `edge` leads to, following `follows`.
+    pub fn target(&self, edge: &Edge) -> Result<&str, Box<EvalError>> {
+        self.target_depth(edge, 0)
+    }
+
+    fn target_depth(&self, edge: &Edge, depth: usize) -> Result<&str, Box<EvalError>> {
+        match edge {
+            Edge::Node(k) => Ok(self.node(k)?.0),
+            Edge::Follows(p) => self.resolve_depth(p, depth),
+        }
+    }
+
     fn resolve_depth(&self, path: &[String], depth: usize) -> Result<&str, Box<EvalError>> {
         if depth > self.nodes.len() {
             return eval_err(format!("input '{}' follows itself", path.join("/")));
@@ -73,14 +85,50 @@ impl Lock {
         for (i, name) in path.iter().enumerate() {
             let (_, node) = self.node(key)?;
             key = match node.inputs.get(name) {
-                Some(Edge::Node(k)) => self.node(k)?.0,
-                Some(Edge::Follows(p)) => self.resolve_depth(p, depth + 1)?,
+                Some(edge) => self.target_depth(edge, depth + 1)?,
                 None => {
                     return eval_err(format!("input '{}' does not exist", path[..=i].join("/")));
                 }
             };
         }
         Ok(key)
+    }
+
+    /// Whether this already locks `inputs`, the inputs of its root as
+    /// `flake.nix` declares them, so that evaluating needs no change to it.
+    /// An input whose reference is unchanged keeps its locked inputs, so
+    /// only overrides of them are compared.
+    pub fn locks(&self, inputs: &BTreeMap<String, InputSpec>) -> bool {
+        self.node(&self.root).is_ok_and(|(_, root)| {
+            inputs.len() == root.inputs.len()
+                && inputs
+                    .iter()
+                    .all(|(name, spec)| match root.inputs.get(name) {
+                        Some(edge) => self.locks_input(spec, edge),
+                        None => false,
+                    })
+        })
+    }
+
+    fn locks_input(&self, spec: &InputSpec, edge: &Edge) -> bool {
+        match (&spec.follows, edge) {
+            (Some(want), Edge::Follows(path)) => want == path,
+            (None, Edge::Node(key)) => {
+                let Ok((_, node)) = self.node(key) else {
+                    return false;
+                };
+                let same = spec
+                    .attrs
+                    .as_ref()
+                    .is_none_or(|a| node.original.as_ref() == Some(a));
+                // Overrides of inputs the node does not have change nothing.
+                same && spec
+                    .overrides
+                    .iter()
+                    .all(|(name, s)| node.inputs.get(name).is_none_or(|e| self.locks_input(s, e)))
+            }
+            _ => false,
+        }
     }
 }
 
@@ -97,19 +145,15 @@ fn path<'a>(ev: &Eval<'a>, v: Value<'a>) -> R<'a, Vec<String>> {
 }
 
 /// An input's attributes, from a lock file.
-pub fn attrs_from_value<'a>(ev: &Eval<'a>, v: Value<'a>) -> R<'a, Attrs> {
+fn attrs_from_value<'a>(ev: &Eval<'a>, v: Value<'a>) -> R<'a, Attrs> {
     let mut attrs = Attrs::new();
     for e in ev.force_attrs(v)?.entries {
-        let attr = match ev.force(e.value)? {
-            Value::Str(s) => Attr::Str(s.as_str_lossy().into_owned()),
-            Value::Bool(b) => Attr::Bool(b),
-            Value::Int(i) if i >= 0 => Attr::Int(i as u64),
-            other => {
-                return eval_err(format!(
-                    "unsupported input attribute type in lock file: {}",
-                    other.show_type()
-                ));
-            }
+        let v = ev.force(e.value)?;
+        let Some(attr) = Attr::from_value(v) else {
+            return eval_err(format!(
+                "unsupported input attribute type in lock file: {}",
+                v.show_type()
+            ));
         };
         attrs.insert(ev.name(e.name).to_owned(), attr);
     }
@@ -172,43 +216,4 @@ pub fn from_value<'a>(ev: &Eval<'a>, v: Value<'a>) -> R<'a, Lock> {
         return eval_err(format!("lock file references missing node '{root}'"));
     }
     Ok(Lock { root, nodes })
-}
-
-impl Lock {
-    /// Whether this already locks `inputs`, the inputs of its root as
-    /// `flake.nix` declares them, so that evaluating needs no change to it.
-    /// An input whose reference is unchanged keeps its locked inputs, so
-    /// only overrides of them are compared.
-    pub fn locks(&self, inputs: &BTreeMap<String, InputSpec>) -> bool {
-        self.node(&self.root).is_ok_and(|(_, root)| {
-            inputs.len() == root.inputs.len()
-                && inputs
-                    .iter()
-                    .all(|(name, spec)| match root.inputs.get(name) {
-                        Some(edge) => self.locks_input(spec, edge),
-                        None => false,
-                    })
-        })
-    }
-
-    fn locks_input(&self, spec: &InputSpec, edge: &Edge) -> bool {
-        match (&spec.follows, edge) {
-            (Some(want), Edge::Follows(path)) => want == path,
-            (None, Edge::Node(key)) => {
-                let Ok((_, node)) = self.node(key) else {
-                    return false;
-                };
-                let same = spec
-                    .attrs
-                    .as_ref()
-                    .is_none_or(|a| node.original.as_ref() == Some(a));
-                // Overrides of inputs the node does not have change nothing.
-                same && spec
-                    .overrides
-                    .iter()
-                    .all(|(name, s)| node.inputs.get(name).is_none_or(|e| self.locks_input(s, e)))
-            }
-            _ => false,
-        }
-    }
 }

@@ -15,7 +15,6 @@ use std::path::PathBuf;
 use crate::eval::Eval;
 use crate::flake::flakeref::Attr;
 use crate::flake::flakeref::Attrs;
-use crate::flake::lock::Edge;
 use crate::flake::lock::Lock;
 use crate::flake::source::Info;
 use crate::flake::source::Source;
@@ -98,12 +97,9 @@ impl<'a> Flakes<'a> {
                 }
             }
         };
-        let located = match flakeref::get_str(locked, "dir") {
-            Some(d) if !d.is_empty() => Located {
-                dir: format!("{}/{d}", located.dir),
-                ..located
-            },
-            _ => located,
+        let located = Located {
+            dir: flake_dir(&located.dir, locked),
+            ..located
         };
         self.sources.borrow_mut().insert(key, located.clone());
         Ok(located)
@@ -150,10 +146,7 @@ impl<'a> Flakes<'a> {
         let (_, node) = self.lock.node(key)?;
         let mut out = Vec::new();
         for (name, edge) in &node.inputs {
-            let input = match edge {
-                Edge::Node(k) => self.lock.node(k)?.0,
-                Edge::Follows(p) => self.lock.resolve(p)?,
-            };
+            let input = self.lock.target(edge)?;
             out.push(ev.entry(name, self.value(ev, input)));
         }
         Ok(out)
@@ -177,8 +170,17 @@ impl<'a> Flakes<'a> {
             entries.extend(info);
         }
         entries.push(ev.entry("sourceInfo", source_info));
-        entries.push(ev.entry("outPath", out_path(ev, &located)));
+        entries.push(ev.entry("outPath", store_string(ev, &located.dir, &located.source)));
         Ok(ev.attrs(entries))
+    }
+}
+
+/// The directory of the flake `attrs` refers to, in `base`, the directory
+/// it is relative to.
+fn flake_dir(base: &str, attrs: &Attrs) -> String {
+    match flakeref::get_str(attrs, "dir") {
+        Some(d) if !d.is_empty() => format!("{base}/{d}"),
+        _ => base.to_owned(),
     }
 }
 
@@ -186,10 +188,6 @@ impl<'a> Flakes<'a> {
 fn store_string<'a>(ev: &Eval<'a>, path: &str, source: &Source) -> Value<'a> {
     let sp = ev.bump.alloc_str(&source.path);
     ev.str_val(path.as_bytes(), &[Ctx::Opaque(sp)])
-}
-
-fn out_path<'a>(ev: &Eval<'a>, located: &Located) -> Value<'a> {
-    store_string(ev, &located.dir, &located.source)
 }
 
 /// The attributes of a flake's `sourceInfo`.
@@ -320,10 +318,7 @@ pub(crate) fn eval_json<'a>(
     let attrs = r(installable_ref(flake, &env.cwd))?;
     let shown = flakeref::to_string(&attrs);
     let source = r(source::fetch(&ev.ctx.io, env, &attrs, &shown))?;
-    let dir = match flakeref::get_str(&attrs, "dir") {
-        Some(d) if !d.is_empty() => format!("{}/{d}", source.path),
-        _ => source.path.clone(),
-    };
+    let dir = flake_dir(&source.path, &attrs);
     let loaded = file::load(ev, &dir, &shown)?;
     let lock_file = format!("{dir}/flake.lock");
     let lock = if ev.ctx.io.exists(&lock_file) {

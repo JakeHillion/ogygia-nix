@@ -117,6 +117,16 @@ struct GitTree {
 const GIT_EXECUTABLE: i32 = 0o100755;
 const GIT_SYMLINK: i32 = 0o120000;
 
+/// The type of a Git tree entry, or `None` for a submodule.
+fn git_file_type(kind: Option<git2::ObjectType>, mode: i32) -> Option<FileType> {
+    match (kind?, mode) {
+        (git2::ObjectType::Tree, _) => Some(FileType::Directory),
+        (git2::ObjectType::Blob, GIT_SYMLINK) => Some(FileType::Symlink),
+        (git2::ObjectType::Blob, _) => Some(FileType::Regular),
+        _ => None,
+    }
+}
+
 impl GitTree {
     fn entry(&self, path: &str) -> Option<(git2::ObjectType, i32, git2::Oid)> {
         if path.is_empty() {
@@ -142,12 +152,8 @@ impl GitTree {
 
 impl Accessor for GitTree {
     fn file_type(&self, path: &str) -> Option<FileType> {
-        Some(match self.entry(path)? {
-            (git2::ObjectType::Tree, _, _) => FileType::Directory,
-            (git2::ObjectType::Blob, GIT_SYMLINK, _) => FileType::Symlink,
-            (git2::ObjectType::Blob, _, _) => FileType::Regular,
-            _ => return None,
-        })
+        let (kind, mode, _) = self.entry(path)?;
+        git_file_type(Some(kind), mode)
     }
 
     fn is_dir(&self, path: &str) -> bool {
@@ -165,12 +171,9 @@ impl Accessor for GitTree {
         let tree = self.repo.find_tree(id).map_err(std::io::Error::other)?;
         let mut out = Vec::new();
         for entry in tree.iter() {
-            let ty = match (entry.kind(), entry.filemode()) {
-                (Some(git2::ObjectType::Tree), _) => FileType::Directory,
-                (Some(git2::ObjectType::Blob), GIT_SYMLINK) => FileType::Symlink,
-                (Some(git2::ObjectType::Blob), _) => FileType::Regular,
-                // Submodules, which are not fetched.
-                _ => continue,
+            // Submodules are not fetched.
+            let Some(ty) = git_file_type(entry.kind(), entry.filemode()) else {
+                continue;
             };
             out.push((String::from_utf8_lossy(entry.name_bytes()).into_owned(), ty));
         }
@@ -190,10 +193,6 @@ impl Accessor for GitTree {
     }
 }
 
-fn sri(hash: &[u8; 32]) -> String {
-    store::format_hash(HashAlgo::Sha256, hash, HashFormat::Sri)
-}
-
 /// Add `tree` to the store as a source, failing if its NAR hash is not
 /// `expected`.
 fn add(
@@ -202,11 +201,11 @@ fn add(
     expected: Option<&str>,
     what: &str,
 ) -> Result<(String, String)> {
-    let (path, hash) = io.add_tree("source", tree)?;
-    let hash = sri(&hash);
+    let (path, digest) = io.add_tree("source", tree)?;
+    let hash = store::format_hash(HashAlgo::Sha256, &digest, HashFormat::Sri);
     if let Some(expected) = expected {
         let (_, want) = store::parse_hash(expected, Some(HashAlgo::Sha256))?;
-        if sri(&want.try_into().expect("a SHA-256 digest is 32 bytes")) != hash {
+        if want != digest {
             bail!("NAR hash mismatch in input '{what}', expected '{expected}' but got '{hash}'");
         }
     }
@@ -227,7 +226,7 @@ fn latest_mtime(path: &Path) -> Result<u64> {
 }
 
 /// Copy the directory `dir` to the store, as a `path:` flake.
-pub fn fetch_path(io: &Io, dir: &Path, locked: &Attrs, what: &str) -> Result<Source> {
+fn fetch_path(io: &Io, dir: &Path, locked: &Attrs, what: &str) -> Result<Source> {
     if !dir.exists() {
         bail!("path '{}' does not exist", dir.display());
     }
@@ -250,6 +249,11 @@ pub fn fetch_path(io: &Io, dir: &Path, locked: &Attrs, what: &str) -> Result<Sou
     })
 }
 
+fn open_repo(dir: &Path) -> Result<git2::Repository> {
+    git2::Repository::open(dir)
+        .with_context(|| format!("opening Git repository '{}'", dir.display()))
+}
+
 fn commit_count(repo: &git2::Repository, commit: git2::Oid) -> Result<u64> {
     let mut walk = repo.revwalk()?;
     walk.push(commit)?;
@@ -258,9 +262,8 @@ fn commit_count(repo: &git2::Repository, commit: git2::Oid) -> Result<u64> {
 
 /// Copy the files Git tracks in the working tree of the repository at
 /// `dir` to the store, as an unlocked `git+file:` flake.
-pub fn fetch_git_worktree(io: &Io, dir: &Path, what: &str) -> Result<Source> {
-    let repo = git2::Repository::open(dir)
-        .with_context(|| format!("opening Git repository '{}'", dir.display()))?;
+fn fetch_git_worktree(io: &Io, dir: &Path, what: &str) -> Result<Source> {
+    let repo = open_repo(dir)?;
     let mut keep = HashSet::new();
     for entry in repo.index()?.iter() {
         // Submodules are not fetched.
@@ -311,9 +314,8 @@ pub fn fetch_git_worktree(io: &Io, dir: &Path, what: &str) -> Result<Source> {
 }
 
 /// Copy the tree of commit `rev` of the repository at `dir` to the store.
-pub fn fetch_git_rev(io: &Io, dir: &Path, rev: &str, locked: &Attrs, what: &str) -> Result<Source> {
-    let repo = git2::Repository::open(dir)
-        .with_context(|| format!("opening Git repository '{}'", dir.display()))?;
+fn fetch_git_rev(io: &Io, dir: &Path, rev: &str, locked: &Attrs, what: &str) -> Result<Source> {
+    let repo = open_repo(dir)?;
     let (id, last_modified, tree_id) = {
         let commit = repo
             .find_commit(git2::Oid::from_str(rev)?)
@@ -346,7 +348,7 @@ pub fn fetch_git_rev(io: &Io, dir: &Path, rev: &str, locked: &Attrs, what: &str)
 
 /// The source `locked` names, read from `env`'s store, where it must
 /// already be.
-pub fn fetch_from_store(io: &Io, env: &FlakeEnv, locked: &Attrs, what: &str) -> Result<Source> {
+fn fetch_from_store(io: &Io, env: &FlakeEnv, locked: &Attrs, what: &str) -> Result<Source> {
     let Some(nar_hash) = flakeref::get_str(locked, "narHash") else {
         bail!(
             "cannot fetch input '{what}': it has no NAR hash, and this evaluator only reads inputs from the store"
@@ -374,11 +376,6 @@ pub fn fetch_from_store(io: &Io, env: &FlakeEnv, locked: &Attrs, what: &str) -> 
     })
 }
 
-/// The directory a `file:` URL names.
-pub fn file_url_path(url: &str) -> Option<&str> {
-    url.strip_prefix("file://")
-}
-
 /// Fetch the source of the input `attrs`, locked or not.
 pub fn fetch(io: &Io, env: &FlakeEnv, attrs: &Attrs, what: &str) -> Result<Source> {
     match flakeref::get_str(attrs, "type") {
@@ -388,7 +385,7 @@ pub fn fetch(io: &Io, env: &FlakeEnv, attrs: &Attrs, what: &str) -> Result<Sourc
         }
         Some("git") => {
             let url = flakeref::get_str(attrs, "url").unwrap_or("");
-            match file_url_path(url) {
+            match url.strip_prefix("file://") {
                 Some(dir) => match flakeref::get_str(attrs, "rev") {
                     Some(rev) => fetch_git_rev(io, Path::new(dir), rev, attrs, what),
                     None => fetch_git_worktree(io, Path::new(dir), what),
