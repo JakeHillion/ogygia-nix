@@ -6,6 +6,7 @@ mod findings;
 mod flake;
 mod minimise;
 mod mutate;
+mod skip;
 mod stats;
 
 pub use check::Budget;
@@ -19,5 +20,6 @@ pub use minimise::Minimised;
 pub use minimise::minimise;
 pub use mutate::crossover;
 pub use mutate::mutate;
+pub use skip::Skip;
 pub use stats::Summary;
 pub use stats::count;

@@ -16,6 +16,7 @@ libc = { workspace = true }
 libfuzzer-sys = { workspace = true }
 rnix = { workspace = true }
 sha2 = { workspace = true }
+strum = { workspace = true }
 tempfile = { workspace = true }
 ogygia-nix-eval = { path = "../ogygia-nix-eval" }
 

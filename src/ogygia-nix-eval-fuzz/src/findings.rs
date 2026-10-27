@@ -196,7 +196,7 @@ mod tests {
                 "diverges" => Outcome::Diverged("new report".to_owned()),
                 "fixed" => Outcome::Value,
                 "too slow" => Outcome::Skipped,
-                "too big" => Outcome::Limited,
+                "too big" => Outcome::DeliberateDivergence(crate::Skip::RegexMemoryLimit),
                 other => panic!("unexpected input {other}"),
             },
             |_| {},

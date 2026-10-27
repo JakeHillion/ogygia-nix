@@ -20,10 +20,18 @@ use std::time::Instant;
 
 use ogygia_nix_eval::Context;
 use ogygia_nix_eval::Error;
-use ogygia_nix_eval::Feature;
 use ogygia_nix_eval::Io;
 use ogygia_nix_eval::Settings;
 use ogygia_nix_eval::run_with_stack;
+use strum::EnumCount;
+use strum::EnumDiscriminants;
+use strum::EnumIter;
+use strum::EnumString;
+use strum::IntoStaticStr;
+
+use crate::skip;
+use crate::skip::Evidence;
+use crate::skip::Skip;
 
 const DEEP_COPY: &str = "let dc = v: if builtins.isAttrs v then builtins.mapAttrs (_: dc) v \
                          else if builtins.isList v then map dc v else v; in dc";
@@ -83,26 +91,23 @@ pub unsafe fn block_network() {
 }
 
 /// What [`check`] made of an input.
+#[derive(EnumDiscriminants)]
+#[strum_discriminants(
+    name(Kind),
+    vis(pub(crate)),
+    derive(EnumCount, EnumIter, EnumString, IntoStaticStr),
+    strum(serialize_all = "kebab-case")
+)]
 pub enum Outcome {
-    /// It is not a meaningful comparison: it contains a NUL byte, at which
-    /// Nix stops reading its input, or ogygia-nix-eval reached a feature
-    /// the fuzzer disables.
-    Ignored,
     /// Both sides reject it.
     ParseRejected,
     /// Nix ran out of time, memory or stack, or was killed.
     Skipped,
-    /// Nix hit a fixed limit of its implementation, which it hits on every
-    /// run, such as the size of a compiled regular expression.
-    Limited,
-    /// The two disagree only because Nix failed reading back a `.drv` file
-    /// it wrote whose platform holds a `"` or `\`: everything else in the
-    /// file is well formed. Nix writes the platform without escaping it, so
-    /// it cannot parse the file, and fails where ogygia-nix-eval succeeds or
-    /// catches the failure, until NixOS/nix#16525
-    /// (<https://github.com/NixOS/nix/issues/16525>) is fixed.
-    Misread,
+    /// It meets a difference from Nix that ogygia-nix-eval keeps on purpose,
+    /// as the [`Skip`] describes, so the two are not compared further.
+    DeliberateDivergence(Skip),
     /// Both sides evaluate it to the same value.
+    #[strum_discriminants(strum(to_string = "values"))]
     Value,
     /// Both sides fail, and `builtins.tryEval` catches it on both.
     Caught,
@@ -115,47 +120,34 @@ pub enum Outcome {
 }
 
 impl Outcome {
-    pub const NAMES: [&str; 9] = [
-        "ignored",
-        "parse-rejected",
-        "skipped",
-        "limited",
-        "misread",
-        "values",
-        "caught",
-        "uncaught",
-        "diverged",
-    ];
-
-    /// Index into [`Outcome::NAMES`].
-    pub fn index(&self) -> usize {
-        match self {
-            Outcome::Ignored => 0,
-            Outcome::ParseRejected => 1,
-            Outcome::Skipped => 2,
-            Outcome::Limited => 3,
-            Outcome::Misread => 4,
-            Outcome::Value => 5,
-            Outcome::Caught => 6,
-            Outcome::Uncaught => 7,
-            Outcome::Diverged(_) => 8,
-        }
-    }
-
-    /// The outcome named `name` in [`Outcome::NAMES`], other than
-    /// [`Outcome::Diverged`], which holds a report.
+    /// The outcome whose name, as [`Outcome`]'s `Display` gives it, is
+    /// `name`, other than [`Outcome::Diverged`], which holds a report.
     pub fn from_name(name: &str) -> Option<Outcome> {
-        Some(match name {
-            "ignored" => Outcome::Ignored,
-            "parse-rejected" => Outcome::ParseRejected,
-            "skipped" => Outcome::Skipped,
-            "limited" => Outcome::Limited,
-            "misread" => Outcome::Misread,
-            "values" => Outcome::Value,
-            "caught" => Outcome::Caught,
-            "uncaught" => Outcome::Uncaught,
+        let (kind, skip) = match name.split_once(' ') {
+            Some((kind, skip)) => (kind, Some(skip.parse().ok()?)),
+            None => (name, None),
+        };
+        Some(match (kind.parse().ok()?, skip) {
+            (Kind::ParseRejected, None) => Outcome::ParseRejected,
+            (Kind::Skipped, None) => Outcome::Skipped,
+            (Kind::DeliberateDivergence, Some(skip)) => Outcome::DeliberateDivergence(skip),
+            (Kind::Value, None) => Outcome::Value,
+            (Kind::Caught, None) => Outcome::Caught,
+            (Kind::Uncaught, None) => Outcome::Uncaught,
             _ => return None,
         })
+    }
+}
+
+/// The outcome's kebab-case name, followed by the [`Skip`] of a deliberate
+/// divergence.
+impl std::fmt::Display for Outcome {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(Kind::from(self).into())?;
+        if let Outcome::DeliberateDivergence(skip) = self {
+            write!(f, " {skip}")?;
+        }
+        Ok(())
     }
 }
 
@@ -163,18 +155,15 @@ impl Outcome {
 pub(crate) type Run = Result<String, String>;
 
 /// What Nix did with one expression.
-struct Theirs {
-    run: Run,
-    /// It failed as [`Outcome::Misread`] describes.
-    misread: bool,
+pub(crate) struct Theirs {
+    pub(crate) run: Run,
+    /// The store it ran with, if it ran.
+    pub(crate) store: Option<Store>,
 }
 
 impl From<Run> for Theirs {
     fn from(run: Run) -> Theirs {
-        Theirs {
-            run,
-            misread: false,
-        }
+        Theirs { run, store: None }
     }
 }
 
@@ -212,6 +201,11 @@ impl Store {
             &format!("{}/nix/store", self.0.path().display()),
             "/nix/store",
         )
+    }
+
+    /// Where the store directory, `/nix/store`, is on disk.
+    pub(crate) fn dir(&self) -> PathBuf {
+        self.0.path().join("nix/store")
     }
 }
 
@@ -278,8 +272,8 @@ pub(crate) struct Ran {
 }
 
 /// Run `cmd`, made by [`nix_command`] for `store`, within `budget`, writing
-/// `input` to its standard input. Fails with [`Outcome::Skipped`] or
-/// [`Outcome::Limited`] when what Nix did says nothing about equivalence.
+/// `input` to its standard input. Fails with [`Outcome::Skipped`] or a
+/// deliberate divergence when what Nix did says nothing about equivalence.
 pub(crate) fn run_command(
     mut cmd: Command,
     input: &[u8],
@@ -341,8 +335,8 @@ pub(crate) fn run_command(
     if exhausted(&stderr) || status.signal() == Some(libc::SIGKILL) {
         return Err(Outcome::Skipped);
     }
-    if limited(&stderr) {
-        return Err(Outcome::Limited);
+    if let Some(skip) = Skip::find(&Evidence::NixStderr(&stderr)) {
+        return Err(Outcome::DeliberateDivergence(skip));
     }
     Ok(Ran {
         success: status.success(),
@@ -351,136 +345,27 @@ pub(crate) fn run_command(
     })
 }
 
-/// Fails with [`Outcome::Skipped`] or [`Outcome::Limited`] when what Nix
-/// did says nothing about equivalence.
-fn run_nix(mode: &[&str], expr: &str, budget: Budget) -> Result<Theirs, Outcome> {
+/// Fails with [`Outcome::Skipped`] or a deliberate divergence when what
+/// Nix did says nothing about equivalence.
+pub(crate) fn run_nix(mode: &[&str], expr: &str, budget: Budget) -> Result<Theirs, Outcome> {
     let store = Store::new();
     let mut cmd = nix_command(&nix_instantiate(), &store);
     // On standard input, the expression cannot be mistaken for a flag and
     // may contain NUL bytes.
     cmd.args(mode).args(NIX_ARGS).arg("-");
     let ran = run_command(cmd, expr.as_bytes(), &store, budget)?;
-    Ok(if ran.success {
-        Ok(ran
-            .stdout
-            .strip_suffix('\n')
-            .unwrap_or(&ran.stdout)
-            .to_owned())
-        .into()
-    } else {
-        Theirs {
-            misread: misread_platform(&store, &ran.stderr),
-            run: Err(ran.stderr),
-        }
+    Ok(Theirs {
+        run: if ran.success {
+            Ok(ran
+                .stdout
+                .strip_suffix('\n')
+                .unwrap_or(&ran.stdout)
+                .to_owned())
+        } else {
+            Err(ran.stderr)
+        },
+        store: Some(store),
     })
-}
-
-/// Whether Nix's standard error says it failed as [`Outcome::Misread`]
-/// describes, reading back a `.drv` file in `store`.
-pub(crate) fn misread_platform(store: &Store, stderr: &str) -> bool {
-    stderr
-        .lines()
-        .rfind(|l| !l.trim().is_empty())
-        .and_then(|l| {
-            l.trim_start()
-                .strip_prefix("error: error parsing derivation '/nix/store/")
-        })
-        .and_then(|l| l.split_once("': "))
-        .and_then(|(name, _)| {
-            std::fs::read_to_string(store.0.path().join("nix/store").join(name)).ok()
-        })
-        .is_some_and(|drv| unescaped_platform(&drv))
-}
-
-/// Whether `drv` is a `.drv` file that is well formed but for its platform,
-/// which holds an unescaped `"` or `\`.
-///
-/// The fields before the platform are read from the start and those after
-/// it from the end, as only they are escaped.
-fn unescaped_platform(drv: &str) -> bool {
-    let mut rest = drv.strip_prefix("Derive(");
-    // Outputs, input derivations and input sources.
-    for _ in 0..3 {
-        rest = rest.and_then(skip_aterm).and_then(|r| r.strip_prefix(','));
-    }
-    let platform = rest
-        .and_then(|r| r.strip_prefix('"'))
-        .and_then(|r| r.strip_suffix(')'))
-        // Environment, arguments and builder.
-        .and_then(|r| strip_list(r, strip_pair))
-        .and_then(|r| r.strip_suffix(','))
-        .and_then(|r| strip_list(r, strip_string))
-        .and_then(|r| r.strip_suffix(','))
-        .and_then(strip_string)
-        .and_then(|r| r.strip_suffix("\","));
-    platform.is_some_and(|p| p.contains(['"', '\\']))
-}
-
-/// `s` after the escaped ATerm string, list or tuple it starts with.
-fn skip_aterm(s: &str) -> Option<&str> {
-    if let Some(mut s) = s.strip_prefix('"') {
-        loop {
-            let i = s.find(['"', '\\'])?;
-            let (special, rest) = s[i..].split_at(1);
-            if special == "\"" {
-                return Some(rest);
-            }
-            let mut escaped = rest.chars();
-            escaped.next()?;
-            s = escaped.as_str();
-        }
-    }
-    let (close, mut s) = if let Some(s) = s.strip_prefix('[') {
-        (']', s)
-    } else {
-        (')', s.strip_prefix('(')?)
-    };
-    if let Some(s) = s.strip_prefix(close) {
-        return Some(s);
-    }
-    loop {
-        s = skip_aterm(s)?;
-        if let Some(s) = s.strip_prefix(close) {
-            return Some(s);
-        }
-        s = s.strip_prefix(',')?;
-    }
-}
-
-/// `s` before the escaped ATerm string it ends with.
-fn strip_string(s: &str) -> Option<&str> {
-    let mut s = s.strip_suffix('"')?;
-    // Within the string, a `"` follows an odd number of backslashes.
-    loop {
-        let i = s.rfind('"')?;
-        let before = &s[..i];
-        if (before.len() - before.trim_end_matches('\\').len()) % 2 == 0 {
-            return Some(before);
-        }
-        s = before;
-    }
-}
-
-/// `s` before the ATerm pair of escaped strings it ends with.
-fn strip_pair(s: &str) -> Option<&str> {
-    let s = strip_string(s.strip_suffix(')')?)?;
-    strip_string(s.strip_suffix(',')?)?.strip_suffix('(')
-}
-
-/// `s` before the ATerm list it ends with, whose elements `strip_elem`
-/// strips.
-fn strip_list(s: &str, strip_elem: impl Fn(&str) -> Option<&str>) -> Option<&str> {
-    let mut s = s.strip_suffix(']')?;
-    if let Some(s) = s.strip_suffix('[') {
-        return Some(s);
-    }
-    loop {
-        s = strip_elem(s)?;
-        if let Some(s) = s.strip_suffix('[') {
-            return Some(s);
-        }
-        s = s.strip_suffix(',')?;
-    }
 }
 
 /// Whether Nix's standard error says it ran out of memory or stack.
@@ -496,18 +381,9 @@ pub(crate) fn exhausted(stderr: &str) -> bool {
     .any(|e| stderr.contains(e))
 }
 
-/// Whether Nix's standard error says it hit a fixed limit of its
-/// implementation.
-fn limited(stderr: &str) -> bool {
-    stderr.contains("memory limit exceeded by regular expression")
-}
-
 pub(crate) fn settings() -> Settings {
     Settings {
-        // Nix's regular expressions are libstdc++'s `std::regex`, whose
-        // semantics are too broken to reasonably match, so inputs that use
-        // one are not compared.
-        disabled: vec![Feature::Regex],
+        disabled: skip::disabled(),
         ..Settings::default()
     }
 }
@@ -581,18 +457,37 @@ pub(crate) fn catch_ours<T>(f: impl FnOnce() -> T) -> Result<T, String> {
     }
 }
 
-/// Fails with [`Outcome::Ignored`] when evaluation reached a disabled
+/// Fails with a deliberate divergence when evaluation reached a disabled
 /// feature, and with a [divergence](Outcome::Diverged) when it panicked.
-fn run_ours(
+pub(crate) fn run_ours(
     eval: impl Fn(&str) -> Result<String, Error>,
     src: &str,
     expr: &str,
 ) -> Result<Run, Outcome> {
     match catch_ours(|| eval(expr)) {
         Ok(Ok(out)) => Ok(Ok(out)),
-        Ok(Err(Error::Disabled(_))) => Err(Outcome::Ignored),
+        Ok(Err(Error::Disabled(feature))) => Err(Outcome::DeliberateDivergence(
+            Skip::find(&Evidence::Disabled(feature)).expect("only skips disable features"),
+        )),
         Ok(Err(Error::Eval(e))) => Ok(Err(e)),
         Err(panic) => Err(panicked(src, expr, &panic)),
+    }
+}
+
+/// A [deliberate divergence](Outcome::DeliberateDivergence) where the two
+/// disagree as a [`Skip`] describes, Nix having run with `store`, else a
+/// divergence at `step`.
+pub(crate) fn disagreed(
+    step: &str,
+    src: &str,
+    expr: &str,
+    theirs: &Run,
+    store: Option<&Store>,
+    ours: &Run,
+) -> Outcome {
+    match Skip::find(&Evidence::Disagreement { theirs, store }) {
+        Some(skip) => Outcome::DeliberateDivergence(skip),
+        None => diverged(step, src, expr, theirs, ours),
     }
 }
 
@@ -616,12 +511,9 @@ pub(crate) fn agree(theirs: &Run, ours: &Run) -> bool {
 ///    sides or on neither. Error messages are not compared.
 ///
 /// Nix runs first at each step, within `budget`. An input on which it runs
-/// out of time, memory or stack is [skipped](Outcome::Skipped), and one on which it hits
-/// a fixed limit of its implementation is [limited](Outcome::Limited).
-/// An input containing a NUL byte is [ignored](Outcome::Ignored): Nix
-/// stops reading at the first one outside a string, so it evaluates a
-/// prefix of the input rather than the input. So is one on which
-/// ogygia-nix-eval reaches a feature the fuzzer disables.
+/// out of time, memory or stack is [skipped](Outcome::Skipped), and one
+/// that matches a [`Skip`] is a
+/// [deliberate divergence](Outcome::DeliberateDivergence).
 ///
 /// A panic in ogygia-nix-eval diverges by itself, at whichever step it
 /// happens, ending the check there. ogygia-nix-eval runs before Nix in the
@@ -631,7 +523,10 @@ pub(crate) fn agree(theirs: &Run, ours: &Run) -> bool {
 /// A flake bundle is instead compared with `nix eval` in the evaluate and
 /// catch steps, as the README describes.
 pub fn check(src: &str, budget: Budget) -> Outcome {
-    if crate::bundle::is_bundle(src) && !src.contains('\0') {
+    if let Some(skip) = Skip::find(&Evidence::Input(src)) {
+        return Outcome::DeliberateDivergence(skip);
+    }
+    if crate::bundle::is_bundle(src) {
         return crate::flake::check(src, budget);
     }
     check_with(
@@ -642,7 +537,7 @@ pub fn check(src: &str, budget: Budget) -> Outcome {
     )
 }
 
-fn compile(src: &str) -> Run {
+pub(crate) fn compile(src: &str) -> Run {
     run_with_stack(|| {
         Context::new(Io::pure())
             .compile_str(src, "/")
@@ -651,17 +546,15 @@ fn compile(src: &str) -> Run {
     })
 }
 
-/// [`check`], with `compile` and `eval` standing in for ogygia-nix-eval's
-/// parsing and evaluation, and `nix` for running `nix-instantiate`.
-fn check_with(
+/// [`check`] on an expression that matches no [`Skip`] as input, with
+/// `compile` and `eval` standing in for ogygia-nix-eval's parsing and
+/// evaluation, and `nix` for running `nix-instantiate`.
+pub(crate) fn check_with(
     compile: impl Fn(&str) -> Run,
     eval: impl Fn(&str) -> Result<String, Error>,
     nix: impl Fn(&[&str], &str) -> Result<Theirs, Outcome>,
     src: &str,
 ) -> Outcome {
-    if src.contains('\0') {
-        return Outcome::Ignored;
-    }
     let ours = match catch_ours(|| compile(src)) {
         Ok(ours) => ours,
         Err(panic) => return panicked(src, src, &panic),
@@ -689,11 +582,14 @@ fn check_with(
         Err(outcome) => return outcome,
     };
     if !agree(&theirs.run, &ours) {
-        return if theirs.misread {
-            Outcome::Misread
-        } else {
-            diverged("eval", src, &expr, &theirs.run, &ours)
-        };
+        return disagreed(
+            "eval",
+            src,
+            &expr,
+            &theirs.run,
+            theirs.store.as_ref(),
+            &ours,
+        );
     }
     if ours.is_ok() {
         return Outcome::Value;
@@ -709,11 +605,14 @@ fn check_with(
         Err(outcome) => return outcome,
     };
     if !agree(&theirs.run, &ours) {
-        return if theirs.misread {
-            Outcome::Misread
-        } else {
-            diverged("catch", src, &expr, &theirs.run, &ours)
-        };
+        return disagreed(
+            "catch",
+            src,
+            &expr,
+            &theirs.run,
+            theirs.store.as_ref(),
+            &ours,
+        );
     }
     if ours.is_ok() {
         Outcome::Caught
@@ -723,11 +622,13 @@ fn check_with(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
+    use strum::IntoEnumIterator;
+
     use super::*;
 
-    fn outcome(src: &str) -> &'static str {
-        Outcome::NAMES[check(src, Budget::Fuzzing).index()]
+    pub(crate) fn outcome(src: &str) -> String {
+        check(src, Budget::Fuzzing).to_string()
     }
 
     #[test]
@@ -736,17 +637,6 @@ mod tests {
             "GC Warning: Out of Memory! Heap size: 434 MiB. Returning NULL!\n\
              Insufficient space for initial table allocation\n"
         ));
-    }
-
-    #[test]
-    fn limits_what_nix_never_finishes() {
-        assert_eq!(
-            outcome(
-                "builtins.match (\"(a{2}b){2}\" + \
-                 builtins.concatStringsSep \"\" (builtins.genList (_: \"a\") 99970)) \"\""
-            ),
-            "limited"
-        );
     }
 
     #[test]
@@ -895,133 +785,42 @@ mod tests {
     }
 
     #[test]
-    fn ignores_nul_bytes() {
-        assert_eq!(outcome("1\0+"), "ignored");
-        assert_eq!(outcome("\"a\0b\""), "ignored");
-    }
-
-    #[test]
-    fn ignores_regex() {
-        assert_eq!(outcome("builtins.match \"a\" \"a\""), "ignored");
-        assert_eq!(
-            outcome("builtins.tryEval (builtins.split \"a\" \"a\")"),
-            "ignored"
-        );
-        assert_eq!(
-            outcome("builtins.addErrorContext (throw \"x\") (builtins.match \"a\" \"a\")"),
-            "ignored"
-        );
-        assert_eq!(outcome("builtins.typeOf builtins.match"), "values");
-    }
-
-    #[test]
     fn skips_what_nix_cannot_finish() {
         assert_eq!(outcome("let f = x: f x; in f 1"), "skipped");
     }
 
     #[test]
-    fn skips_misread_platforms() {
-        let drv = |system: &str| {
-            format!(r#"(derivation {{ name = "d"; system = {system}; builder = "b"; }}).drvPath"#)
-        };
-        for system in [
-            // expected string ','
-            r#""\"""#,
-            r#""a\"b""#,
-            r#"builtins.toXML 1"#,
-            // unexpected escape sequence in unquoted string
-            r#""\\""#,
-            r#""a\\b""#,
-            r#""a\\""#,
-            // expected string '['
-            r#""p\",\"b""#,
-            // expected end of file
-            r#""p\",\"b\",[],[])""#,
-        ] {
-            assert_eq!(outcome(&drv(system)), "misread", "{system}");
-        }
-        // Where both fail, but only ours catches it.
-        assert_eq!(
-            outcome(&format!(r#"[ {} (throw "t") ]"#, drv(r#""\"""#))),
-            "misread"
-        );
-        assert_eq!(
-            outcome(&format!(
-                r#"builtins.tryEval (builtins.seq {} null)"#,
-                drv(r#""\\""#)
-            )),
-            "misread"
-        );
-    }
-
-    #[test]
-    fn skips_misread_platforms_among_other_fields() {
-        assert_eq!(
-            outcome(
-                r#"let a = derivation { name = "a"; system = "s"; builder = "b"; outputs = [ "out" "dev" ]; };
-                in (derivation { name = "d"; system = "p\"q\\r"; builder = "b\"\\"; args = [ "x\"" "y" ];
-                  x = a.dev; y = builtins.toFile "t" "t"; }).drvPath"#
-            ),
-            "misread"
-        );
-        assert_eq!(
-            outcome(
-                r#"(derivation { name = "d"; system = "\\"; builder = "b"; __structuredAttrs = true; }).drvPath"#
-            ),
-            "misread"
-        );
-    }
-
-    #[test]
-    fn finds_only_unescaped_platforms() {
-        let drv = |platform: &str, builder: &str| {
-            format!(
-                r#"Derive([("out","/nix/store/93rc1g704vn26ic977ampaap558r8wal-d","","")],[("/nix/store/c3vjpd08x2wgxxgkvran4kip7a97c05a-a.drv",["dev"])],["/nix/store/l6ah1wqqzy1brqig2l2swzpfb5yfzwnv-t"],"{platform}","{builder}",["x\"",""],[("builder","b\"\\"),("system","p\"q\\r"),("e","")])"#
-            )
-        };
-        assert!(unescaped_platform(&drv(r#"p"q\r"#, r#"b\"\\"#)));
-        assert!(unescaped_platform(&drv(r#"""#, "b")));
-        assert!(unescaped_platform(&drv(r#"\"#, "b")));
-        assert!(unescaped_platform(&drv(r#"",""#, "b")));
-        assert!(!unescaped_platform(&drv("p", r#"b\"\\"#)));
-        assert!(!unescaped_platform(&drv("p", r#"b"\"#)));
-        assert!(!unescaped_platform(&drv(r#"p"q"#, r#"b"\"#)));
-        assert!(!unescaped_platform(&format!("{})", drv(r#"""#, "b"))));
-        assert!(!unescaped_platform(r#"Derive([],[],[],"\")"#));
-    }
-
-    #[test]
-    fn reports_divergences_beside_misread_platforms() {
-        let nix = |mode: &[&str], expr: &str| run_nix(mode, expr, Budget::Fuzzing);
-        let bad = r#"derivation { name = "d"; system = "\""; builder = "b"; }"#;
-        // Never read back.
-        let unread = report(check_with(
-            compile,
-            |_| Ok("2".to_owned()),
-            nix,
-            &format!("({bad}).name"),
-        ));
-        assert!(unread.contains("--- nix\n\"d\"\n--- ours\n2\n"), "{unread}");
-        // Read back, where ours panics.
-        let panicked = report(check_with(
-            compile,
-            |_| run_with_stack(|| -> Result<String, Error> { panic!("eval failed") }),
-            nix,
-            &format!("({bad}).drvPath"),
-        ));
-        assert!(panicked.starts_with("step: panic\n"), "{panicked}");
-    }
-
-    #[test]
     fn names_round_trip() {
-        for (i, name) in Outcome::NAMES.iter().enumerate() {
-            match Outcome::from_name(name) {
-                Some(outcome) => assert_eq!(outcome.index(), i),
-                None => assert_eq!(*name, "diverged"),
-            }
+        let mut outcomes = vec![
+            Outcome::ParseRejected,
+            Outcome::Skipped,
+            Outcome::Value,
+            Outcome::Caught,
+            Outcome::Uncaught,
+        ];
+        outcomes.extend(Skip::iter().map(Outcome::DeliberateDivergence));
+        for kind in Kind::iter() {
+            assert!(
+                kind == Kind::Diverged || outcomes.iter().any(|o| Kind::from(o) == kind),
+                "{kind:?}"
+            );
         }
-        assert!(Outcome::from_name("diverged").is_none());
-        assert!(Outcome::from_name("nonsense").is_none());
+        for outcome in outcomes {
+            let name = outcome.to_string();
+            assert_eq!(
+                Outcome::from_name(&name).map(|o| o.to_string()),
+                Some(name.clone())
+            );
+        }
+        for name in [
+            "diverged",
+            "nonsense",
+            "deliberate-divergence",
+            "deliberate-divergence nonsense",
+            "values nul-byte",
+        ] {
+            assert!(Outcome::from_name(name).is_none(), "{name}");
+        }
     }
 
     #[test]
@@ -1036,7 +835,7 @@ mod tests {
         assert!(report.contains("--- nix\n1\n--- ours\n2\n"), "{report}");
     }
 
-    fn report(outcome: Outcome) -> String {
+    pub(crate) fn report(outcome: Outcome) -> String {
         let Outcome::Diverged(report) = outcome else {
             panic!("expected a divergence");
         };

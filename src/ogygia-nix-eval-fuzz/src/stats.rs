@@ -9,18 +9,21 @@ use std::sync::Mutex;
 use std::time::Duration;
 use std::time::Instant;
 
+use strum::EnumCount;
+use strum::IntoEnumIterator;
+
 use crate::Outcome;
+use crate::check::Kind;
 
 /// Counts outcomes and reports them every 15 seconds, as a Unix time
 /// followed by name and count pairs for the inputs since the last report:
 /// appended to `file` when given, which is safe from several processes at
 /// once, else to standard error.
 pub fn count(outcome: &Outcome, file: Option<&Path>) {
-    static PENDING: Mutex<Option<(Instant, [u64; Outcome::NAMES.len()])>> = Mutex::new(None);
+    static PENDING: Mutex<Option<(Instant, [u64; Kind::COUNT])>> = Mutex::new(None);
     let mut pending = PENDING.lock().unwrap();
-    let (since, counts) =
-        pending.get_or_insert_with(|| (Instant::now(), [0; Outcome::NAMES.len()]));
-    counts[outcome.index()] += 1;
+    let (since, counts) = pending.get_or_insert_with(|| (Instant::now(), [0; Kind::COUNT]));
+    counts[Kind::from(outcome) as usize] += 1;
     if since.elapsed() < Duration::from_secs(15) {
         return;
     }
@@ -43,23 +46,20 @@ pub fn count(outcome: &Outcome, file: Option<&Path>) {
 }
 
 /// A report line: `time`, then each outcome's name and count.
-fn line(time: u64, counts: &[u64; Outcome::NAMES.len()]) -> String {
+fn line(time: u64, counts: &[u64; Kind::COUNT]) -> String {
     format!("{time} {}\n", Totals(*counts))
 }
 
 /// Outcome counts, summed over report lines.
 #[derive(Default)]
-struct Totals([u64; Outcome::NAMES.len()]);
+struct Totals([u64; Kind::COUNT]);
 
 impl Totals {
     fn add(&mut self, line: &str) {
         let mut words = line.split_ascii_whitespace().skip(1);
         while let (Some(name), Some(n)) = (words.next(), words.next()) {
-            if let (Some(i), Ok(n)) = (
-                Outcome::NAMES.iter().position(|o| *o == name),
-                n.parse::<u64>(),
-            ) {
-                self.0[i] += n;
+            if let (Ok(kind), Ok(n)) = (name.parse::<Kind>(), n.parse::<u64>()) {
+                self.0[kind as usize] += n;
             }
         }
     }
@@ -67,10 +67,11 @@ impl Totals {
 
 impl std::fmt::Display for Totals {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        for (i, (name, n)) in Outcome::NAMES.iter().zip(&self.0).enumerate() {
+        for (i, (kind, n)) in Kind::iter().zip(&self.0).enumerate() {
             if i > 0 {
                 f.write_str(" ")?;
             }
+            let name: &str = kind.into();
             write!(f, "{name} {n}")?;
         }
         Ok(())
@@ -143,8 +144,8 @@ mod tests {
     #[test]
     fn line_pairs_names_with_counts() {
         assert_eq!(
-            line(1700000000, &[1, 2, 3, 4, 5, 6, 7, 8, 9]),
-            "1700000000 ignored 1 parse-rejected 2 skipped 3 limited 4 misread 5 values 6 caught 7 uncaught 8 diverged 9\n"
+            line(1700000000, &[1, 2, 3, 4, 5, 6, 7]),
+            "1700000000 parse-rejected 1 skipped 2 deliberate-divergence 3 values 4 caught 5 uncaught 6 diverged 7\n"
         );
     }
 
@@ -155,7 +156,7 @@ mod tests {
         crate::record(&findings, "old", "report").unwrap();
         let mut summary = Summary::new(&findings).unwrap();
 
-        summary.add(line(2, &[1, 0, 0, 0, 0, 0, 0, 0, 1]).trim_end());
+        summary.add(line(2, &[1, 0, 0, 0, 0, 0, 1]).trim_end());
         crate::record(&findings, "new", "report").unwrap();
         let new = findings.join("11507a0e2f5e69d5dfa40a62a1bd7b6e");
         assert!(new.exists());
@@ -163,16 +164,16 @@ mod tests {
             summary.update().unwrap(),
             [
                 format!("new finding: {}", new.display()),
-                "since start: ignored 1 parse-rejected 0 skipped 0 limited 0 misread 0 values 0 caught 0 uncaught 0 diverged 1; 2 findings".to_owned(),
+                "since start: parse-rejected 1 skipped 0 deliberate-divergence 0 values 0 caught 0 uncaught 0 diverged 1; 2 findings".to_owned(),
             ]
         );
 
-        summary.add("3 ignored 2 diverged 1");
+        summary.add("3 parse-rejected 2 diverged 1");
         crate::record(&findings, "new", "again").unwrap();
         assert_eq!(
             summary.update().unwrap(),
             [
-                "since start: ignored 3 parse-rejected 0 skipped 0 limited 0 misread 0 values 0 caught 0 uncaught 0 diverged 2; 2 findings"
+                "since start: parse-rejected 3 skipped 0 deliberate-divergence 0 values 0 caught 0 uncaught 0 diverged 2; 2 findings"
             ]
         );
     }

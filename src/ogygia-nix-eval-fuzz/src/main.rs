@@ -461,7 +461,10 @@ fn check(file: &Path) -> ExitCode {
             ExitCode::FAILURE
         }
         outcome => {
-            println!("{}", Outcome::NAMES[outcome.index()]);
+            println!("{outcome}");
+            if let Outcome::DeliberateDivergence(skip) = outcome {
+                eprint!("{}", skip.reason());
+            }
             ExitCode::SUCCESS
         }
     }
