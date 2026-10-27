@@ -241,10 +241,17 @@ fn intern_names(ctx: &Context, node: &rnix::SyntaxNode) {
 }
 
 /// The name of a `${...}` attribute that Nix treats as static: a string
-/// literal such as `${"lit"}`, `${(f:o)}` or `${''lit''}`.
+/// literal such as `${"lit"}`, `${(f:o)}` or `${''lit''}`, or an indented string
+/// whose only piece interpolates one, such as `${''${"lit"}''}`.
 fn literal_name(e: &ast::Expr) -> Option<String> {
     match e {
         ast::Expr::Paren(p) => literal_name(&p.expr()?),
+        ast::Expr::Str(s) if s.syntax().first_token().is_some_and(|t| t.text() == "''") => {
+            match <[_; 1]>::try_from(str_parts(s)) {
+                Ok([InterpolPart::Interpolation(i)]) => literal_name(&i.expr()?),
+                _ => static_str(s),
+            }
+        }
         ast::Expr::Str(s) => static_str(s),
         ast::Expr::Literal(l) => match l.kind() {
             ast::LiteralKind::Uri(u) => Some(u.syntax().text().to_owned()),
