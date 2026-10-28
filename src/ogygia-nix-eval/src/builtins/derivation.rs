@@ -198,7 +198,8 @@ pub fn derivation_strict<'a>(ev: &Eval<'a>, attrs: Value<'a>) -> R<'a> {
             if key == "outputs" {
                 set_outputs(
                     to_str(&s)
-                        .split_ascii_whitespace()
+                        .split([' ', '\t', '\n', '\r'])
+                        .filter(|o| !o.is_empty())
                         .map(str::to_owned)
                         .collect(),
                 )?;
