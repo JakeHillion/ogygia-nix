@@ -31,11 +31,12 @@ use crate::value::eval_err;
 pub struct FlakeEnv {
     /// The directory relative flake references are relative to.
     pub cwd: PathBuf,
-    /// The directory holding the store's objects, normally `/nix/store`. An
-    /// input that is neither a local directory nor a local Git repository
-    /// is read from here, and cannot be evaluated unless it is already
-    /// there.
-    pub store: PathBuf,
+    /// A directory holding store objects, such as `/nix/store`, that a
+    /// locked input is read from instead of being fetched, if it is there.
+    pub store: Option<PathBuf>,
+    /// What downloads inputs from anywhere but a `file://` URL. Without one,
+    /// such inputs cannot be fetched.
+    pub fetcher: Option<Box<dyn crate::Fetcher>>,
 }
 
 /// The flakes of one evaluation: the root and the nodes of its lock file,

@@ -10,6 +10,7 @@ allow = [
     "Zlib",
     "CC0-1.0",
     "NCSA",
+    "bzip2-1.0.6",
 ]
 
 [bans]

@@ -374,7 +374,9 @@ fn check_bundle(
     }
     let env = FlakeEnv {
         cwd: trees.cwd.clone(),
-        store: trees.ours_store.clone(),
+        store: Some(trees.ours_store.clone()),
+        // Nix downloads through a proxy that refuses every connection.
+        fetcher: None,
     };
     let steps = [
         ("eval", ENCODE.to_owned()),

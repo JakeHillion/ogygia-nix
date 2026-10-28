@@ -17,6 +17,8 @@ use gix::objs::tree::EntryMode;
 
 use crate::accessor::Accessor;
 use crate::accessor::FileType;
+use crate::archive;
+use crate::archive::MemTree;
 use crate::flake::FlakeEnv;
 use crate::flake::flakeref;
 use crate::flake::flakeref::Attrs;
@@ -370,25 +372,21 @@ fn fetch_git_rev(io: &Io, dir: &Path, rev: &str, locked: &Attrs, what: &str) -> 
     })
 }
 
-/// The source `locked` names, read from `env`'s store, where it must
-/// already be.
-fn fetch_from_store(io: &Io, env: &FlakeEnv, locked: &Attrs, what: &str) -> Result<Source> {
-    let Some(nar_hash) = flakeref::get_str(locked, "narHash") else {
-        bail!(
-            "cannot fetch input '{what}': it has no NAR hash, and this evaluator only reads inputs from the store"
-        );
+/// The source `locked` names, read from `env`'s store, if it is there.
+fn from_store(io: &Io, env: &FlakeEnv, locked: &Attrs) -> Result<Option<Source>> {
+    let (Some(store_dir), Some(nar_hash)) = (&env.store, flakeref::get_str(locked, "narHash"))
+    else {
+        return Ok(None);
     };
     let (_, hash) = store::parse_hash(nar_hash, Some(HashAlgo::Sha256))?;
     let path = store::source_path(&hash, "source");
     let base = path.rsplit('/').next().expect("a store path has a name");
-    let physical = env.store.join(base);
+    let physical = store_dir.join(base);
     if std::fs::symlink_metadata(&physical).is_err() {
-        bail!(
-            "cannot fetch input '{what}': this evaluator only reads inputs from the store, which does not have '{path}'"
-        );
+        return Ok(None);
     }
     io.mount(&path, &physical, None);
-    Ok(Source {
+    Ok(Some(Source {
         path,
         info: Info {
             nar_hash: Some(nar_hash.to_owned()),
@@ -397,31 +395,122 @@ fn fetch_from_store(io: &Io, env: &FlakeEnv, locked: &Attrs, what: &str) -> Resu
             rev_count: flakeref::get_int(locked, "revCount"),
             ..Info::default()
         },
+    }))
+}
+
+/// The contents of the file at `url`: read directly for a `file://` URL,
+/// and downloaded by `env`'s fetcher otherwise.
+fn download(env: &FlakeEnv, url: &str) -> Result<Vec<u8>> {
+    if let Some(path) = url.strip_prefix("file://") {
+        return std::fs::read(path).with_context(|| format!("reading '{path}'"));
+    }
+    match &env.fetcher {
+        Some(fetcher) => fetcher
+            .get(url)
+            .with_context(|| format!("downloading '{url}'")),
+        None => bail!("cannot download '{url}': this evaluator has no fetcher"),
+    }
+}
+
+/// Unpack the archive at `url` into the store. Its last modification time
+/// is the one `attrs` gives, or, if they are not locked, the archive's.
+fn fetch_archive(io: &Io, env: &FlakeEnv, url: &str, attrs: &Attrs, what: &str) -> Result<Source> {
+    let unpacked =
+        archive::unpack(&download(env, url)?).with_context(|| format!("unpacking '{url}'"))?;
+    let nar_hash = flakeref::get_str(attrs, "narHash");
+    let (path, hash) = add(io, Rc::new(unpacked.tree), nar_hash, what)?;
+    let last_modified = match flakeref::get_int(attrs, "lastModified") {
+        Some(t) => Some(t),
+        None if nar_hash.is_none() => unpacked.last_modified,
+        None => None,
+    };
+    Ok(Source {
+        path,
+        info: Info {
+            nar_hash: Some(hash),
+            last_modified,
+            rev: flakeref::get_str(attrs, "rev").map(str::to_owned),
+            ..Info::default()
+        },
     })
+}
+
+/// Add the file at `url` to the store, as it is.
+fn fetch_file(io: &Io, env: &FlakeEnv, url: &str, attrs: &Attrs, what: &str) -> Result<Source> {
+    let tree = Rc::new(MemTree::file(download(env, url)?));
+    let (path, hash) = add(io, tree, flakeref::get_str(attrs, "narHash"), what)?;
+    Ok(Source {
+        path,
+        info: Info {
+            nar_hash: Some(hash),
+            last_modified: flakeref::get_int(attrs, "lastModified"),
+            ..Info::default()
+        },
+    })
+}
+
+/// The URL of the archive of revision `rev` of the GitHub, GitLab or
+/// SourceHut repository `attrs` names.
+fn forge_archive_url(ty: &str, attrs: &Attrs, rev: &str) -> String {
+    let owner = flakeref::get_str(attrs, "owner").unwrap_or("");
+    let repo = flakeref::get_str(attrs, "repo").unwrap_or("");
+    let host = flakeref::get_str(attrs, "host");
+    match ty {
+        "github" => format!(
+            "https://{}/{owner}/{repo}/archive/{rev}.tar.gz",
+            host.unwrap_or("github.com")
+        ),
+        "gitlab" => format!(
+            "https://{}/api/v4/projects/{}%2F{repo}/repository/archive.tar.gz?sha={rev}",
+            host.unwrap_or("gitlab.com"),
+            owner.replace('/', "%2F")
+        ),
+        _ => format!(
+            "https://{}/{owner}/{repo}/archive/{rev}.tar.gz",
+            host.unwrap_or("git.sr.ht")
+        ),
+    }
 }
 
 /// Fetch the source of the input `attrs`, locked or not.
 pub fn fetch(io: &Io, env: &FlakeEnv, attrs: &Attrs, what: &str) -> Result<Source> {
-    match flakeref::get_str(attrs, "type") {
-        Some("path") => {
+    let ty = flakeref::get_str(attrs, "type").unwrap_or("");
+    let url = flakeref::get_str(attrs, "url").unwrap_or("");
+    match (ty, url.strip_prefix("file://")) {
+        ("path", _) => {
             let path = flakeref::get_str(attrs, "path").unwrap_or("");
-            fetch_path(io, Path::new(path), attrs, what)
+            return fetch_path(io, Path::new(path), attrs, what);
         }
-        Some("git") => {
-            let url = flakeref::get_str(attrs, "url").unwrap_or("");
-            match url.strip_prefix("file://") {
-                Some(dir) => match flakeref::get_str(attrs, "rev") {
-                    Some(rev) => fetch_git_rev(io, Path::new(dir), rev, attrs, what),
-                    None => fetch_git_worktree(io, Path::new(dir), what),
-                },
-                None => fetch_from_store(io, env, attrs, what),
-            }
+        ("git", Some(dir)) => {
+            return match flakeref::get_str(attrs, "rev") {
+                Some(rev) => fetch_git_rev(io, Path::new(dir), rev, attrs, what),
+                None => fetch_git_worktree(io, Path::new(dir), what),
+            };
         }
-        Some("indirect") => bail!(
+        ("indirect", _) => bail!(
             "cannot find flake 'flake:{}' in the flake registries",
             flakeref::get_str(attrs, "id").unwrap_or("")
         ),
-        _ => fetch_from_store(io, env, attrs, what),
+        _ => {}
+    }
+    if let Some(source) = from_store(io, env, attrs)? {
+        return Ok(source);
+    }
+    match ty {
+        "tarball" => fetch_archive(io, env, url, attrs, what),
+        "file" => fetch_file(io, env, url, attrs, what),
+        "github" | "gitlab" | "sourcehut" => {
+            let Some(rev) = flakeref::get_str(attrs, "rev") else {
+                bail!(
+                    "cannot fetch input '{what}': it has no revision, and this evaluator does not look them up"
+                );
+            };
+            fetch_archive(io, env, &forge_archive_url(ty, attrs, rev), attrs, what)
+        }
+        "git" => bail!(
+            "cannot fetch input '{what}': this evaluator only reads remote Git repositories from the store"
+        ),
+        _ => bail!("input type '{ty}' is unsupported"),
     }
 }
 
@@ -461,5 +550,180 @@ mod tests {
         assert_eq!(date(1_600_000_000), "20200913122640");
         assert_eq!(date(1000), "19700101001640");
         assert_eq!(date(1_500_000_100), "20170714024140");
+    }
+
+    // The flakes below evaluate as `nix eval --json
+    // --no-update-lock-file` evaluates them, with lock files written by
+    // `nix flake lock` and the expected output printed by Nix 2.36.
+    const TARBALL_HASH: &str = "sha256-nnyd4JnnpMA0Lp5sw3G+jnPNNLfc1rJRGYNiHL6ab9c=";
+    const FILE_HASH: &str = "sha256-RCJ37DJg+G+SI5m0zPshU3sGVDGrhCq/TeBVi/rLRVY=";
+    const REV: &str = "5edf11c44bc78a0d334f6334cdaf7d60d732daab";
+
+    /// A gzipped tarball of `top/`, whose NAR hash is `TARBALL_HASH`.
+    fn tarball() -> Vec<u8> {
+        let gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        let mut b = tar::Builder::new(gz);
+        let mut add = |path: &str, ty: tar::EntryType, mode: u32, data: &[u8]| {
+            let mut h = tar::Header::new_gnu();
+            h.set_entry_type(ty);
+            h.set_mode(mode);
+            h.set_mtime(1000);
+            if ty.is_symlink() {
+                h.set_size(0);
+                b.append_link(&mut h, path, std::str::from_utf8(data).unwrap())
+                    .unwrap();
+            } else {
+                h.set_size(data.len() as u64);
+                b.append_data(&mut h, path, data).unwrap();
+            }
+        };
+        use tar::EntryType::*;
+        add("top/", Directory, 0o755, b"");
+        add("top/a", Regular, 0o644, b"hello\n");
+        add("top/empty/", Directory, 0o755, b"");
+        add("top/l", Symlink, 0o777, b"a");
+        add("top/sub/s", Regular, 0o644, b"s\n");
+        add("top/x", Regular, 0o755, b"#!/bin/sh\n");
+        b.into_inner().unwrap().finish().unwrap()
+    }
+
+    /// A directory holding `tarball()`, a file and a flake with `inputs`,
+    /// `outputs` and lock file nodes `nodes`, in which `@DIR@` is the
+    /// directory.
+    fn flake(inputs: &str, outputs: &str, nodes: &str) -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        let d = dir.path().display().to_string();
+        std::fs::write(dir.path().join("t.tar.gz"), tarball()).unwrap();
+        std::fs::write(dir.path().join("f.txt"), "data\n").unwrap();
+        let root = dir.path().join("root");
+        std::fs::create_dir(&root).unwrap();
+        let text = format!("{{ inputs = {{ {inputs} }}; outputs = {outputs}; }}");
+        std::fs::write(root.join("flake.nix"), text.replace("@DIR@", &d)).unwrap();
+        let lock = format!(r#"{{ "nodes": {{ {nodes} }}, "root": "root", "version": 7 }}"#);
+        std::fs::write(root.join("flake.lock"), lock.replace("@DIR@", &d)).unwrap();
+        dir
+    }
+
+    fn eval(dir: &tempfile::TempDir, fetcher: Option<Box<dyn crate::Fetcher>>) -> String {
+        let env = FlakeEnv {
+            cwd: dir.path().to_owned(),
+            store: None,
+            fetcher,
+        };
+        let installable = format!("{}/root#x", dir.path().display());
+        crate::eval_flake_json(&installable, "x: x", &env, crate::Settings::default())
+            .unwrap_or_else(|e| format!("error: {e}"))
+    }
+
+    #[test]
+    fn evaluates_tarball_and_file_inputs() {
+        let dir = flake(
+            r#"t = { url = "tarball+file://@DIR@/t.tar.gz"; flake = false; };
+               f = { url = "file+file://@DIR@/f.txt"; flake = false; };"#,
+            r#"{ self, t, f }: {
+                 x = {
+                   t = builtins.removeAttrs t [ "outPath" "sourceInfo" ] // { path = t.outPath; };
+                   f = builtins.removeAttrs f [ "outPath" "sourceInfo" ] // { path = f.outPath; };
+                   files = builtins.readDir t;
+                   a = builtins.readFile "${t}/sub/s";
+                   c = builtins.readFile f;
+                 };
+               }"#,
+            &format!(
+                r#""root": {{ "inputs": {{ "f": "f", "t": "t" }} }},
+                   "f": {{ "flake": false,
+                     "locked": {{ "narHash": "{FILE_HASH}", "type": "file", "url": "file://@DIR@/f.txt" }},
+                     "original": {{ "type": "file", "url": "file://@DIR@/f.txt" }} }},
+                   "t": {{ "flake": false,
+                     "locked": {{ "lastModified": 1000, "narHash": "{TARBALL_HASH}", "type": "tarball", "url": "file://@DIR@/t.tar.gz" }},
+                     "original": {{ "type": "tarball", "url": "file://@DIR@/t.tar.gz" }} }}"#
+            ),
+        );
+        assert_eq!(
+            eval(&dir, None),
+            concat!(
+                r#"{"a":"s\n","c":"data\n","#,
+                r#""f":{"narHash":"sha256-RCJ37DJg+G+SI5m0zPshU3sGVDGrhCq/TeBVi/rLRVY=","path":"/nix/store/1bkk5g2aa0vdvxnnbl86xw22j78sfp8p-source"},"#,
+                r#""files":{"a":"regular","empty":"directory","l":"symlink","sub":"directory","x":"regular"},"#,
+                r#""t":{"lastModified":1000,"lastModifiedDate":"19700101001640","narHash":"sha256-nnyd4JnnpMA0Lp5sw3G+jnPNNLfc1rJRGYNiHL6ab9c=","path":"/nix/store/g9j8h21lmddykkr8h9qjsiym1vrj9gr2-source"}}"#
+            )
+        );
+    }
+
+    /// Serves `tarball()` at every URL, recording the URLs it is asked for.
+    struct Fake(std::sync::Arc<std::sync::Mutex<Vec<String>>>);
+
+    impl crate::Fetcher for Fake {
+        fn get(&self, url: &str) -> anyhow::Result<Vec<u8>> {
+            self.0.lock().unwrap().push(url.to_owned());
+            Ok(tarball())
+        }
+    }
+
+    fn github_flake(nar_hash: &str) -> tempfile::TempDir {
+        flake(
+            r#"g = { url = "github:o/r"; flake = false; };"#,
+            r#"{ self, g }: { x = builtins.removeAttrs g.sourceInfo [ "outPath" ]; }"#,
+            &format!(
+                r#""root": {{ "inputs": {{ "g": "g" }} }},
+                   "g": {{ "flake": false,
+                     "locked": {{ "lastModified": 1000, "narHash": "{nar_hash}", "owner": "o", "repo": "r", "rev": "{REV}", "type": "github" }},
+                     "original": {{ "owner": "o", "repo": "r", "type": "github" }} }}"#
+            ),
+        )
+    }
+
+    #[test]
+    fn downloads_forge_inputs_through_the_fetcher() {
+        let urls = std::sync::Arc::default();
+        let dir = github_flake(TARBALL_HASH);
+        assert_eq!(
+            eval(&dir, Some(Box::new(Fake(std::sync::Arc::clone(&urls))))),
+            format!(
+                r#"{{"lastModified":1000,"lastModifiedDate":"19700101001640","narHash":"{TARBALL_HASH}","rev":"{REV}","shortRev":"5edf11c"}}"#
+            )
+        );
+        assert_eq!(
+            *urls.lock().unwrap(),
+            [format!("https://github.com/o/r/archive/{REV}.tar.gz")]
+        );
+    }
+
+    #[test]
+    fn rejects_a_download_with_the_wrong_nar_hash() {
+        let dir = github_flake(FILE_HASH);
+        let out = eval(&dir, Some(Box::new(Fake(Default::default()))));
+        assert!(out.contains("NAR hash mismatch"), "{out}");
+    }
+
+    #[test]
+    fn cannot_download_without_a_fetcher() {
+        let out = eval(&github_flake(TARBALL_HASH), None);
+        assert!(out.contains("has no fetcher"), "{out}");
+    }
+
+    #[test]
+    fn finds_forge_archives() {
+        let attrs = |owner: &str, host: Option<&str>| {
+            let mut a = Attrs::new();
+            a.insert("owner".into(), flakeref::Attr::Str(owner.into()));
+            a.insert("repo".into(), flakeref::Attr::Str("r".into()));
+            if let Some(h) = host {
+                a.insert("host".into(), flakeref::Attr::Str(h.into()));
+            }
+            a
+        };
+        assert_eq!(
+            forge_archive_url("github", &attrs("o", Some("ghe.example")), "c"),
+            "https://ghe.example/o/r/archive/c.tar.gz"
+        );
+        assert_eq!(
+            forge_archive_url("gitlab", &attrs("g/s", None), "c"),
+            "https://gitlab.com/api/v4/projects/g%2Fs%2Fr/repository/archive.tar.gz?sha=c"
+        );
+        assert_eq!(
+            forge_archive_url("sourcehut", &attrs("~o", None), "c"),
+            "https://git.sr.ht/~o/r/archive/c.tar.gz"
+        );
     }
 }
