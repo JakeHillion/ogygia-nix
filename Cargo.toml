@@ -85,7 +85,8 @@ chrono = { version = "0.4", features = ["serde"] }
 
 # Git
 git2 = "0.21"
-gix = { version = "0.90", default-features = false, features = ["sha1", "index", "status"] }
+gix = { version = "0.90", default-features = false, features = ["sha1", "index", "status", "blocking-network-client"] }
+gix-transport = { version = "0.62", features = ["http-client"] }
 tempfile = "3.0"
 
 # Enums

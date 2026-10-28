@@ -42,6 +42,13 @@ pub fn get_str<'a>(attrs: &'a Attrs, name: &str) -> Option<&'a str> {
     }
 }
 
+pub fn get_bool(attrs: &Attrs, name: &str) -> Option<bool> {
+    match attrs.get(name) {
+        Some(Attr::Bool(b)) => Some(*b),
+        _ => None,
+    }
+}
+
 pub fn get_int(attrs: &Attrs, name: &str) -> Option<u64> {
     match attrs.get(name) {
         Some(Attr::Int(i)) => Some(*i),
