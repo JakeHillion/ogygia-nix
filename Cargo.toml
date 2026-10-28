@@ -64,6 +64,14 @@ moka = { version = "0.12", features = ["future"] }
 # Compression
 async-compression = { version = "0.4", features = ["tokio", "zstd", "xz", "gzip"] }
 
+# Archives
+bzip2 = "0.6"
+flate2 = "1"
+liblzma = "0.4"
+tar = "0.4"
+zip = { version = "9", default-features = false, features = ["bzip2", "deflate-flate2", "lzma", "xz", "zstd"] }
+zstd = "0.14"
+
 # Serialization
 bincode = "1"
 serde_json = "1"

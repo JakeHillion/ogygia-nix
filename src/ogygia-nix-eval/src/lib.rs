@@ -12,11 +12,13 @@
 //! `tests/equiv`.
 
 mod accessor;
+mod archive;
 mod builtins;
 mod compile;
 mod context;
 mod derivation;
 mod eval;
+mod fetch;
 mod flake;
 mod io;
 mod ir;
@@ -31,6 +33,7 @@ pub use context::Context;
 pub use eval::Eval;
 pub use eval::Feature;
 pub use eval::Settings;
+pub use fetch::Fetcher;
 pub use flake::FlakeEnv;
 pub use io::Io;
 pub use print::print_strict;
