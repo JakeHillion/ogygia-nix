@@ -141,6 +141,16 @@ impl<'a> Flakes<'a> {
         Ok(v)
     }
 
+    /// The outputs of node `key` as its value's `outputs` attribute: forcing
+    /// them builds its value, so they fail unless they are a set.
+    fn checked_outputs(&'a self, ev: &Eval<'a>, key: &'a str) -> Value<'a> {
+        let build: &'a dyn Fn(&Eval<'a>) -> R<'a> = ev.bump.alloc(move |ev: &Eval<'a>| {
+            ev.force(self.value(ev, key))?;
+            ev.force(self.outputs(ev, key)?)
+        });
+        ev.thunk(ThunkState::Native(build))
+    }
+
     /// The inputs of node `key`, each the value of the node it resolves to.
     fn inputs(&'a self, ev: &Eval<'a>, key: &'a str) -> R<'a, Vec<Entry<'a>>> {
         let (_, node) = self.lock.node(key)?;
@@ -346,7 +356,7 @@ pub(crate) fn eval_json<'a>(
         .sources
         .borrow_mut()
         .insert(root, Located { source, dir });
-    let outputs = flakes.outputs(ev, root)?;
+    let outputs = flakes.checked_outputs(ev, root);
     let system = &ev.settings.current_system;
     let candidates: Vec<Vec<String>> = match fragment {
         None | Some("") => vec![
@@ -389,6 +399,7 @@ pub(crate) fn eval_json<'a>(
         };
         return eval_err(format!("flake '{shown}' does not provide attribute {list}"));
     };
+    ev.force(v)?;
     let f = ev.eval_string(apply, &env.cwd.display().to_string())?;
     let result = ev.call(f, &[v], None)?;
     let mut out = Vec::new();
