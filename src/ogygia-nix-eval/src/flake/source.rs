@@ -12,6 +12,8 @@ use std::rc::Rc;
 use anyhow::Context as _;
 use anyhow::Result;
 use anyhow::bail;
+use gix::objs::tree::EntryKind;
+use gix::objs::tree::EntryMode;
 
 use crate::accessor::Accessor;
 use crate::accessor::FileType;
@@ -110,39 +112,36 @@ impl Accessor for Dir {
 
 /// The tree of a Git commit.
 struct GitTree {
-    repo: Rc<git2::Repository>,
-    tree: git2::Oid,
+    repo: gix::Repository,
+    tree: gix::ObjectId,
 }
 
-const GIT_EXECUTABLE: i32 = 0o100755;
-const GIT_SYMLINK: i32 = 0o120000;
-
 /// The type of a Git tree entry, or `None` for a submodule.
-fn git_file_type(kind: Option<git2::ObjectType>, mode: i32) -> Option<FileType> {
-    match (kind?, mode) {
-        (git2::ObjectType::Tree, _) => Some(FileType::Directory),
-        (git2::ObjectType::Blob, GIT_SYMLINK) => Some(FileType::Symlink),
-        (git2::ObjectType::Blob, _) => Some(FileType::Regular),
-        _ => None,
+fn git_file_type(mode: EntryMode) -> Option<FileType> {
+    match mode.kind() {
+        EntryKind::Tree => Some(FileType::Directory),
+        EntryKind::Link => Some(FileType::Symlink),
+        EntryKind::Blob | EntryKind::BlobExecutable => Some(FileType::Regular),
+        EntryKind::Commit => None,
     }
 }
 
 impl GitTree {
-    fn entry(&self, path: &str) -> Option<(git2::ObjectType, i32, git2::Oid)> {
+    fn entry(&self, path: &str) -> Option<(EntryMode, gix::ObjectId)> {
         if path.is_empty() {
-            return Some((git2::ObjectType::Tree, 0o040000, self.tree));
+            return Some((EntryKind::Tree.into(), self.tree));
         }
         let tree = self.repo.find_tree(self.tree).ok()?;
-        let entry = tree.get_path(Path::new(path)).ok()?;
-        Some((entry.kind()?, entry.filemode(), entry.id()))
+        let entry = tree.lookup_entry_by_path(path).ok()??;
+        Some((entry.mode(), entry.object_id()))
     }
 
     fn blob(&self, path: &str) -> std::io::Result<Vec<u8>> {
         match self.entry(path) {
-            Some((git2::ObjectType::Blob, _, id)) => self
+            Some((mode, id)) if mode.is_blob_or_symlink() => self
                 .repo
                 .find_blob(id)
-                .map(|b| b.content().to_vec())
+                .map(|mut b| b.take_data())
                 .map_err(std::io::Error::other),
             Some(_) => Err(std::io::ErrorKind::InvalidInput.into()),
             None => Err(std::io::ErrorKind::NotFound.into()),
@@ -152,8 +151,8 @@ impl GitTree {
 
 impl Accessor for GitTree {
     fn file_type(&self, path: &str) -> Option<FileType> {
-        let (kind, mode, _) = self.entry(path)?;
-        git_file_type(Some(kind), mode)
+        let (mode, _) = self.entry(path)?;
+        git_file_type(mode)
     }
 
     fn is_dir(&self, path: &str) -> bool {
@@ -165,17 +164,21 @@ impl Accessor for GitTree {
     }
 
     fn read_dir(&self, path: &str) -> std::io::Result<Vec<(String, FileType)>> {
-        let Some((git2::ObjectType::Tree, _, id)) = self.entry(path) else {
+        let Some((mode, id)) = self.entry(path) else {
             return Err(std::io::ErrorKind::NotADirectory.into());
         };
+        if !mode.is_tree() {
+            return Err(std::io::ErrorKind::NotADirectory.into());
+        }
         let tree = self.repo.find_tree(id).map_err(std::io::Error::other)?;
         let mut out = Vec::new();
         for entry in tree.iter() {
+            let entry = entry.map_err(std::io::Error::other)?;
             // Submodules are not fetched.
-            let Some(ty) = git_file_type(entry.kind(), entry.filemode()) else {
+            let Some(ty) = git_file_type(entry.mode()) else {
                 continue;
             };
-            out.push((String::from_utf8_lossy(entry.name_bytes()).into_owned(), ty));
+            out.push((String::from_utf8_lossy(entry.filename()).into_owned(), ty));
         }
         out.sort();
         Ok(out)
@@ -187,7 +190,7 @@ impl Accessor for GitTree {
 
     fn is_executable(&self, path: &str) -> std::io::Result<bool> {
         match self.entry(path) {
-            Some((_, mode, _)) => Ok(mode == GIT_EXECUTABLE),
+            Some((mode, _)) => Ok(mode.kind() == EntryKind::BlobExecutable),
             None => Err(std::io::ErrorKind::NotFound.into()),
         }
     }
@@ -249,15 +252,40 @@ fn fetch_path(io: &Io, dir: &Path, locked: &Attrs, what: &str) -> Result<Source>
     })
 }
 
-fn open_repo(dir: &Path) -> Result<git2::Repository> {
-    git2::Repository::open(dir)
-        .with_context(|| format!("opening Git repository '{}'", dir.display()))
+fn open_repo(dir: &Path) -> Result<gix::Repository> {
+    gix::open(dir).with_context(|| format!("opening Git repository '{}'", dir.display()))
 }
 
-fn commit_count(repo: &git2::Repository, commit: git2::Oid) -> Result<u64> {
-    let mut walk = repo.revwalk()?;
-    walk.push(commit)?;
-    Ok(walk.count() as u64)
+fn commit_count(repo: &gix::Repository, commit: gix::ObjectId) -> Result<u64> {
+    let mut count = 0;
+    for info in repo.rev_walk([commit]).all()? {
+        info?;
+        count += 1;
+    }
+    Ok(count)
+}
+
+/// Whether the tracked files of the repository's working tree, or its
+/// index, differ from `HEAD`. Submodules are not considered.
+fn is_dirty(repo: &gix::Repository) -> Result<bool> {
+    use gix::status::Item;
+    use gix::status::index_worktree;
+    let submodule = gix::index::entry::Mode::COMMIT;
+    let status = repo
+        .status(gix::progress::Discard)?
+        .untracked_files(gix::status::UntrackedFiles::None)
+        .index_worktree_submodules(None)
+        .into_iter(None)?;
+    for item in status {
+        match item? {
+            Item::TreeIndex(change) if change.entry_mode() == submodule => {}
+            Item::IndexWorktree(index_worktree::Item::Modification { entry, .. })
+                if entry.mode == submodule => {}
+            Item::IndexWorktree(item) if item.summary().is_none() => {}
+            _ => return Ok(true),
+        }
+    }
+    Ok(false)
 }
 
 /// Copy the files Git tracks in the working tree of the repository at
@@ -265,12 +293,13 @@ fn commit_count(repo: &git2::Repository, commit: git2::Oid) -> Result<u64> {
 fn fetch_git_worktree(io: &Io, dir: &Path, what: &str) -> Result<Source> {
     let repo = open_repo(dir)?;
     let mut keep = HashSet::new();
-    for entry in repo.index()?.iter() {
+    let index = repo.index_or_empty()?;
+    for entry in index.entries() {
         // Submodules are not fetched.
-        if entry.mode == 0o160000 {
+        if entry.mode == gix::index::entry::Mode::COMMIT {
             continue;
         }
-        let path = String::from_utf8_lossy(&entry.path).into_owned();
+        let path = String::from_utf8_lossy(entry.path(&index)).into_owned();
         let mut at = path.as_str();
         keep.insert(at.to_owned());
         while let Some((parent, _)) = at.rsplit_once('/') {
@@ -278,12 +307,8 @@ fn fetch_git_worktree(io: &Io, dir: &Path, what: &str) -> Result<Source> {
             at = parent;
         }
     }
-    let mut opts = git2::StatusOptions::new();
-    opts.include_untracked(false)
-        .include_ignored(false)
-        .exclude_submodules(true);
-    let dirty = !repo.statuses(Some(&mut opts))?.is_empty();
-    let head = repo.head().ok().and_then(|h| h.peel_to_commit().ok());
+    let dirty = is_dirty(&repo)?;
+    let head = repo.head_commit().ok();
     let tree = Rc::new(Dir {
         root: repo
             .workdir()
@@ -294,19 +319,19 @@ fn fetch_git_worktree(io: &Io, dir: &Path, what: &str) -> Result<Source> {
     let (path, hash) = add(io, tree, None, what)?;
     let mut info = Info {
         nar_hash: Some(hash),
-        last_modified: Some(
-            head.as_ref()
-                .map_or(0, |c| c.time().seconds().max(0) as u64),
-        ),
+        last_modified: Some(match &head {
+            Some(c) => c.time()?.seconds.max(0) as u64,
+            None => 0,
+        }),
         submodules: Some(false),
         ..Info::default()
     };
     if let Some(head) = head {
-        let rev = head.id().to_string();
+        let rev = head.id.to_string();
         if dirty {
             info.dirty_rev = Some(format!("{rev}-dirty"));
         } else {
-            info.rev_count = Some(commit_count(&repo, head.id())?);
+            info.rev_count = Some(commit_count(&repo, head.id)?);
             info.rev = Some(rev);
         }
     }
@@ -318,12 +343,11 @@ fn fetch_git_rev(io: &Io, dir: &Path, rev: &str, locked: &Attrs, what: &str) -> 
     let repo = open_repo(dir)?;
     let (id, last_modified, tree_id) = {
         let commit = repo
-            .find_commit(git2::Oid::from_str(rev)?)
+            .find_commit(gix::ObjectId::from_hex(rev.as_bytes())?)
             .with_context(|| format!("Git repository '{}' has no commit {rev}", dir.display()))?;
-        let time = commit.time().seconds().max(0) as u64;
-        (commit.id(), time, commit.tree_id())
+        let time = commit.time()?.seconds.max(0) as u64;
+        (commit.id, time, commit.tree_id()?.detach())
     };
-    let repo = Rc::new(repo);
     let rev_count = match flakeref::get_int(locked, "revCount") {
         Some(n) => n,
         None => commit_count(&repo, id)?,

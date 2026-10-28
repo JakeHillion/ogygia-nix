@@ -20,7 +20,7 @@ toml_parser = { workspace = true }
 sha1 = { workspace = true }
 sha2 = { workspace = true }
 thiserror = { workspace = true }
-git2 = { workspace = true }
+gix = { workspace = true }
 base64 = { workspace = true }
 enum-map = { workspace = true }
 strum = { workspace = true }
