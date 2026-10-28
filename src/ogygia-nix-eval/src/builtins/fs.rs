@@ -395,8 +395,18 @@ fn fetch<'a>(ev: &Eval<'a>, arg: Value<'a>, who: &str) -> R<'a> {
         Value::Attrs(set) => {
             for e in set.entries {
                 match ev.ctx.name(e.name) {
-                    "url" | "sha256" | "name" => {
+                    "url" | "name" => {
                         ev.force_str_no_ctx(e.value)?;
+                    }
+                    "sha256" => {
+                        let hash = ev.force_str_no_ctx(e.value)?;
+                        if !hash.is_empty() {
+                            crate::store::parse_hash(
+                                &String::from_utf8_lossy(hash),
+                                Some(crate::store::HashAlgo::Sha256),
+                            )
+                            .map_err(anyhow_err)?;
+                        }
                     }
                     n => return eval_err(format!("unsupported argument '{n}' to '{who}'")),
                 }
