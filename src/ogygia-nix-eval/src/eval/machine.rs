@@ -842,7 +842,7 @@ impl<'a> Eval<'a> {
                             self.name(name),
                             sel.pos
                         )),
-                        other => eval_err(format!(
+                        other => type_err(format!(
                             "expected a set but found {} while selecting attribute '{}' at {}",
                             self.describe(other),
                             self.name(name),

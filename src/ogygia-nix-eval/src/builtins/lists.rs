@@ -9,6 +9,7 @@ use crate::value::Entry;
 use crate::value::R;
 use crate::value::Value;
 use crate::value::eval_err;
+use crate::value::type_err;
 
 pub fn head<'a>(ev: &Eval<'a>, list: Value<'a>) -> R<'a> {
     match ev.force_list(list)?.first() {
@@ -337,14 +338,14 @@ pub fn generic_closure<'a>(ev: &Eval<'a>, set: Value<'a>) -> R<'a> {
     let s = &ev.ctx.syms;
     let set = ev.force_attrs(set)?;
     let Some(start) = set.get(s.start_set) else {
-        return eval_err("attribute 'startSet' required");
+        return type_err("attribute 'startSet' required");
     };
     let start = ev.force_list(start)?;
     if start.is_empty() {
         return Ok(ev.list(&[]));
     }
     let Some(op) = set.get(s.operator) else {
-        return eval_err("attribute 'operator' required");
+        return type_err("attribute 'operator' required");
     };
     let op = ev.force_function(op)?;
     let mut queue: std::collections::VecDeque<Value<'a>> = start.iter().copied().collect();
@@ -353,7 +354,7 @@ pub fn generic_closure<'a>(ev: &Eval<'a>, set: Value<'a>) -> R<'a> {
     while let Some(item) = queue.pop_front() {
         let attrs = ev.force_attrs(item)?;
         let Some(key) = attrs.get(s.key) else {
-            return eval_err("attribute 'key' required");
+            return type_err("attribute 'key' required");
         };
         let key = ev.force(key)?;
         if !seen.insert(ev, key)? {

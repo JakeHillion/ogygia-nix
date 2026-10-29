@@ -7,7 +7,7 @@ use crate::symbol::Sym;
 use crate::value::Entry;
 use crate::value::R;
 use crate::value::Value;
-use crate::value::eval_err;
+use crate::value::type_err;
 
 fn sym_arg<'a>(ev: &Eval<'a>, v: Value<'a>) -> R<'a, Sym> {
     let s = ev.force_str_no_ctx(v)?;
@@ -35,7 +35,7 @@ pub fn get_attr<'a>(ev: &Eval<'a>, name: Value<'a>, set: Value<'a>) -> R<'a> {
     let set = ev.force_attrs(set)?;
     match set.get(name) {
         Some(v) => ev.force(v),
-        None => eval_err(format!("attribute '{}' missing", ev.name(name))),
+        None => type_err(format!("attribute '{}' missing", ev.name(name))),
     }
 }
 
@@ -97,7 +97,7 @@ pub fn list_to_attrs<'a>(ev: &Eval<'a>, list: Value<'a>) -> R<'a> {
     for item in list {
         let set = ev.force_attrs(*item)?;
         let Some(name) = set.get(s.name) else {
-            return eval_err("attribute 'name' missing in a call to 'listToAttrs'");
+            return type_err("attribute 'name' missing in a call to 'listToAttrs'");
         };
         let name = sym_arg(ev, name)?;
         // The first definition of a name wins.
@@ -108,7 +108,7 @@ pub fn list_to_attrs<'a>(ev: &Eval<'a>, list: Value<'a>) -> R<'a> {
     let mut out = Vec::with_capacity(pairs.len());
     for (name, set) in pairs {
         let Some(value) = set.get(s.value) else {
-            return eval_err("attribute 'value' missing in a call to 'listToAttrs'");
+            return type_err("attribute 'value' missing in a call to 'listToAttrs'");
         };
         out.push(Entry {
             name,
