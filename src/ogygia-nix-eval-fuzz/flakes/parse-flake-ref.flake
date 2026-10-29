@@ -1,0 +1,52 @@
+#~flake path:@dir(root)#x
+#~tree root path
+#~file flake.nix
+# With the flakes feature enabled, as it is for `nix eval`, parseFlakeRef
+# parses path, GitHub, GitLab, SourceHut and indirect references too.
+{
+  outputs = _: {
+    x = map builtins.parseFlakeRef [
+      "github:a/b"
+      "github:/a//b/"
+      "github:a%20!/b%2Fc"
+      "github:a/b/c//d/"
+      "github:a/b/c%2Fd"
+      "github:a/b/0123456789ABCDEF0123456789abcdef01234567"
+      "github:a/b/%30123456789abcdef0123456789abcdef0123456"
+      "github:a/b/0123456789abcdef0123456789abcdef01234567/x"
+      "github:a/b?ref=refs/heads/x&ref=y&dir=a%2Fb&narHash=&host="
+      "github:a/b?ref=a%00..&ref=b"
+      "github:a/b?rev=0c6bkdcp8ylnz0b2xcsflyn2zbm7aq6r"
+      "github:a/b?rev=sha1-ASNFZ4mrze8BI0VniavN7wEjRWc=&dir="
+      "github:a/b?rev=sha1:0123456789abcdef0123456789abcdef01234567&ref"
+      "github:a/b?host=-a.B..1#"
+      "gitlab:a%2Fb/c/d?host=h&narHash=n"
+      "sourcehut:~a/b/0123456789abcdef0123456789abcdef01234567?dir=d"
+      "path:/x"
+      "path:"
+      "path:////x//y/"
+      "path:x/%2E%2E/%20"
+      "path://u@:1/x"
+      "path:/x:y@z?dir=d&dir=e&narHash=n&rev=r"
+      "path:/x?lastModified=+05&revCount=18446744073709551615"
+      "path:/x?lastModified=9223372036854775808"
+      "/x"
+      "//x y//%20?dir=a%20b"
+      "/x:y[z]#"
+      "flake:nixpkgs"
+      "flake:/nix%70kgs//?dir=d&ref=r&rev=x&foo=%41"
+      "flake:a/_a,b"
+      "flake:a/a%00"
+      "flake:a/0123456789ABCDEF0123456789abcdef01234567"
+      "flake:a/0123456789abcdef0123456789abcdef01234567/0123456789ABCDEF0123456789abcdef01234567"
+      "flake:a/0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+      "nixpkgs"
+      "A-_1-"
+      "nixpkgs/@a.b+c_d-e"
+      "nixpkgs/r/"
+      "nixpkgs/r/0123456789ABCDEF0123456789abcdef01234567#"
+      "git+https://h?ref=a&dir=d"
+      "https://h/x.tar.gz"
+    ];
+  };
+}

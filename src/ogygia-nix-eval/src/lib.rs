@@ -129,7 +129,8 @@ pub fn eval_flake_json(
         let ctx = Context::new(Io::pure());
         let bump = bumpalo::Bump::new();
         let flakes = std::cell::OnceCell::new();
-        let ev = Eval::new(&ctx, &bump, settings);
+        let mut ev = Eval::new(&ctx, &bump, settings);
+        ev.flakes = true;
         printed(flake::eval_json(&ev, installable, apply, env, &flakes))
     })
 }
