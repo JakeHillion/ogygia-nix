@@ -1,7 +1,26 @@
 //! URL syntax checking for fetchers, following RFC 3986 as Nix applies it.
 
+/// The parts of a URI that `parse` returns, still percent-encoded.
+pub struct Uri<'s> {
+    pub scheme: &'s [u8],
+    pub authority: Option<Authority<'s>>,
+    pub path: &'s [u8],
+}
+
+pub struct Authority<'s> {
+    pub userinfo: Option<&'s [u8]>,
+    /// A registered name, or an IP literal with its brackets.
+    pub host: &'s [u8],
+    pub port: Option<u16>,
+}
+
 /// Check that `url` is a URI, and that its port, if any, is in range.
 pub fn check(url: &[u8]) -> Result<(), String> {
+    parse(url).map(drop)
+}
+
+/// Check `url` as [`check`] does, returning the parts before its query.
+pub fn parse(url: &[u8]) -> Result<Uri<'_>, String> {
     let invalid = || format!("'{}' is not a valid URL", String::from_utf8_lossy(url));
     let (scheme, rest) = url.split_at(url.iter().position(|&c| c == b':').ok_or_else(invalid)?);
     let rest = &rest[1..];
@@ -22,18 +41,22 @@ pub fn check(url: &[u8]) -> Result<(), String> {
     if !chars(query, |c| pchar(c) || b"/?[]".contains(&c)) {
         return Err(invalid());
     }
-    let path = match rest.strip_prefix(b"//") {
+    let (authority, path) = match rest.strip_prefix(b"//") {
         Some(rest) => {
             let end = rest.iter().position(|&c| c == b'/').unwrap_or(rest.len());
-            authority(&rest[..end]).map_err(|e| e.unwrap_or_else(invalid))?;
-            &rest[end..]
+            let a = authority(&rest[..end]).map_err(|e| e.unwrap_or_else(invalid))?;
+            (Some(a), &rest[end..])
         }
-        None => rest,
+        None => (None, rest),
     };
     if !chars(path, |c| pchar(c) || c == b'/') {
         return Err(invalid());
     }
-    Ok(())
+    Ok(Uri {
+        scheme,
+        authority,
+        path,
+    })
 }
 
 /// Split `s` at the first `sep`, if any.
@@ -45,15 +68,17 @@ fn split(s: &[u8], sep: u8) -> (&[u8], &[u8]) {
 }
 
 /// Fails with `Some` message for a bad port, or `None` for bad syntax.
-fn authority(a: &[u8]) -> Result<(), Option<String>> {
+fn authority(a: &[u8]) -> Result<Authority<'_>, Option<String>> {
     let (userinfo, host_port) = match a.iter().position(|&c| c == b'@') {
-        Some(i) => (&a[..i], &a[i + 1..]),
-        None => (&[][..], a),
+        Some(i) => (Some(&a[..i]), &a[i + 1..]),
+        None => (None, a),
     };
-    if !chars(userinfo, |c| unreserved(c) || sub_delim(c) || c == b':') {
+    if !chars(userinfo.unwrap_or_default(), |c| {
+        unreserved(c) || sub_delim(c) || c == b':'
+    }) {
         return Err(None);
     }
-    let (host_ok, port) = match host_port.strip_prefix(b"[") {
+    let (host, host_ok, port) = match host_port.strip_prefix(b"[") {
         Some(rest) => {
             let end = rest.iter().position(|&c| c == b']').ok_or(None)?;
             let port = match &rest[end + 1..] {
@@ -61,30 +86,35 @@ fn authority(a: &[u8]) -> Result<(), Option<String>> {
                 [b':', port @ ..] => Some(port),
                 _ => return Err(None),
             };
-            (ip_literal(&rest[..end]), port)
+            (&host_port[..end + 2], ip_literal(&rest[..end]), port)
         }
         None => {
             let (host, port) = match host_port.iter().position(|&c| c == b':') {
                 Some(i) => (&host_port[..i], Some(&host_port[i + 1..])),
                 None => (host_port, None),
             };
-            (chars(host, |c| unreserved(c) || sub_delim(c)), port)
+            (host, chars(host, |c| unreserved(c) || sub_delim(c)), port)
         }
     };
     if !host_ok {
         return Err(None);
     }
-    match port {
-        Some(p) if !p.iter().all(u8::is_ascii_digit) => Err(None),
+    let port = match port {
+        Some(p) if !p.iter().all(u8::is_ascii_digit) => return Err(None),
         Some(p @ [_, ..]) => {
             let digits = String::from_utf8_lossy(p);
-            match digits.trim_start_matches('0').parse::<u32>() {
-                Ok(1..=65535) => Ok(()),
-                _ => Err(Some(format!("port '{digits}' is invalid"))),
+            match digits.trim_start_matches('0').parse::<u16>() {
+                Ok(port @ 1..) => Some(port),
+                _ => return Err(Some(format!("port '{digits}' is invalid"))),
             }
         }
-        _ => Ok(()),
-    }
+        _ => None,
+    };
+    Ok(Authority {
+        userinfo,
+        host,
+        port,
+    })
 }
 
 fn ip_literal(s: &[u8]) -> bool {
@@ -158,7 +188,7 @@ fn ipv4(s: &[u8]) -> bool {
 
 /// Whether every character of `s` is a percent-encoded byte or satisfies
 /// `ok`.
-fn chars(s: &[u8], ok: impl Fn(u8) -> bool) -> bool {
+pub fn chars(s: &[u8], ok: impl Fn(u8) -> bool) -> bool {
     let mut i = 0;
     while i < s.len() {
         if s[i] == b'%' {
@@ -178,7 +208,7 @@ fn chars(s: &[u8], ok: impl Fn(u8) -> bool) -> bool {
     true
 }
 
-fn unreserved(c: u8) -> bool {
+pub fn unreserved(c: u8) -> bool {
     c.is_ascii_alphanumeric() || b"-._~".contains(&c)
 }
 
@@ -186,8 +216,45 @@ fn sub_delim(c: u8) -> bool {
     b"!$&'()*+,;=".contains(&c)
 }
 
-fn pchar(c: u8) -> bool {
+pub fn pchar(c: u8) -> bool {
     unreserved(c) || sub_delim(c) || c == b':' || c == b'@'
+}
+
+/// `s` with its percent-encoded bytes decoded, where [`chars`] accepts it.
+pub fn decode(s: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(s.len());
+    let mut i = 0;
+    while i < s.len() {
+        let byte = s
+            .get(i + 1..i + 3)
+            .filter(|h| s[i] == b'%' && h.iter().all(u8::is_ascii_hexdigit))
+            .and_then(|h| u8::from_str_radix(std::str::from_utf8(h).ok()?, 16).ok());
+        match byte {
+            Some(b) => {
+                out.push(b);
+                i += 3;
+            }
+            None => {
+                out.push(s[i]);
+                i += 1;
+            }
+        }
+    }
+    out
+}
+
+/// `s` with every byte that is neither unreserved nor in `keep`
+/// percent-encoded.
+pub fn encode(s: &[u8], keep: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(s.len());
+    for &c in s {
+        if unreserved(c) || keep.contains(&c) {
+            out.push(c);
+        } else {
+            out.extend(format!("%{c:02X}").bytes());
+        }
+    }
+    out
 }
 
 #[cfg(test)]
