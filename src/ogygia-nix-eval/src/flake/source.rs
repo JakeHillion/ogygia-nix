@@ -3,7 +3,9 @@
 
 use std::collections::HashSet;
 use std::collections::VecDeque;
+use std::ffi::OsStr;
 use std::os::unix::ffi::OsStrExt;
+use std::os::unix::ffi::OsStringExt;
 use std::os::unix::fs::MetadataExt;
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
@@ -47,6 +49,84 @@ pub struct Source {
     pub info: Info,
 }
 
+/// What an entry of a tree is, as [`resolve`] sees it.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Kind {
+    Directory,
+    Symlink,
+    Other,
+}
+
+/// A tree whose paths [`resolve`] can follow symlinks in.
+trait Resolve {
+    /// An entry of the tree.
+    type Node: Clone;
+
+    fn root(&self) -> Self::Node;
+
+    /// The entry `name` of the directory `dir`, or `NotFound`.
+    fn child(&self, dir: &Self::Node, name: &[u8]) -> std::io::Result<(Kind, Self::Node)>;
+
+    /// The target of the symlink `link`.
+    fn target(&self, link: &Self::Node) -> std::io::Result<Vec<u8>>;
+}
+
+/// How many symlinks resolving one path may follow, as on Linux.
+const MAX_SYMLINKS: usize = 40;
+
+/// The entry at `path` in `tree`, following symlinks in its ancestors, and
+/// in `path` itself if `follow` is set. A symlink leading out of the tree
+/// does not resolve.
+fn resolve<T: Resolve>(tree: &T, path: &str, follow: bool) -> std::io::Result<(Kind, T::Node)> {
+    let mut pending: VecDeque<Vec<u8>> = path
+        .as_bytes()
+        .split(|&b| b == b'/')
+        .filter(|c| !c.is_empty())
+        .map(<[u8]>::to_vec)
+        .collect();
+    // The directories from the root to the one reached so far.
+    let mut dirs = vec![tree.root()];
+    let mut links = 0;
+    while let Some(name) = pending.pop_front() {
+        match name.as_slice() {
+            b"." => continue,
+            b".." => {
+                if dirs.len() == 1 {
+                    return Err(std::io::ErrorKind::NotFound.into());
+                }
+                dirs.pop();
+                continue;
+            }
+            _ => {}
+        }
+        let dir = dirs.last().expect("the root is never left");
+        let (kind, node) = tree.child(dir, &name)?;
+        if kind == Kind::Symlink && (follow || !pending.is_empty()) {
+            if links == MAX_SYMLINKS {
+                return Err(std::io::Error::other("too many levels of symbolic links"));
+            }
+            let target = tree.target(&node)?;
+            if target.starts_with(b"/") {
+                return Err(std::io::ErrorKind::NotFound.into());
+            }
+            links += 1;
+            for c in target.split(|&b| b == b'/').rev().filter(|c| !c.is_empty()) {
+                pending.push_front(c.to_vec());
+            }
+            continue;
+        }
+        if kind == Kind::Directory {
+            dirs.push(node);
+        } else if pending.is_empty() {
+            return Ok((kind, node));
+        } else {
+            return Err(std::io::ErrorKind::NotADirectory.into());
+        }
+    }
+    let dir = dirs.pop().expect("the root is never left");
+    Ok((Kind::Directory, dir))
+}
+
 /// The files under a directory, or only those in `keep` (relative paths,
 /// every ancestor directory included), if set.
 struct Dir {
@@ -54,46 +134,78 @@ struct Dir {
     keep: Option<HashSet<String>>,
 }
 
-impl Dir {
-    fn physical(&self, path: &str) -> std::io::Result<PathBuf> {
+impl Resolve for Dir {
+    /// A path relative to the root, through no symlinks.
+    type Node = PathBuf;
+
+    fn root(&self) -> PathBuf {
+        PathBuf::new()
+    }
+
+    fn child(&self, dir: &PathBuf, name: &[u8]) -> std::io::Result<(Kind, PathBuf)> {
+        let path = dir.join(OsStr::from_bytes(name));
         if let Some(keep) = &self.keep
-            && !path.is_empty()
-            && !keep.contains(path)
+            && !path.to_str().is_some_and(|p| keep.contains(p))
         {
             return Err(std::io::ErrorKind::NotFound.into());
         }
-        Ok(if path.is_empty() {
-            self.root.clone()
+        let ty = std::fs::symlink_metadata(self.root.join(&path))?.file_type();
+        let kind = if ty.is_symlink() {
+            Kind::Symlink
+        } else if ty.is_dir() {
+            Kind::Directory
         } else {
-            self.root.join(path)
-        })
+            Kind::Other
+        };
+        Ok((kind, path))
+    }
+
+    fn target(&self, link: &PathBuf) -> std::io::Result<Vec<u8>> {
+        Ok(std::fs::read_link(self.root.join(link))?
+            .into_os_string()
+            .into_vec())
+    }
+}
+
+impl Dir {
+    /// The physical path of the entry at `path`, resolved as by [`resolve`].
+    fn physical(&self, path: &str, follow: bool) -> std::io::Result<(Kind, PathBuf)> {
+        let (kind, rel) = resolve(self, path, follow)?;
+        Ok((kind, self.root.join(rel)))
     }
 }
 
 impl Accessor for Dir {
     fn file_type(&self, path: &str) -> Option<FileType> {
-        let p = self.physical(path).ok()?;
+        let (_, p) = self.physical(path, false).ok()?;
         std::fs::symlink_metadata(p)
             .ok()
             .map(|m| FileType::of(m.file_type()))
     }
 
     fn is_dir(&self, path: &str) -> bool {
-        self.physical(path).is_ok_and(|p| p.is_dir())
+        self.physical(path, true)
+            .is_ok_and(|(kind, _)| kind == Kind::Directory)
     }
 
     fn read_file(&self, path: &str) -> std::io::Result<Vec<u8>> {
-        std::fs::read(self.physical(path)?)
+        std::fs::read(self.physical(path, true)?.1)
     }
 
     fn read_dir(&self, path: &str) -> std::io::Result<Vec<(String, FileType)>> {
+        let (_, rel) = resolve(self, path, true)?;
         let mut out = Vec::new();
-        for entry in std::fs::read_dir(self.physical(path)?)? {
+        for entry in std::fs::read_dir(self.root.join(&rel))? {
             let entry = entry?;
-            let name = entry.file_name().to_string_lossy().into_owned();
-            if self.physical(&crate::path::join(path, &name)).is_err() {
+            if let Some(keep) = &self.keep
+                && !rel
+                    .join(entry.file_name())
+                    .to_str()
+                    .is_some_and(|p| keep.contains(p))
+            {
                 continue;
             }
+            let name = entry.file_name().to_string_lossy().into_owned();
             out.push((name, FileType::of(entry.file_type()?)));
         }
         out.sort();
@@ -101,14 +213,13 @@ impl Accessor for Dir {
     }
 
     fn read_link(&self, path: &str) -> std::io::Result<Vec<u8>> {
-        Ok(std::fs::read_link(self.physical(path)?)?
-            .as_os_str()
-            .as_bytes()
-            .to_vec())
+        Ok(std::fs::read_link(self.physical(path, false)?.1)?
+            .into_os_string()
+            .into_vec())
     }
 
     fn is_executable(&self, path: &str) -> std::io::Result<bool> {
-        let meta = std::fs::symlink_metadata(self.physical(path)?)?;
+        let meta = std::fs::symlink_metadata(self.physical(path, false)?.1)?;
         Ok(meta.permissions().mode() & 0o100 != 0)
     }
 }
@@ -129,65 +240,36 @@ fn git_file_type(mode: EntryMode) -> Option<FileType> {
     }
 }
 
-/// How many symlinks resolving one path may follow, as on Linux.
-const MAX_SYMLINKS: usize = 40;
+impl Resolve for GitTree {
+    type Node = (EntryMode, gix::ObjectId);
+
+    fn root(&self) -> Self::Node {
+        (EntryKind::Tree.into(), self.tree)
+    }
+
+    fn child(&self, dir: &Self::Node, name: &[u8]) -> std::io::Result<(Kind, Self::Node)> {
+        let tree = self.repo.find_tree(dir.1).map_err(std::io::Error::other)?;
+        let entry = tree.find_entry(name).ok_or(std::io::ErrorKind::NotFound)?;
+        let mode = entry.mode();
+        let kind = if mode.is_tree() {
+            Kind::Directory
+        } else if mode.is_link() {
+            Kind::Symlink
+        } else {
+            Kind::Other
+        };
+        Ok((kind, (mode, entry.object_id())))
+    }
+
+    fn target(&self, link: &Self::Node) -> std::io::Result<Vec<u8>> {
+        self.read_blob(link.1)
+    }
+}
 
 impl GitTree {
-    /// The entry at `path`, following symlinks in its ancestors, and in
-    /// `path` itself if `follow` is set. A symlink leading out of the tree
-    /// does not resolve.
+    /// The entry at `path`, resolved as by [`resolve`].
     fn entry(&self, path: &str, follow: bool) -> std::io::Result<(EntryMode, gix::ObjectId)> {
-        let mut pending: VecDeque<Vec<u8>> = path
-            .as_bytes()
-            .split(|&b| b == b'/')
-            .filter(|c| !c.is_empty())
-            .map(<[u8]>::to_vec)
-            .collect();
-        // The trees from the root to the directory reached so far.
-        let mut dirs = vec![self.tree];
-        let mut links = 0;
-        while let Some(name) = pending.pop_front() {
-            let dir = *dirs.last().expect("the root is never left");
-            match name.as_slice() {
-                b"." => continue,
-                b".." => {
-                    if dirs.len() == 1 {
-                        return Err(std::io::ErrorKind::NotFound.into());
-                    }
-                    dirs.pop();
-                    continue;
-                }
-                _ => {}
-            }
-            let tree = self.repo.find_tree(dir).map_err(std::io::Error::other)?;
-            let entry = tree
-                .find_entry(name.as_slice())
-                .ok_or(std::io::ErrorKind::NotFound)?;
-            let (mode, id) = (entry.mode(), entry.object_id());
-            if mode.is_link() && (follow || !pending.is_empty()) {
-                if links == MAX_SYMLINKS {
-                    return Err(std::io::Error::other("too many levels of symbolic links"));
-                }
-                let target = self.read_blob(id)?;
-                if target.starts_with(b"/") {
-                    return Err(std::io::ErrorKind::NotFound.into());
-                }
-                links += 1;
-                for c in target.split(|&b| b == b'/').rev().filter(|c| !c.is_empty()) {
-                    pending.push_front(c.to_vec());
-                }
-                continue;
-            }
-            if mode.is_tree() {
-                dirs.push(id);
-            } else if pending.is_empty() {
-                return Ok((mode, id));
-            } else {
-                return Err(std::io::ErrorKind::NotADirectory.into());
-            }
-        }
-        let dir = *dirs.last().expect("the root is never left");
-        Ok((EntryKind::Tree.into(), dir))
+        resolve(self, path, follow).map(|(_, node)| node)
     }
 
     fn read_blob(&self, id: gix::ObjectId) -> std::io::Result<Vec<u8>> {

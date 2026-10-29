@@ -1,0 +1,45 @@
+#~flake git+file://@dir(root)#x
+#~tree root git
+#~file flake.nix
+{
+  outputs = { self }: {
+    x = {
+      read = builtins.readFile (self + "/link/default.nix");
+      exists = builtins.pathExists (self + "/link/default.nix");
+      dir = builtins.readDir (self + "/link");
+      subdir = builtins.readDir (self + "/link/x");
+      import = import (self + "/link");
+      hash = builtins.hashFile "sha256" (self + "/link/default.nix");
+      copy = builtins.path { path = self + "/link/x"; };
+      chain = builtins.readFile (self + "/chain/default.nix");
+      nested = builtins.readFile (self + "/sub/x/z/default.nix");
+      up = builtins.readFile (self + "/link/up/link/default.nix");
+      dotdot = builtins.readFile (self + "/dotdot/default.nix");
+      staged = builtins.readFile (self + "/staged/default.nix");
+      untracked = builtins.pathExists (self + "/untracked/");
+      absolute = builtins.pathExists (self + "/absolute/");
+    };
+  };
+}
+#~file sub/default.nix
+1
+#~file sub/x/y
+y
+#~file sub/x/z link
+../../link
+#~file sub/up link
+..
+#~file link link
+sub
+#~file chain link
+link
+#~file dotdot link
+sub/../sub
+#~file staged link staged
+sub
+#~file untracked link
+udir
+#~file udir/a unstaged
+a
+#~file absolute link
+@dir(root)/sub
