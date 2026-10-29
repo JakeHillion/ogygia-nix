@@ -2,6 +2,7 @@
 
 use std::cell::Cell;
 
+use crate::accessor::FileType;
 use crate::eval::Coerce;
 use crate::eval::Eval;
 use crate::value::Ctx;
@@ -62,6 +63,16 @@ pub fn read_dir<'a>(ev: &Eval<'a>, path: Value<'a>) -> R<'a> {
 
 pub fn read_file_type<'a>(ev: &Eval<'a>, path: Value<'a>) -> R<'a> {
     let path = ev.realise_path(path)?;
+    // Unlike other builtins, readFileType follows no symlinks at all.
+    let parent = crate::path::dir_of(&path);
+    let root = parent.len() - crate::path::abs(parent).len() + 1;
+    let mut ancestors = parent[root..]
+        .match_indices('/')
+        .map(|(i, _)| &parent[..root + i])
+        .chain([parent]);
+    if ancestors.any(|a| ev.ctx.io.file_type(a) == Some(FileType::Symlink)) {
+        return eval_err(format!("path '{parent}' (or its ancestor) is a symlink"));
+    }
     match ev.ctx.io.file_type(&path) {
         Some(t) => Ok(ev.string(t.name())),
         None => eval_err(format!("path '{path}' does not exist")),
