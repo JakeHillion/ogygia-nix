@@ -1,0 +1,80 @@
+#~flake path:@dir(root)#x
+#~lock
+#~tree st store
+#~file sub/default.nix
+1
+#~file sub/inner link
+default.nix
+#~file sub/up link
+..
+#~file link link
+sub
+#~file chain link
+link
+#~file flink link
+sub/default.nix
+#~tree dep git
+#~file sub/default.nix
+1
+#~file sub/inner link
+default.nix
+#~file sub/up link
+..
+#~file link link
+sub
+#~file chain link
+link
+#~file flink link
+sub/default.nix
+#~tree root path
+#~file sub/default.nix
+1
+#~file sub/inner link
+default.nix
+#~file sub/up link
+..
+#~file link link
+sub
+#~file chain link
+link
+#~file flink link
+sub/default.nix
+#~file flake.nix
+{
+  inputs.dep = { url = "git+file://@dir(dep)"; flake = false; };
+  inputs.st = { url = "github:o/st"; flake = false; };
+  outputs = { self, dep, st }:
+    let
+      copy = t: {
+        dir = builtins.path { path = t + "/link"; name = "p"; };
+        filterSource = builtins.filterSource (_: _: true) (t + "/link");
+        chain = builtins.path { path = t + "/chain"; name = "p"; };
+        file = builtins.path { path = t + "/flink"; name = "p"; };
+        through = builtins.path { path = t + "/link/inner"; name = "p"; };
+        up = builtins.path { path = t + "/sub/up"; name = "p"; };
+        seen = builtins.path {
+          path = t + "/link";
+          name = "p";
+          filter = p: _: baseNameOf (dirOf p) != "sub" || baseNameOf p != "inner";
+        };
+        type = builtins.path { path = t + "/link"; name = "p"; filter = _: t: t != "symlink"; };
+        nested = builtins.path { path = builtins.path { path = t; name = "s"; } + "/link"; name = "p"; };
+        nestedSub = builtins.path { path = builtins.path { path = t + "/sub"; name = "s"; } + "/inner"; name = "p"; };
+      };
+    in {
+      x = { self = copy self; dep = copy dep; st = copy st; };
+    };
+}
+#~file flake.lock
+{
+  "nodes": {
+    "st": {
+      "flake": false,
+      "locked": { "lastModified": 1700000000, "narHash": "@narHash(st)", "owner": "o", "repo": "st", "rev": "0123456789abcdef0123456789abcdef01234567", "type": "github" },
+      "original": { "owner": "o", "repo": "st", "type": "github" }
+    },
+    "root": { "inputs": { "st": "st" } }
+  },
+  "root": "root",
+  "version": 7
+}

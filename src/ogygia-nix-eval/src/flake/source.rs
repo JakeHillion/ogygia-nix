@@ -74,18 +74,28 @@ trait Resolve {
 /// How many symlinks resolving one path may follow, as on Linux.
 const MAX_SYMLINKS: usize = 40;
 
+/// An entry [`resolve`] reached.
+struct Resolved<N> {
+    kind: Kind,
+    node: N,
+    /// The names leading to it from the root, through no symlinks.
+    names: Vec<Vec<u8>>,
+}
+
 /// The entry at `path` in `tree`, following symlinks in its ancestors, and
 /// in `path` itself if `follow` is set. A symlink leading out of the tree
 /// does not resolve.
-fn resolve<T: Resolve>(tree: &T, path: &str, follow: bool) -> std::io::Result<(Kind, T::Node)> {
+fn resolve<T: Resolve>(tree: &T, path: &str, follow: bool) -> std::io::Result<Resolved<T::Node>> {
     let mut pending: VecDeque<Vec<u8>> = path
         .as_bytes()
         .split(|&b| b == b'/')
         .filter(|c| !c.is_empty())
         .map(<[u8]>::to_vec)
         .collect();
-    // The directories from the root to the one reached so far.
+    // The directories from the root to the one reached so far, and the
+    // names of all but the root.
     let mut dirs = vec![tree.root()];
+    let mut names = Vec::new();
     let mut links = 0;
     while let Some(name) = pending.pop_front() {
         match name.as_slice() {
@@ -95,6 +105,7 @@ fn resolve<T: Resolve>(tree: &T, path: &str, follow: bool) -> std::io::Result<(K
                     return Err(std::io::ErrorKind::NotFound.into());
                 }
                 dirs.pop();
+                names.pop();
                 continue;
             }
             _ => {}
@@ -115,23 +126,34 @@ fn resolve<T: Resolve>(tree: &T, path: &str, follow: bool) -> std::io::Result<(K
             }
             continue;
         }
+        names.push(name);
         if kind == Kind::Directory {
             dirs.push(node);
         } else if pending.is_empty() {
-            return Ok((kind, node));
+            return Ok(Resolved { kind, node, names });
         } else {
             return Err(std::io::ErrorKind::NotADirectory.into());
         }
     }
-    let dir = dirs.pop().expect("the root is never left");
-    Ok((Kind::Directory, dir))
+    let node = dirs.pop().expect("the root is never left");
+    Ok(Resolved {
+        kind: Kind::Directory,
+        node,
+        names,
+    })
+}
+
+/// `path` in `tree` with every symlink in it followed, as by [`resolve`].
+fn real_path<T: Resolve>(tree: &T, path: &str) -> std::io::Result<String> {
+    String::from_utf8(resolve(tree, path, true)?.names.join(&b'/'))
+        .map_err(|_| std::io::ErrorKind::InvalidData.into())
 }
 
 /// The files under a directory, or only those in `keep` (relative paths,
 /// every ancestor directory included), if set.
-struct Dir {
-    root: PathBuf,
-    keep: Option<HashSet<String>>,
+pub(crate) struct Dir {
+    pub(crate) root: PathBuf,
+    pub(crate) keep: Option<HashSet<String>>,
 }
 
 impl Resolve for Dir {
@@ -170,8 +192,8 @@ impl Resolve for Dir {
 impl Dir {
     /// The physical path of the entry at `path`, resolved as by [`resolve`].
     fn physical(&self, path: &str, follow: bool) -> std::io::Result<(Kind, PathBuf)> {
-        let (kind, rel) = resolve(self, path, follow)?;
-        Ok((kind, self.root.join(rel)))
+        let r = resolve(self, path, follow)?;
+        Ok((r.kind, self.root.join(r.node)))
     }
 }
 
@@ -193,7 +215,7 @@ impl Accessor for Dir {
     }
 
     fn read_dir(&self, path: &str) -> std::io::Result<Vec<(String, FileType)>> {
-        let (_, rel) = resolve(self, path, true)?;
+        let rel = resolve(self, path, true)?.node;
         let mut out = Vec::new();
         for entry in std::fs::read_dir(self.root.join(&rel))? {
             let entry = entry?;
@@ -221,6 +243,10 @@ impl Accessor for Dir {
     fn is_executable(&self, path: &str) -> std::io::Result<bool> {
         let meta = std::fs::symlink_metadata(self.physical(path, false)?.1)?;
         Ok(meta.permissions().mode() & 0o100 != 0)
+    }
+
+    fn real_path(&self, path: &str) -> std::io::Result<String> {
+        real_path(self, path)
     }
 }
 
@@ -269,7 +295,7 @@ impl Resolve for GitTree {
 impl GitTree {
     /// The entry at `path`, resolved as by [`resolve`].
     fn entry(&self, path: &str, follow: bool) -> std::io::Result<(EntryMode, gix::ObjectId)> {
-        resolve(self, path, follow).map(|(_, node)| node)
+        resolve(self, path, follow).map(|r| r.node)
     }
 
     fn read_blob(&self, id: gix::ObjectId) -> std::io::Result<Vec<u8>> {
@@ -326,6 +352,10 @@ impl Accessor for GitTree {
     fn is_executable(&self, path: &str) -> std::io::Result<bool> {
         let (mode, _) = self.entry(path, false)?;
         Ok(mode.kind() == EntryKind::BlobExecutable)
+    }
+
+    fn real_path(&self, path: &str) -> std::io::Result<String> {
+        real_path(self, path)
     }
 }
 

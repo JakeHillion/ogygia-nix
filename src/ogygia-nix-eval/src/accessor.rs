@@ -53,4 +53,10 @@ pub trait Accessor {
 
     /// Whether the regular file at `path` is executable.
     fn is_executable(&self, path: &str) -> Result<bool>;
+
+    /// `path` with every symlink in it, its last component included,
+    /// followed. A tree that does not follow its symlinks returns `path`.
+    fn real_path(&self, path: &str) -> Result<String> {
+        Ok(path.to_owned())
+    }
 }

@@ -1,0 +1,8 @@
+#~flake git+file://@dir(root)#x
+#~tree root git
+#~file flake.nix
+{ outputs = { self }: { x = builtins.path { path = self + "/link"; name = "p"; }; }; }
+#~file link link
+dir
+#~file dir/a unstaged
+untracked

@@ -1,0 +1,27 @@
+#~flake git+file://@dir(root)#x
+#~tree root git
+#~file flake.nix
+{
+  outputs = { self }: {
+    x = {
+      dir = builtins.path { path = self + "/link"; name = "p"; };
+      staged = builtins.path { path = self + "/staged"; name = "p"; };
+      seen = builtins.path {
+        path = self + "/link";
+        name = "p";
+        filter = p: _: baseNameOf (dirOf p) != "sub" || baseNameOf p != "inner";
+      };
+      filterSource = builtins.filterSource (_: t: t != "symlink") (self + "/link");
+    };
+  };
+}
+#~file sub/default.nix
+1
+#~file sub/inner link
+default.nix
+#~file sub/untracked unstaged
+u
+#~file link link
+sub
+#~file staged link staged
+sub
