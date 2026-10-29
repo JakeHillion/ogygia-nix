@@ -156,8 +156,9 @@ pub enum ErrorKind {
     /// `abort`.
     Abort,
     InfiniteRecursion,
-    /// A value of the wrong type, or a function called with the wrong
-    /// arguments.
+    /// A value of the wrong type, a function called with the wrong
+    /// arguments, or a set given to a builtin without an attribute the
+    /// builtin requires.
     Type,
     /// Any other evaluation error.
     Eval,

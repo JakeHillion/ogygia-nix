@@ -9,6 +9,7 @@ use crate::value::R;
 use crate::value::Value;
 use crate::value::anyhow_err;
 use crate::value::eval_err;
+use crate::value::type_err;
 
 pub fn to_string<'a>(ev: &Eval<'a>, v: Value<'a>) -> R<'a> {
     let (s, ctx) = ev.coerce_to_string(
@@ -247,13 +248,13 @@ pub fn convert_hash<'a>(ev: &Eval<'a>, set: Value<'a>) -> R<'a> {
         }
     };
     let Some(hash) = get("hash")? else {
-        return eval_err("attribute 'hash' missing in a call to 'convertHash'");
+        return type_err("attribute 'hash' missing in a call to 'convertHash'");
     };
     let algo = get("hashAlgo")?
         .map(|a| hash_algo(a.as_bytes()))
         .transpose()?;
     let Some(format) = get("toHashFormat")? else {
-        return eval_err("attribute 'toHashFormat' missing in a call to 'convertHash'");
+        return type_err("attribute 'toHashFormat' missing in a call to 'convertHash'");
     };
     let result = format.parse().and_then(|format| {
         let (algo, bytes) = crate::store::parse_hash(&hash, algo)?;

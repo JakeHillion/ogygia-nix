@@ -13,6 +13,7 @@ use crate::value::Value;
 use crate::value::anyhow_err;
 use crate::value::error;
 use crate::value::eval_err;
+use crate::value::type_err;
 
 pub fn import<'a>(ev: &Eval<'a>, path: Value<'a>) -> R<'a> {
     let path = ev.realise_path(path)?;
@@ -98,7 +99,7 @@ pub fn find_file<'a>(ev: &Eval<'a>, search_path: Value<'a>, name: Value<'a>) -> 
                 None => String::new(),
             };
             let Some(path) = entry.get(syms.path) else {
-                return eval_err("attribute 'path' missing in a search path entry");
+                return type_err("attribute 'path' missing in a search path entry");
             };
             let (path, ctx) = ev.coerce_to_string(path, Coerce::PLAIN)?;
             ev.realise(&ctx)?;
