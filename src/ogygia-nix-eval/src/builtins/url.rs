@@ -31,12 +31,12 @@ pub fn parse(url: &[u8]) -> Result<Uri<'_>, String> {
     {
         return Err(invalid());
     }
-    let (rest, fragment) = split(rest, b'#');
+    let (rest, fragment) = split_once(rest, b'#').unwrap_or((rest, b""));
     // Nix also accepts '#' in the fragment.
     if !chars(fragment, |c| pchar(c) || b"/?#".contains(&c)) {
         return Err(invalid());
     }
-    let (rest, query) = split(rest, b'?');
+    let (rest, query) = split_once(rest, b'?').unwrap_or((rest, b""));
     // Nix also accepts '[' and ']' in the query.
     if !chars(query, |c| pchar(c) || b"/?[]".contains(&c)) {
         return Err(invalid());
@@ -60,17 +60,15 @@ pub fn parse(url: &[u8]) -> Result<Uri<'_>, String> {
 }
 
 /// Split `s` at the first `sep`, if any.
-fn split(s: &[u8], sep: u8) -> (&[u8], &[u8]) {
-    match s.iter().position(|&c| c == sep) {
-        Some(i) => (&s[..i], &s[i + 1..]),
-        None => (s, &[]),
-    }
+pub fn split_once(s: &[u8], sep: u8) -> Option<(&[u8], &[u8])> {
+    let i = s.iter().position(|&c| c == sep)?;
+    Some((&s[..i], &s[i + 1..]))
 }
 
 /// Fails with `Some` message for a bad port, or `None` for bad syntax.
 fn authority(a: &[u8]) -> Result<Authority<'_>, Option<String>> {
-    let (userinfo, host_port) = match a.iter().position(|&c| c == b'@') {
-        Some(i) => (Some(&a[..i]), &a[i + 1..]),
+    let (userinfo, host_port) = match split_once(a, b'@') {
+        Some((userinfo, host_port)) => (Some(userinfo), host_port),
         None => (None, a),
     };
     if !chars(userinfo.unwrap_or_default(), |c| {
@@ -89,8 +87,8 @@ fn authority(a: &[u8]) -> Result<Authority<'_>, Option<String>> {
             (&host_port[..end + 2], ip_literal(&rest[..end]), port)
         }
         None => {
-            let (host, port) = match host_port.iter().position(|&c| c == b':') {
-                Some(i) => (&host_port[..i], Some(&host_port[i + 1..])),
+            let (host, port) = match split_once(host_port, b':') {
+                Some((host, port)) => (host, Some(port)),
                 None => (host_port, None),
             };
             (host, chars(host, |c| unreserved(c) || sub_delim(c)), port)

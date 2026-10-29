@@ -13,6 +13,7 @@ use crate::accessor::Accessor;
 use crate::accessor::FileType;
 use crate::path::join;
 
+#[derive(Clone)]
 enum Node {
     Regular { contents: Vec<u8>, executable: bool },
     Directory(BTreeSet<String>),
@@ -63,16 +64,14 @@ impl MemTree {
         if let Some(Node::Directory(children)) = self.nodes.get_mut(parent) {
             children.insert(name.to_owned());
         }
-        match (self.nodes.get(path), &node) {
-            (Some(Node::Directory(_)), Node::Directory(_)) => {}
-            (Some(_), _) => {
-                self.remove(path);
-                self.nodes.insert(path.to_owned(), node);
-            }
-            (None, _) => {
-                self.nodes.insert(path.to_owned(), node);
-            }
+        if matches!(
+            (self.nodes.get(path), &node),
+            (Some(Node::Directory(_)), Node::Directory(_))
+        ) {
+            return;
         }
+        self.remove(path);
+        self.nodes.insert(path.to_owned(), node);
     }
 
     /// Remove the node at `path` and everything below it, leaving its parent
@@ -257,13 +256,7 @@ fn unpack_tar(data: &[u8]) -> Result<Unpacked> {
                 let target = entry.link_name_bytes().unwrap_or_default();
                 let target = entry_path(&target);
                 match tree.nodes.get(&target) {
-                    Some(Node::Regular {
-                        contents,
-                        executable,
-                    }) => Node::Regular {
-                        contents: contents.clone(),
-                        executable: *executable,
-                    },
+                    Some(file @ Node::Regular { .. }) => file.clone(),
                     _ => bail!("hard link '{path}' to '{target}' does not name a file"),
                 }
             }

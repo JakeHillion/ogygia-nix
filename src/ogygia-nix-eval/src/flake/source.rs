@@ -166,12 +166,9 @@ impl Accessor for GitTree {
     }
 
     fn read_dir(&self, path: &str) -> std::io::Result<Vec<(String, FileType)>> {
-        let Some((mode, id)) = self.entry(path) else {
+        let Some((_, id)) = self.entry(path).filter(|(mode, _)| mode.is_tree()) else {
             return Err(std::io::ErrorKind::NotADirectory.into());
         };
-        if !mode.is_tree() {
-            return Err(std::io::ErrorKind::NotADirectory.into());
-        }
         let tree = self.repo.find_tree(id).map_err(std::io::Error::other)?;
         let mut out = Vec::new();
         for entry in tree.iter() {
