@@ -24,6 +24,7 @@ dir-link
   outputs = { self, dep }: {
     x = {
       dir = import (dep + "/dir-link");
+      type = builtins.readFileType (dep + "/dir-link");
       file = import (dep + "/file-link");
       chain = import (dep + "/chain");
       up = builtins.readDir (dep + "/sub/up");
