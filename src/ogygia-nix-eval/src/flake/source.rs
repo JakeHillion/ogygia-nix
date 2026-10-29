@@ -2,6 +2,7 @@
 //! the flake learns about where they came from.
 
 use std::collections::HashSet;
+use std::collections::VecDeque;
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::MetadataExt;
 use std::os::unix::fs::PermissionsExt;
@@ -128,47 +129,97 @@ fn git_file_type(mode: EntryMode) -> Option<FileType> {
     }
 }
 
+/// How many symlinks resolving one path may follow, as on Linux.
+const MAX_SYMLINKS: usize = 40;
+
 impl GitTree {
-    fn entry(&self, path: &str) -> Option<(EntryMode, gix::ObjectId)> {
-        if path.is_empty() {
-            return Some((EntryKind::Tree.into(), self.tree));
+    /// The entry at `path`, following symlinks in its ancestors, and in
+    /// `path` itself if `follow` is set. A symlink leading out of the tree
+    /// does not resolve.
+    fn entry(&self, path: &str, follow: bool) -> std::io::Result<(EntryMode, gix::ObjectId)> {
+        let mut pending: VecDeque<Vec<u8>> = path
+            .as_bytes()
+            .split(|&b| b == b'/')
+            .filter(|c| !c.is_empty())
+            .map(<[u8]>::to_vec)
+            .collect();
+        // The trees from the root to the directory reached so far.
+        let mut dirs = vec![self.tree];
+        let mut links = 0;
+        while let Some(name) = pending.pop_front() {
+            let dir = *dirs.last().expect("the root is never left");
+            match name.as_slice() {
+                b"." => continue,
+                b".." => {
+                    if dirs.len() == 1 {
+                        return Err(std::io::ErrorKind::NotFound.into());
+                    }
+                    dirs.pop();
+                    continue;
+                }
+                _ => {}
+            }
+            let tree = self.repo.find_tree(dir).map_err(std::io::Error::other)?;
+            let entry = tree
+                .find_entry(name.as_slice())
+                .ok_or(std::io::ErrorKind::NotFound)?;
+            let (mode, id) = (entry.mode(), entry.object_id());
+            if mode.is_link() && (follow || !pending.is_empty()) {
+                if links == MAX_SYMLINKS {
+                    return Err(std::io::Error::other("too many levels of symbolic links"));
+                }
+                let target = self.read_blob(id)?;
+                if target.starts_with(b"/") {
+                    return Err(std::io::ErrorKind::NotFound.into());
+                }
+                links += 1;
+                for c in target.split(|&b| b == b'/').rev().filter(|c| !c.is_empty()) {
+                    pending.push_front(c.to_vec());
+                }
+                continue;
+            }
+            if mode.is_tree() {
+                dirs.push(id);
+            } else if pending.is_empty() {
+                return Ok((mode, id));
+            } else {
+                return Err(std::io::ErrorKind::NotADirectory.into());
+            }
         }
-        let tree = self.repo.find_tree(self.tree).ok()?;
-        let entry = tree.lookup_entry_by_path(path).ok()??;
-        Some((entry.mode(), entry.object_id()))
+        let dir = *dirs.last().expect("the root is never left");
+        Ok((EntryKind::Tree.into(), dir))
     }
 
-    fn blob(&self, path: &str) -> std::io::Result<Vec<u8>> {
-        match self.entry(path) {
-            Some((mode, id)) if mode.is_blob_or_symlink() => self
-                .repo
-                .find_blob(id)
-                .map(|mut b| b.take_data())
-                .map_err(std::io::Error::other),
-            Some(_) => Err(std::io::ErrorKind::InvalidInput.into()),
-            None => Err(std::io::ErrorKind::NotFound.into()),
-        }
+    fn read_blob(&self, id: gix::ObjectId) -> std::io::Result<Vec<u8>> {
+        self.repo
+            .find_blob(id)
+            .map(|mut b| b.take_data())
+            .map_err(std::io::Error::other)
     }
 }
 
 impl Accessor for GitTree {
     fn file_type(&self, path: &str) -> Option<FileType> {
-        let (mode, _) = self.entry(path)?;
+        let (mode, _) = self.entry(path, false).ok()?;
         git_file_type(mode)
     }
 
     fn is_dir(&self, path: &str) -> bool {
-        self.file_type(path) == Some(FileType::Directory)
+        self.entry(path, true).is_ok_and(|(mode, _)| mode.is_tree())
     }
 
     fn read_file(&self, path: &str) -> std::io::Result<Vec<u8>> {
-        self.blob(path)
+        match self.entry(path, true)? {
+            (mode, id) if mode.is_blob() => self.read_blob(id),
+            _ => Err(std::io::ErrorKind::InvalidInput.into()),
+        }
     }
 
     fn read_dir(&self, path: &str) -> std::io::Result<Vec<(String, FileType)>> {
-        let Some((_, id)) = self.entry(path).filter(|(mode, _)| mode.is_tree()) else {
+        let (mode, id) = self.entry(path, true)?;
+        if !mode.is_tree() {
             return Err(std::io::ErrorKind::NotADirectory.into());
-        };
+        }
         let tree = self.repo.find_tree(id).map_err(std::io::Error::other)?;
         let mut out = Vec::new();
         for entry in tree.iter() {
@@ -184,14 +235,15 @@ impl Accessor for GitTree {
     }
 
     fn read_link(&self, path: &str) -> std::io::Result<Vec<u8>> {
-        self.blob(path)
+        match self.entry(path, false)? {
+            (mode, id) if mode.is_link() => self.read_blob(id),
+            _ => Err(std::io::ErrorKind::InvalidInput.into()),
+        }
     }
 
     fn is_executable(&self, path: &str) -> std::io::Result<bool> {
-        match self.entry(path) {
-            Some((mode, _)) => Ok(mode.kind() == EntryKind::BlobExecutable),
-            None => Err(std::io::ErrorKind::NotFound.into()),
-        }
+        let (mode, _) = self.entry(path, false)?;
+        Ok(mode.kind() == EntryKind::BlobExecutable)
     }
 }
 

@@ -1,0 +1,36 @@
+#~flake path:@dir(root)#x
+#~lock
+#~tree dep git
+#~file sub/default.nix
+1
+#~file sub/up link
+..
+#~file dir-link link
+sub
+#~file file-link link
+sub/default.nix
+#~file chain link
+dir-link
+#~file dot link
+.
+#~file escape link
+../dep
+#~file absolute link
+@dir(dep)
+#~tree root path
+#~file flake.nix
+{
+  inputs.dep = { url = "git+file://@dir(dep)"; flake = false; };
+  outputs = { self, dep }: {
+    x = {
+      dir = import (dep + "/dir-link");
+      file = import (dep + "/file-link");
+      chain = import (dep + "/chain");
+      up = builtins.readDir (dep + "/sub/up");
+      through = builtins.readFile (dep + "/dir-link/up/sub/default.nix");
+      dot = builtins.readDir (dep + "/dot");
+      escape = builtins.pathExists (dep + "/escape/");
+      absolute = builtins.pathExists (dep + "/absolute/");
+    };
+  };
+}
