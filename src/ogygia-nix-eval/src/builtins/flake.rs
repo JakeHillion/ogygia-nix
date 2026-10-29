@@ -1,6 +1,7 @@
 //! The flake builtins, which Nix provides but refuses to run while the
-//! `flakes` experimental feature is disabled, as it is here, except for the
-//! references of input types that do not need it.
+//! `flakes` experimental feature is disabled, as it is outside flake
+//! evaluation, except for the references of input types that do not need
+//! it.
 
 use std::collections::BTreeMap;
 
@@ -23,7 +24,7 @@ pub fn get_flake<'a>(ev: &Eval<'a>, flake_ref: Value<'a>) -> R<'a> {
 }
 
 pub fn parse_flake_ref<'a>(ev: &Eval<'a>, flake_ref: Value<'a>) -> R<'a> {
-    let attrs = url_ref(ev.force_str_no_ctx(flake_ref)?).or_else(eval_err)?;
+    let attrs = url_ref(ev.force_str_no_ctx(flake_ref)?, ev.flakes).or_else(eval_err)?;
     Ok(ev.attrs(
         attrs
             .into_iter()
@@ -45,9 +46,13 @@ enum Attr {
     Bool(bool),
 }
 
-/// The attributes of the flake reference `r`, which must be the URL of a
-/// Git, Mercurial, tarball or file input.
-fn url_ref(r: &[u8]) -> Result<Vec<(&'static str, Attr)>, String> {
+type Attrs = Vec<(&'static str, Attr)>;
+
+type Params = BTreeMap<Vec<u8>, Vec<u8>>;
+
+/// The attributes of the flake reference `r`. Without `flakes`, it must be
+/// the URL of a Git, Mercurial, tarball or file input.
+fn url_ref(r: &[u8], flakes: bool) -> Result<Attrs, String> {
     let shown = String::from_utf8_lossy(r);
     let (r, fragment) = split_once(r, b'#').unwrap_or((r, b""));
     if !fragment.is_empty() {
@@ -56,36 +61,47 @@ fn url_ref(r: &[u8]) -> Result<Vec<(&'static str, Attr)>, String> {
             String::from_utf8_lossy(fragment)
         ));
     }
+    if flakes && bare_id(r) {
+        let shown = format!("flake:{}", String::from_utf8_lossy(r));
+        return indirect_ref(r, Params::new(), &shown);
+    }
     let not_absolute = || format!("flake reference '{shown}' is not an absolute path");
     let (base, query) = split_once(r, b'?').unwrap_or((r, b""));
     // Nix reads what is not a URL as a path or a registry name, which need
     // the flakes feature, and rejects a relative path first.
     let Ok(uri) = url::parse(base) else {
-        return Err(if r.starts_with(b".") || r.contains(&b':') {
+        if flakes && r.starts_with(b"/") {
+            return path_ref(base, false, params(query)?, &shown);
+        }
+        return Err(if flakes || r.starts_with(b".") || r.contains(&b':') {
             not_absolute()
         } else {
             FLAKES_DISABLED.to_owned()
         });
     };
-    if !url::chars(query, |c| url::pchar(c) || b"/? \"[]".contains(&c)) {
-        return Err(format!(
-            "invalid URI query '{}'",
-            String::from_utf8_lossy(query)
-        ));
-    }
-    let mut params = BTreeMap::new();
-    for (k, v) in query
-        .split(|&c| c == b'&')
-        .filter_map(|p| split_once(p, b'='))
-    {
-        params
-            .entry(url::decode(k))
-            .or_insert_with(|| url::decode(v));
-    }
+    let mut params = params(query)?;
 
     let (ty, scheme) = match uri.scheme {
-        b"path" | b"github" | b"gitlab" | b"sourcehut" | b"flake" => {
+        b"path" | b"github" | b"gitlab" | b"sourcehut" | b"flake" if !flakes => {
             return Err(FLAKES_DISABLED.to_owned());
+        }
+        b"path" => {
+            if uri.authority.as_ref().is_some_and(|a| !a.host.is_empty()) {
+                return Err(format!("path URL '{shown}' should not have an authority"));
+            }
+            return path_ref(uri.path, true, params, &shown);
+        }
+        b"flake" => {
+            if uri.authority.is_some() {
+                return Err(format!("URL '{shown}' is invalid"));
+            }
+            return indirect_ref(uri.path, params, &shown);
+        }
+        ty @ (b"github" | b"gitlab" | b"sourcehut") => {
+            if uri.authority.is_some() {
+                return Err(format!("URL '{shown}' is invalid"));
+            }
+            return forge_ref(ty, uri.path, params, &shown);
         }
         s @ b"git" => ("git", s),
         s @ (b"http" | b"https" | b"file") => ("tarball", s),
@@ -102,10 +118,8 @@ fn url_ref(r: &[u8]) -> Result<Vec<(&'static str, Attr)>, String> {
     }
 
     let mut attrs = vec![("type", Attr::Str(ty.into()))];
-    if let Some(dir) = params.remove(&b"dir"[..]).filter(|d| !d.is_empty()) {
-        attrs.push(("dir", Attr::Str(dir)));
-    }
-    let mut str_attr = |params: &mut BTreeMap<Vec<u8>, Vec<u8>>, name: &'static str| {
+    dir_attr(&mut attrs, &mut params);
+    let mut str_attr = |params: &mut Params, name: &'static str| {
         if let Some(v) = params.remove(name.as_bytes()) {
             attrs.push((name, Attr::Str(v)));
         }
@@ -142,13 +156,9 @@ fn url_ref(r: &[u8]) -> Result<Vec<(&'static str, Attr)>, String> {
             str_attr(&mut params, "narHash");
             str_attr(&mut params, "rev");
             for name in ["revCount", "lastModified"] {
-                // An integer that does not parse is dropped, and one that
-                // overflows a signed integer wraps.
-                let int = params
-                    .remove(name.as_bytes())
-                    .and_then(|v| String::from_utf8(v).ok()?.parse::<u64>().ok());
-                if let Some(i) = int {
-                    attrs.push((name, Attr::Int(i as i64)));
+                // An integer that does not parse is dropped.
+                if let Some(i) = params.remove(name.as_bytes()).and_then(|v| int(&v)) {
+                    attrs.push((name, Attr::Int(i)));
                 }
             }
             for name in ["unpack", "name", "url"] {
@@ -181,6 +191,246 @@ fn url_ref(r: &[u8]) -> Result<Vec<(&'static str, Attr)>, String> {
         out.extend(query.join(&b'&'));
     }
     attrs.push(("url", Attr::Str(out)));
+    Ok(attrs)
+}
+
+/// The parameters of the URL query `query`, decoded. The first of
+/// parameters with the same name wins, and one without `=` is ignored.
+fn params(query: &[u8]) -> Result<Params, String> {
+    if !url::chars(query, |c| url::pchar(c) || b"/? \"[]".contains(&c)) {
+        return Err(format!(
+            "invalid URI query '{}'",
+            String::from_utf8_lossy(query)
+        ));
+    }
+    let mut params = Params::new();
+    for (k, v) in query
+        .split(|&c| c == b'&')
+        .filter_map(|p| split_once(p, b'='))
+    {
+        params
+            .entry(url::decode(k))
+            .or_insert_with(|| url::decode(v));
+    }
+    Ok(params)
+}
+
+/// An integer parameter. One that overflows a signed integer wraps.
+fn int(v: &[u8]) -> Option<i64> {
+    Some(std::str::from_utf8(v).ok()?.parse::<u64>().ok()? as i64)
+}
+
+/// Move the `dir` parameter, unless empty, to `attrs`.
+fn dir_attr(attrs: &mut Attrs, params: &mut Params) {
+    if let Some(dir) = params.remove(&b"dir"[..]).filter(|d| !d.is_empty()) {
+        attrs.push(("dir", Attr::Str(dir)));
+    }
+}
+
+fn unknown_param(shown: &str, params: &Params) -> Result<(), String> {
+    match params.keys().next() {
+        Some(k) => Err(format!(
+            "URL '{shown}' contains unknown parameter '{}'",
+            String::from_utf8_lossy(k)
+        )),
+        None => Ok(()),
+    }
+}
+
+/// The non-empty segments of the URL path `path`, decoded.
+fn segments(path: &[u8]) -> Vec<Vec<u8>> {
+    path.split(|&c| c == b'/')
+        .filter(|s| !s.is_empty())
+        .map(url::decode)
+        .collect()
+}
+
+fn is_rev(s: &[u8]) -> bool {
+    s.len() == 40 && s.iter().all(u8::is_ascii_hexdigit)
+}
+
+/// A `path:` reference to `path`, or a bare absolute path unless `decode`.
+/// Runs of slashes become one, and an empty path is the root.
+fn path_ref(path: &[u8], decode: bool, mut params: Params, shown: &str) -> Result<Attrs, String> {
+    let mut p = Vec::new();
+    for (i, segment) in path.split(|&c| c == b'/').enumerate() {
+        let segment = if decode {
+            let s = url::decode(segment);
+            let shown = String::from_utf8_lossy(&s);
+            if s.contains(&b'/') {
+                return Err(format!(
+                    "URL path component '{shown}' contains '/', which is not allowed in file names"
+                ));
+            }
+            if s.contains(&0) {
+                return Err(format!(
+                    "URL path component '{shown}' contains NUL byte which is not allowed"
+                ));
+            }
+            s
+        } else {
+            segment.to_vec()
+        };
+        if i > 0 && p.last() != Some(&b'/') {
+            p.push(b'/');
+        }
+        p.extend(segment);
+    }
+    if p.is_empty() {
+        p.push(b'/');
+    }
+    let mut attrs = vec![("type", Attr::Str(b"path".into())), ("path", Attr::Str(p))];
+    dir_attr(&mut attrs, &mut params);
+    for (k, v) in params {
+        let attr = match &k[..] {
+            b"narHash" => ("narHash", Attr::Str(v)),
+            b"rev" => ("rev", Attr::Str(v)),
+            b"lastModified" | b"revCount" => {
+                let name = if k == b"revCount" {
+                    "revCount"
+                } else {
+                    "lastModified"
+                };
+                let Some(i) = int(&v) else {
+                    return Err(format!("path URL '{shown}' has invalid parameter '{name}'"));
+                };
+                (name, Attr::Int(i))
+            }
+            _ => {
+                return Err(format!(
+                    "path URL '{shown}' has unsupported parameter '{}'",
+                    String::from_utf8_lossy(&k)
+                ));
+            }
+        };
+        attrs.push(attr);
+    }
+    Ok(attrs)
+}
+
+/// A GitHub, GitLab or SourceHut reference: `owner/repo`, then a commit
+/// hash or a branch or tag name, which may contain slashes.
+fn forge_ref(ty: &[u8], path: &[u8], mut params: Params, shown: &str) -> Result<Attrs, String> {
+    let segments = segments(path);
+    let [owner, repo, rest @ ..] = &segments[..] else {
+        return Err(format!("URL '{shown}' is invalid"));
+    };
+    let (mut ref_, mut rev) = match rest {
+        [] => (None, None),
+        [s] if is_rev(s) => (None, Some(s.clone())),
+        rest => (Some(rest.join(&b'/')), None),
+    };
+    if let Some(r) = params.remove(&b"ref"[..]) {
+        if ref_.is_some() {
+            return Err(format!("URL '{shown}' contains multiple branch/tag names"));
+        }
+        ref_ = Some(r);
+    }
+    if let Some(r) = params.remove(&b"rev"[..]) {
+        let s = String::from_utf8_lossy(&r);
+        crate::store::parse_hash(&s, Some(crate::store::HashAlgo::Sha1))
+            .map_err(|e| e.to_string())?;
+        if rev.is_some() {
+            return Err(format!("URL '{shown}' contains multiple commit hashes"));
+        }
+        rev = Some(r);
+    }
+    let mut attrs = vec![
+        ("type", Attr::Str(ty.into())),
+        ("owner", Attr::Str(owner.clone())),
+        ("repo", Attr::Str(repo.clone())),
+    ];
+    dir_attr(&mut attrs, &mut params);
+    if let Some(host) = params.remove(&b"host"[..]) {
+        if !host
+            .iter()
+            .all(|&c| c.is_ascii_alphanumeric() || c == b'.' || c == b'-')
+        {
+            return Err(format!("input '{shown}' contains an invalid instance host"));
+        }
+        attrs.push(("host", Attr::Str(host)));
+    }
+    if let Some(h) = params.remove(&b"narHash"[..]) {
+        attrs.push(("narHash", Attr::Str(h)));
+    }
+    unknown_param(shown, &params)?;
+    match (ref_, rev) {
+        (Some(_), Some(_)) => {
+            return Err(format!(
+                "input '{shown}' contains both a commit hash and a branch/tag name"
+            ));
+        }
+        (Some(r), None) if !git_ref(&r) => {
+            return Err(format!(
+                "input '{shown}' contains an invalid branch/tag name"
+            ));
+        }
+        (Some(r), None) => attrs.push(("ref", Attr::Str(r))),
+        (None, Some(r)) => attrs.push(("rev", Attr::Str(r))),
+        (None, None) => {}
+    }
+    Ok(attrs)
+}
+
+/// Whether `r` is a registry name as written without `flake:`: an ID,
+/// then perhaps a branch or tag name and a commit hash.
+fn bare_id(r: &[u8]) -> bool {
+    let (id, rest) = split_once(r, b'/').map_or((r, None), |(i, r)| (i, Some(r)));
+    flake_id(id)
+        && rest.is_none_or(|rest| {
+            rest.first()
+                .is_some_and(|&c| c.is_ascii_alphanumeric() || c == b'@')
+                && rest
+                    .iter()
+                    .all(|&c| c.is_ascii_alphanumeric() || b"_.@+/-".contains(&c))
+        })
+}
+
+fn flake_id(id: &[u8]) -> bool {
+    id.first().is_some_and(u8::is_ascii_alphabetic)
+        && id
+            .iter()
+            .all(|&c| c.is_ascii_alphanumeric() || c == b'_' || c == b'-')
+}
+
+/// A registry reference: an ID, then a commit hash, a branch or tag name,
+/// or both. Only the `dir` parameter is kept.
+fn indirect_ref(path: &[u8], mut params: Params, shown: &str) -> Result<Attrs, String> {
+    let segments = segments(path);
+    let [id, rest @ ..] = &segments[..] else {
+        return Err(format!("URL '{shown}' is invalid"));
+    };
+    if !flake_id(id) {
+        return Err(format!(
+            "'{}' is not a valid flake ID",
+            String::from_utf8_lossy(id)
+        ));
+    }
+    let mut attrs = vec![
+        ("type", Attr::Str(b"indirect".into())),
+        ("id", Attr::Str(id.clone())),
+    ];
+    let rev = |s: &[u8]| ("rev", Attr::Str(s.to_ascii_lowercase()));
+    let not = |s: &[u8], what: &str| {
+        format!(
+            "in flake URL '{shown}', '{}' is not {what}",
+            String::from_utf8_lossy(s)
+        )
+    };
+    match rest {
+        [] => {}
+        [s] if is_rev(s) => attrs.push(rev(s)),
+        [s] if git_ref(s) => attrs.push(("ref", Attr::Str(s.clone()))),
+        [s] => return Err(not(s, "a commit hash or branch/tag name")),
+        [r, _] if !git_ref(r) => return Err(not(r, "a branch/tag name")),
+        [_, s] if !is_rev(s) => return Err(not(s, "a commit hash")),
+        [r, s] => {
+            attrs.push(("ref", Attr::Str(r.clone())));
+            attrs.push(rev(s));
+        }
+        _ => return Err(format!("URL '{shown}' is invalid")),
+    }
+    dir_attr(&mut attrs, &mut params);
     Ok(attrs)
 }
 
@@ -331,17 +581,87 @@ mod tests {
             "hg+https://h?ref=a%00",
             "hg+https://h?ref=a%C3%A9",
         ] {
-            assert!(url_ref(r.as_bytes()).is_err(), "{r}");
+            assert!(url_ref(r.as_bytes(), false).is_err(), "{r}");
         }
     }
 
     #[test]
     fn git_ref_stops_at_nul() {
-        let attrs = url_ref(b"git+https://h?ref=a%00..&ref=b").unwrap();
+        let attrs = url_ref(b"git+https://h?ref=a%00..&ref=b", false).unwrap();
         assert!(
             attrs
                 .iter()
                 .any(|(n, a)| *n == "ref" && matches!(a, Attr::Str(s) if s == b"a\0.."))
         );
+    }
+
+    #[test]
+    fn rejects_with_flakes() {
+        for r in [
+            "github:a",
+            "github:a/",
+            "github://a/b",
+            "github:a b/c",
+            "github:a/b#x",
+            "github:a/b?foo=1",
+            "github:a/b?lastModified=1",
+            "github:a/b?rev=xyz",
+            "github:a/b?rev=",
+            "github:a/b?rev=g123456789abcdef0123456789abcdef01234567",
+            "github:a/b?rev=sha256-47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU=",
+            "github:a/b/c?ref=d",
+            "github:a/b/c?rev=0123456789abcdef0123456789abcdef01234567",
+            "github:a/b/0123456789abcdef0123456789abcdef01234567?ref=x",
+            "github:a/b/0123456789abcdef0123456789abcdef01234567?rev=0123456789abcdef0123456789abcdef01234567",
+            "github:a/b?ref=",
+            "github:a/b?ref=a..b",
+            "github:a/b/a..b",
+            "github:a/b/..",
+            "github:a/b?ref=a%7Fb",
+            "github:a/b?host=a_b",
+            "github:a/b?host=a:1",
+            "github:a/b?host=a%00b",
+            "gitlab:a",
+            "sourcehut:a/b?ref=a..b",
+            "path://x",
+            "path:/x y",
+            "path:/x[y",
+            "path:/x?ref=r",
+            "path:/x?foo=bar",
+            "path:/x?lastModified=",
+            "path:/x?lastModified=-1",
+            "path:/x?revCount=1x",
+            "path:/x?lastModified=99999999999999999999",
+            "path:/x%2Fy",
+            "path:/x%00y",
+            "path:/x#f",
+            "/x?foo=1",
+            "/x?a=%zz",
+            "./x",
+            ".",
+            "../x",
+            "flake:",
+            "flake://a",
+            "flake:1a",
+            "flake:a/.a",
+            "flake:a/a%01",
+            "flake:a/a%20b",
+            "flake:a/a/b",
+            "flake:a/a..b/0123456789abcdef0123456789abcdef01234567",
+            "flake:a/b/c/d",
+            "flake:a?dir=%zz",
+            "nixpkgs?ref=r",
+            "nixpkgs/",
+            "nixpkgs//r",
+            "nixpkgs/_a",
+            "nixpkgs/a,b",
+            "nixpkgs/a%2Fb",
+            "nixpkgs/r/s",
+            "_a",
+            "a.b",
+            "nixpkgs#x",
+        ] {
+            assert!(url_ref(r.as_bytes(), true).is_err(), "{r}");
+        }
     }
 }
