@@ -284,13 +284,15 @@
               cargoArtifacts = testCargoArtifacts;
               doCheck = false;
               doNotPostBuildInstallCargoBinaries = true;
-              # Bake nebula-cert's and jj's store paths into the archived test
-              # binaries the same way the ogygia package does, so the nebula
-              # round-trip test and the ogygia-updated change-id tests find them
-              # via the embedded constants when the archive runs — the test
-              # runner has neither on PATH.
+              # Bake nebula-cert's, jj's and git's store paths into the archived
+              # test binaries the same way the ogygia package does, so the nebula
+              # round-trip test, the ogygia-updated change-id tests and the
+              # ogygia-nix-eval remote Git tests find them via the embedded
+              # constants when the archive runs — the test runner has none of
+              # them on PATH.
               env.OGYGIA_NEBULA_CERT_BIN = "${pkgs.nebula}/bin/nebula-cert";
               env.OGYGIA_JJ_BIN = "${pkgs.jujutsu}/bin/jj";
+              env.OGYGIA_GIT_BIN = "${pkgs.git}/bin/git";
               env.OGYGIA_NIX_INSTANTIATE_BIN = "${referenceNix}/bin/nix-instantiate";
               env.OGYGIA_NIX_EVAL_DEFAULT_INCLUDE_PATH = "${nixIncludePath}";
               env.OGYGIA_NIX_EVAL_NIX_VERSION = referenceNix.version;
@@ -467,6 +469,7 @@
                 env.OGYGIA_NIX_EVAL_DEFAULT_INCLUDE_PATH = "${nixIncludePath}";
                 env.OGYGIA_NIX_EVAL_NIX_VERSION = referenceNix.version;
                 env.OGYGIA_NIX_EVAL_NIXPKGS = "${nixpkgs}";
+                env.OGYGIA_GIT_BIN = "${pkgs.git}/bin/git";
               });
 
               ogygia-cli-config = import ./nixos/tests/cli-config.nix {

@@ -12,6 +12,7 @@ use std::rc::Rc;
 use anyhow::Context as _;
 use anyhow::Result;
 use anyhow::bail;
+use gix::objs::FindExt as _;
 use gix::objs::tree::EntryKind;
 use gix::objs::tree::EntryMode;
 
@@ -19,9 +20,13 @@ use crate::accessor::Accessor;
 use crate::accessor::FileType;
 use crate::archive;
 use crate::archive::MemTree;
+use crate::fetch::Fetcher;
+use crate::fetch::Method;
+use crate::fetch::Request;
 use crate::flake::FlakeEnv;
 use crate::flake::flakeref;
 use crate::flake::flakeref::Attrs;
+use crate::git;
 use crate::io::Io;
 use crate::store;
 use crate::store::HashAlgo;
@@ -114,7 +119,7 @@ impl Accessor for Dir {
 
 /// The tree of a Git commit.
 struct GitTree {
-    repo: gix::Repository,
+    objects: Box<dyn gix::objs::Find>,
     tree: gix::ObjectId,
 }
 
@@ -130,21 +135,28 @@ fn git_file_type(mode: EntryMode) -> Option<FileType> {
 
 impl GitTree {
     fn entry(&self, path: &str) -> Option<(EntryMode, gix::ObjectId)> {
-        if path.is_empty() {
-            return Some((EntryKind::Tree.into(), self.tree));
+        let mut found = (EntryMode::from(EntryKind::Tree), self.tree);
+        let mut buf = Vec::new();
+        for name in path.split('/').filter(|n| !n.is_empty()) {
+            if !found.0.is_tree() {
+                return None;
+            }
+            let tree = self.objects.find_tree(&found.1, &mut buf).ok()?;
+            let entry = tree.entries.iter().find(|e| e.filename == name)?;
+            found = (entry.mode, entry.oid.to_owned());
         }
-        let tree = self.repo.find_tree(self.tree).ok()?;
-        let entry = tree.lookup_entry_by_path(path).ok()??;
-        Some((entry.mode(), entry.object_id()))
+        Some(found)
     }
 
     fn blob(&self, path: &str) -> std::io::Result<Vec<u8>> {
         match self.entry(path) {
-            Some((mode, id)) if mode.is_blob_or_symlink() => self
-                .repo
-                .find_blob(id)
-                .map(|mut b| b.take_data())
-                .map_err(std::io::Error::other),
+            Some((mode, id)) if mode.is_blob_or_symlink() => {
+                let mut buf = Vec::new();
+                self.objects
+                    .find_blob(&id, &mut buf)
+                    .map(|b| b.data.to_vec())
+                    .map_err(std::io::Error::other)
+            }
             Some(_) => Err(std::io::ErrorKind::InvalidInput.into()),
             None => Err(std::io::ErrorKind::NotFound.into()),
         }
@@ -172,15 +184,18 @@ impl Accessor for GitTree {
         if !mode.is_tree() {
             return Err(std::io::ErrorKind::NotADirectory.into());
         }
-        let tree = self.repo.find_tree(id).map_err(std::io::Error::other)?;
+        let mut buf = Vec::new();
+        let tree = self
+            .objects
+            .find_tree(&id, &mut buf)
+            .map_err(std::io::Error::other)?;
         let mut out = Vec::new();
-        for entry in tree.iter() {
-            let entry = entry.map_err(std::io::Error::other)?;
+        for entry in tree.entries {
             // Submodules are not fetched.
-            let Some(ty) = git_file_type(entry.mode()) else {
+            let Some(ty) = git_file_type(entry.mode) else {
                 continue;
             };
-            out.push((String::from_utf8_lossy(entry.filename()).into_owned(), ty));
+            out.push((String::from_utf8_lossy(entry.filename).into_owned(), ty));
         }
         out.sort();
         Ok(out)
@@ -355,7 +370,7 @@ fn fetch_git_rev(io: &Io, dir: &Path, rev: &str, locked: &Attrs, what: &str) -> 
         None => commit_count(&repo, id)?,
     };
     let tree = Rc::new(GitTree {
-        repo,
+        objects: Box::new(repo.objects.clone()),
         tree: tree_id,
     });
     let (path, hash) = add(io, tree, flakeref::get_str(locked, "narHash"), what)?;
@@ -366,6 +381,81 @@ fn fetch_git_rev(io: &Io, dir: &Path, rev: &str, locked: &Attrs, what: &str) -> 
             last_modified: Some(flakeref::get_int(locked, "lastModified").unwrap_or(last_modified)),
             rev: Some(id.to_string()),
             rev_count: Some(rev_count),
+            submodules: Some(false),
+            ..Info::default()
+        },
+    })
+}
+
+/// The number of commits reachable from `commit` in `objects`, itself
+/// included.
+fn count_commits(objects: &dyn gix::objs::Find, commit: gix::ObjectId) -> Result<u64> {
+    let mut seen = HashSet::from([commit]);
+    let mut todo = vec![commit];
+    let mut buf = Vec::new();
+    while let Some(id) = todo.pop() {
+        for parent in objects.find_commit(&id, &mut buf)?.parents() {
+            if seen.insert(parent) {
+                todo.push(parent);
+            }
+        }
+    }
+    Ok(seen.len() as u64)
+}
+
+/// Copy the tree of commit `rev` of the remote repository at `url` to the
+/// store. A locked input's revision count and modification time are the
+/// ones `attrs` gives, if any, and only its commit is fetched; otherwise
+/// they come from the repository's history.
+fn fetch_git_remote(
+    io: &Io,
+    env: &FlakeEnv,
+    url: &str,
+    attrs: &Attrs,
+    what: &str,
+) -> Result<Source> {
+    let Some(rev) = flakeref::get_str(attrs, "rev") else {
+        bail!(
+            "cannot fetch input '{what}': it has no revision, and this evaluator does not look them up"
+        );
+    };
+    if !url.starts_with("https://") && !url.starts_with("http://") {
+        bail!("cannot fetch input '{what}': only HTTP and HTTPS Git repositories can be fetched");
+    }
+    if flakeref::get_bool(attrs, "submodules") == Some(true) {
+        bail!("cannot fetch input '{what}': Git submodules are not supported");
+    }
+    let id = gix::ObjectId::from_hex(rev.as_bytes())?;
+    let nar_hash = flakeref::get_str(attrs, "narHash");
+    let objects = git::fetch_commit(fetcher(env, url)?, url, id, nar_hash.is_some())
+        .with_context(|| format!("fetching '{url}'"))?;
+    let mut buf = Vec::new();
+    let commit = objects
+        .find_commit(&id, &mut buf)
+        .with_context(|| format!("'{url}' has no commit {rev}"))?;
+    let tree_id = commit.tree();
+    let (rev_count, last_modified) = match nar_hash {
+        Some(_) => (
+            flakeref::get_int(attrs, "revCount"),
+            flakeref::get_int(attrs, "lastModified"),
+        ),
+        None => (
+            Some(count_commits(&objects, id)?),
+            Some(commit.committer()?.time()?.seconds.max(0) as u64),
+        ),
+    };
+    let tree = Rc::new(GitTree {
+        objects: Box::new(objects),
+        tree: tree_id,
+    });
+    let (path, hash) = add(io, tree, nar_hash, what)?;
+    Ok(Source {
+        path,
+        info: Info {
+            nar_hash: Some(hash),
+            last_modified,
+            rev: Some(id.to_string()),
+            rev_count,
             submodules: Some(false),
             ..Info::default()
         },
@@ -393,9 +483,19 @@ fn from_store(io: &Io, env: &FlakeEnv, locked: &Attrs) -> Result<Option<Source>>
             last_modified: flakeref::get_int(locked, "lastModified"),
             rev: flakeref::get_str(locked, "rev").map(str::to_owned),
             rev_count: flakeref::get_int(locked, "revCount"),
+            submodules: (flakeref::get_str(locked, "type") == Some("git"))
+                .then(|| flakeref::get_bool(locked, "submodules").unwrap_or(false)),
             ..Info::default()
         },
     }))
+}
+
+/// `env`'s fetcher, to fetch `url` with.
+fn fetcher<'e>(env: &'e FlakeEnv, url: &str) -> Result<&'e dyn Fetcher> {
+    match &env.fetcher {
+        Some(fetcher) => Ok(&**fetcher),
+        None => bail!("cannot download '{url}': this evaluator has no fetcher"),
+    }
 }
 
 /// The contents of the file at `url`: read directly for a `file://` URL,
@@ -404,12 +504,16 @@ fn download(env: &FlakeEnv, url: &str) -> Result<Vec<u8>> {
     if let Some(path) = url.strip_prefix("file://") {
         return std::fs::read(path).with_context(|| format!("reading '{path}'"));
     }
-    match &env.fetcher {
-        Some(fetcher) => fetcher
-            .get(url)
-            .with_context(|| format!("downloading '{url}'")),
-        None => bail!("cannot download '{url}': this evaluator has no fetcher"),
-    }
+    let request = Request {
+        method: Method::Get,
+        url,
+        headers: &[],
+        body: &[],
+    };
+    let response = fetcher(env, url)?
+        .request(&request)
+        .with_context(|| format!("downloading '{url}'"))?;
+    Ok(response.body)
 }
 
 /// Unpack the archive at `url` into the store. Its last modification time
@@ -507,9 +611,7 @@ pub fn fetch(io: &Io, env: &FlakeEnv, attrs: &Attrs, what: &str) -> Result<Sourc
             };
             fetch_archive(io, env, &forge_archive_url(ty, attrs, rev), attrs, what)
         }
-        "git" => bail!(
-            "cannot fetch input '{what}': this evaluator only reads remote Git repositories from the store"
-        ),
+        "git" => fetch_git_remote(io, env, url, attrs, what),
         _ => bail!("input type '{ty}' is unsupported"),
     }
 }
@@ -605,13 +707,20 @@ mod tests {
     }
 
     fn eval(dir: &tempfile::TempDir, fetcher: Option<Box<dyn crate::Fetcher>>) -> String {
+        eval_installable(dir, &format!("{}/root#x", dir.path().display()), fetcher)
+    }
+
+    fn eval_installable(
+        dir: &tempfile::TempDir,
+        installable: &str,
+        fetcher: Option<Box<dyn crate::Fetcher>>,
+    ) -> String {
         let env = FlakeEnv {
             cwd: dir.path().to_owned(),
             store: None,
             fetcher,
         };
-        let installable = format!("{}/root#x", dir.path().display());
-        crate::eval_flake_json(&installable, "x: x", &env, crate::Settings::default())
+        crate::eval_flake_json(installable, "x: x", &env, crate::Settings::default())
             .unwrap_or_else(|e| format!("error: {e}"))
     }
 
@@ -654,9 +763,12 @@ mod tests {
     struct Fake(std::sync::Arc<std::sync::Mutex<Vec<String>>>);
 
     impl crate::Fetcher for Fake {
-        fn get(&self, url: &str) -> anyhow::Result<Vec<u8>> {
-            self.0.lock().unwrap().push(url.to_owned());
-            Ok(tarball())
+        fn request(&self, request: &crate::Request<'_>) -> anyhow::Result<crate::Response> {
+            self.0.lock().unwrap().push(request.url.to_owned());
+            Ok(crate::Response {
+                headers: Vec::new(),
+                body: tarball(),
+            })
         }
     }
 
@@ -724,6 +836,164 @@ mod tests {
         assert_eq!(
             forge_archive_url("sourcehut", &attrs("~o", None), "c"),
             "https://git.sr.ht/~o/r/archive/c.tar.gz"
+        );
+    }
+
+    // A repository made by `git_repo`, and what Nix 2.36 evaluates its
+    // flake's `x` to as `git+file://…?rev=GIT_REV`.
+    const GIT_REV: &str = "3cea74b699a9351f08629c124f138314aa74cd30";
+    const GIT_HASH: &str = "sha256-dv8iUwbOOD9jfPai4FPczVIox7NR2swJyLCdznDt7r8=";
+    const GIT_INFO: &str = r#"{"lastModified":2000,"lastModifiedDate":"19700101003320","narHash":"sha256-dv8iUwbOOD9jfPai4FPczVIox7NR2swJyLCdznDt7r8=","rev":"3cea74b699a9351f08629c124f138314aa74cd30","revCount":2,"shortRev":"3cea74b","submodules":false}"#;
+
+    fn git_bin() -> &'static str {
+        option_env!("OGYGIA_GIT_BIN").unwrap_or("git")
+    }
+
+    /// Run `git` in `dir`, committing at `date`.
+    fn git(dir: &Path, date: u64, args: &[&str]) {
+        let status = std::process::Command::new(git_bin())
+            .args([
+                "-c",
+                "init.defaultBranch=main",
+                "-c",
+                "commit.gpgSign=false",
+            ])
+            .args(args)
+            .current_dir(dir)
+            .env_clear()
+            .env("PATH", std::env::var_os("PATH").unwrap_or_default())
+            .env("HOME", dir)
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_AUTHOR_NAME", "a")
+            .env("GIT_AUTHOR_EMAIL", "a@example.com")
+            .env("GIT_AUTHOR_DATE", "@1000 +0000")
+            .env("GIT_COMMITTER_NAME", "a")
+            .env("GIT_COMMITTER_EMAIL", "a@example.com")
+            .env("GIT_COMMITTER_DATE", format!("@{date} +0000"))
+            .status()
+            .unwrap();
+        assert!(status.success(), "git {args:?} failed");
+    }
+
+    /// A repository at `dir` whose `HEAD` is `GIT_REV`, the second of two
+    /// commits, holding a flake.
+    fn git_repo(dir: &Path) {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::create_dir(dir).unwrap();
+        git(dir, 1000, &["init", "-q", "."]);
+        std::fs::write(dir.join("a"), "hello\n").unwrap();
+        git(dir, 1000, &["add", "a"]);
+        git(dir, 1000, &["commit", "-qm", "one"]);
+        std::fs::create_dir(dir.join("sub")).unwrap();
+        std::fs::write(dir.join("sub/s"), "s\n").unwrap();
+        std::fs::write(dir.join("x"), "#!/bin/sh\n").unwrap();
+        std::fs::set_permissions(dir.join("x"), std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::os::unix::fs::symlink("a", dir.join("l")).unwrap();
+        std::fs::write(
+            dir.join("flake.nix"),
+            "{ outputs = { self }: { x = builtins.removeAttrs self.sourceInfo [ \"outPath\" ]; }; }\n",
+        )
+        .unwrap();
+        git(dir, 2000, &["add", "."]);
+        git(dir, 2000, &["commit", "-qm", "two"]);
+    }
+
+    /// Serves the repository at its path over Git's smart HTTP protocol, as
+    /// `git http-backend` does, recording each request's body.
+    struct GitServer(PathBuf, std::sync::Arc<std::sync::Mutex<Vec<Vec<u8>>>>);
+
+    impl crate::Fetcher for GitServer {
+        fn request(&self, request: &crate::Request<'_>) -> anyhow::Result<crate::Response> {
+            use std::io::Write as _;
+            self.1.lock().unwrap().push(request.body.to_vec());
+            let protocol = request
+                .headers
+                .iter()
+                .find(|(n, _)| n.eq_ignore_ascii_case("Git-Protocol"))
+                .map_or("", |(_, v)| v.as_str());
+            let advertise = request.method == Method::Get;
+            let mut cmd = std::process::Command::new(git_bin());
+            cmd.args(["upload-pack", "--stateless-rpc"]);
+            if advertise {
+                cmd.arg("--advertise-refs");
+            }
+            let mut child = cmd
+                .arg(&self.0)
+                .env("GIT_PROTOCOL", protocol)
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::piped())
+                .spawn()?;
+            child.stdin.take().unwrap().write_all(request.body)?;
+            let output = child.wait_with_output()?;
+            anyhow::ensure!(output.status.success(), "git upload-pack failed");
+            let mut body = Vec::new();
+            if advertise && !protocol.contains("version=2") {
+                body.extend_from_slice(b"001e# service=git-upload-pack\n0000");
+            }
+            body.extend(output.stdout);
+            let kind = if advertise { "advertisement" } else { "result" };
+            Ok(crate::Response {
+                headers: vec![(
+                    "Content-Type".to_owned(),
+                    format!("application/x-git-upload-pack-{kind}"),
+                )],
+                body,
+            })
+        }
+    }
+
+    fn remote_git_flake(lock_extra: &str) -> tempfile::TempDir {
+        let dir = flake(
+            r#"r = { url = "git+https://git.example/repo"; flake = false; };"#,
+            r#"{ self, r }: { x = builtins.removeAttrs r.sourceInfo [ "outPath" ]; }"#,
+            &format!(
+                r#""root": {{ "inputs": {{ "r": "r" }} }},
+                   "r": {{ "flake": false,
+                     "locked": {{ {lock_extra} "narHash": "{GIT_HASH}", "rev": "{GIT_REV}", "type": "git", "url": "https://git.example/repo" }},
+                     "original": {{ "type": "git", "url": "https://git.example/repo" }} }}"#
+            ),
+        );
+        git_repo(&dir.path().join("repo"));
+        dir
+    }
+
+    #[test]
+    fn fetches_only_the_locked_commit_of_a_remote_git_input() {
+        let dir = remote_git_flake(r#""lastModified": 2000, "revCount": 2,"#);
+        let bodies = std::sync::Arc::default();
+        let server = GitServer(dir.path().join("repo"), std::sync::Arc::clone(&bodies));
+        assert_eq!(eval(&dir, Some(Box::new(server))), GIT_INFO);
+        let bodies = bodies.lock().unwrap();
+        assert!(
+            bodies
+                .iter()
+                .any(|b| b.windows(8).any(|w| w == b"deepen 1")),
+            "the fetch was not shallow"
+        );
+    }
+
+    #[test]
+    fn takes_what_the_lock_records_of_a_remote_git_input() {
+        let dir = remote_git_flake("");
+        let server = GitServer(dir.path().join("repo"), Default::default());
+        assert_eq!(
+            eval(&dir, Some(Box::new(server))),
+            format!(
+                r#"{{"narHash":"{GIT_HASH}","rev":"{GIT_REV}","shortRev":"3cea74b","submodules":false}}"#
+            )
+        );
+    }
+
+    #[test]
+    fn computes_what_an_unlocked_remote_git_flake_does_not_record() {
+        let dir = tempfile::tempdir().unwrap();
+        git_repo(&dir.path().join("repo"));
+        let server = GitServer(dir.path().join("repo"), Default::default());
+        let installable = format!("git+https://git.example/repo?rev={GIT_REV}#x");
+        assert_eq!(
+            eval_installable(&dir, &installable, Some(Box::new(server))),
+            GIT_INFO
         );
     }
 }
