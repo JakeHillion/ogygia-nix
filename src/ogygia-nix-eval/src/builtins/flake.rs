@@ -5,6 +5,7 @@
 use std::collections::BTreeMap;
 
 use super::url;
+use super::url::split_once;
 use crate::eval::Eval;
 use crate::value::R;
 use crate::value::Value;
@@ -42,12 +43,6 @@ enum Attr {
     Str(Vec<u8>),
     Int(i64),
     Bool(bool),
-}
-
-/// Split `s` at the first `sep`, if any.
-fn split_once(s: &[u8], sep: u8) -> Option<(&[u8], &[u8])> {
-    let i = s.iter().position(|&c| c == sep)?;
-    Some((&s[..i], &s[i + 1..]))
 }
 
 /// The attributes of the flake reference `r`, which must be the URL of a
@@ -131,25 +126,21 @@ fn url_ref(r: &[u8]) -> Result<Vec<(&'static str, Attr)>, String> {
             }
             str_attr(&mut params, "ref");
             str_attr(&mut params, "rev");
+            if ty == "git" {
+                const VERIFIED: [&str; 4] = ["verifyCommit", "keytype", "publicKey", "publicKeys"];
+                if VERIFIED.iter().any(|n| params.contains_key(n.as_bytes())) {
+                    return Err("experimental Nix feature 'verified-fetches' is disabled; add '--extra-experimental-features verified-fetches' to enable it".to_owned());
+                }
+                for name in ["shallow", "submodules", "lfs", "exportIgnore", "allRefs"] {
+                    if let Some(v) = params.remove(name.as_bytes()) {
+                        attrs.push((name, Attr::Bool(v == b"1")));
+                    }
+                }
+            }
         }
         _ => {
             str_attr(&mut params, "narHash");
             str_attr(&mut params, "rev");
-        }
-    }
-    match ty {
-        "git" => {
-            const VERIFIED: [&str; 4] = ["verifyCommit", "keytype", "publicKey", "publicKeys"];
-            if VERIFIED.iter().any(|n| params.contains_key(n.as_bytes())) {
-                return Err("experimental Nix feature 'verified-fetches' is disabled; add '--extra-experimental-features verified-fetches' to enable it".to_owned());
-            }
-            for name in ["shallow", "submodules", "lfs", "exportIgnore", "allRefs"] {
-                if let Some(v) = params.remove(name.as_bytes()) {
-                    attrs.push((name, Attr::Bool(v == b"1")));
-                }
-            }
-        }
-        "tarball" | "file" => {
             for name in ["revCount", "lastModified"] {
                 // An integer that does not parse is dropped, and one that
                 // overflows a signed integer wraps.
@@ -164,7 +155,6 @@ fn url_ref(r: &[u8]) -> Result<Vec<(&'static str, Attr)>, String> {
                 params.remove(name.as_bytes());
             }
         }
-        _ => {}
     }
 
     let mut out = [scheme, &b":"[..]].concat();
