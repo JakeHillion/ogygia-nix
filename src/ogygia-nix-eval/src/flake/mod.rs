@@ -332,7 +332,7 @@ pub(crate) fn eval_json<'a>(
     let dir = flake_dir(&source.path, &attrs);
     let loaded = file::load(ev, &dir, &shown)?;
     let lock_file = format!("{dir}/flake.lock");
-    let lock = if ev.ctx.io.exists(&lock_file) {
+    let lock = if r(ev.ctx.io.exists(&lock_file))? {
         let text = r(ev.ctx.io.read(&lock_file))?;
         let json = crate::builtins::json::from_json(ev, ev.str_val(&text, &[]))?;
         lock::from_value(ev, json)?

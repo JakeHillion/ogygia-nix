@@ -113,17 +113,17 @@ impl MemTree {
 }
 
 impl Accessor for MemTree {
-    fn file_type(&self, path: &str) -> Option<FileType> {
-        Some(match self.nodes.get(path)? {
+    fn file_type(&self, path: &str) -> std::io::Result<Option<FileType>> {
+        Ok(self.nodes.get(path).map(|node| match node {
             Node::Regular { .. } => FileType::Regular,
             Node::Directory(_) => FileType::Directory,
             Node::Symlink(_) => FileType::Symlink,
-        })
+        }))
     }
 
-    fn is_dir(&self, path: &str) -> bool {
+    fn resolved_type(&self, path: &str) -> std::io::Result<Option<FileType>> {
         // Symlinks are not followed: an archive's links can point anywhere.
-        matches!(self.nodes.get(path), Some(Node::Directory(_)))
+        self.file_type(path)
     }
 
     fn read_file(&self, path: &str) -> std::io::Result<Vec<u8>> {
@@ -143,6 +143,8 @@ impl Accessor for MemTree {
             .map(|name| {
                 let ty = self
                     .file_type(&join(path, name))
+                    .ok()
+                    .flatten()
                     .expect("a directory's children exist");
                 (name.clone(), ty)
             })

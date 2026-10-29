@@ -9,6 +9,7 @@ anyhow = { workspace = true }
 bumpalo = { workspace = true }
 hex = { workspace = true }
 lasso = { workspace = true }
+libc = { workspace = true }
 md-5 = { workspace = true }
 num-bigint = { workspace = true }
 regex = { workspace = true }

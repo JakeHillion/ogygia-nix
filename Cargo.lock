@@ -3337,6 +3337,7 @@ dependencies = [
  "gix",
  "hex",
  "lasso",
+ "libc",
  "liblzma",
  "libtest-mimic",
  "md-5",

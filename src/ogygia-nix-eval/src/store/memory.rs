@@ -88,12 +88,12 @@ impl File {
 }
 
 impl Accessor for File {
-    fn file_type(&self, path: &str) -> Option<FileType> {
-        path.is_empty().then_some(FileType::Regular)
+    fn file_type(&self, path: &str) -> std::io::Result<Option<FileType>> {
+        Ok(path.is_empty().then_some(FileType::Regular))
     }
 
-    fn is_dir(&self, _: &str) -> bool {
-        false
+    fn resolved_type(&self, path: &str) -> std::io::Result<Option<FileType>> {
+        self.file_type(path)
     }
 
     fn read_file(&self, path: &str) -> std::io::Result<Vec<u8>> {

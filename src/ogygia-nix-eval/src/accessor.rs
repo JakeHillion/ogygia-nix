@@ -36,11 +36,12 @@ impl FileType {
 /// A tree of files. Errors do not name the path; callers add it.
 pub trait Accessor {
     /// The type of `path` without following a final symlink, or `None` if it
-    /// does not exist.
-    fn file_type(&self, path: &str) -> Option<FileType>;
+    /// does not exist. Fails if resolving `path` loops.
+    fn file_type(&self, path: &str) -> Result<Option<FileType>>;
 
-    /// Whether `path` is a directory, following symlinks.
-    fn is_dir(&self, path: &str) -> bool;
+    /// The type of what `path` resolves to, following symlinks, or `None` if
+    /// it does not resolve. Fails if resolving `path` loops.
+    fn resolved_type(&self, path: &str) -> Result<Option<FileType>>;
 
     /// The contents of the file at `path`, following symlinks.
     fn read_file(&self, path: &str) -> Result<Vec<u8>>;
@@ -58,5 +59,21 @@ pub trait Accessor {
     /// followed. A tree that does not follow its symlinks returns `path`.
     fn real_path(&self, path: &str) -> Result<String> {
         Ok(path.to_owned())
+    }
+}
+
+/// The error of resolving a path through too many symlinks.
+#[derive(Debug, thiserror::Error)]
+#[error("infinite symlink recursion")]
+pub struct SymlinkLoop;
+
+impl SymlinkLoop {
+    pub(crate) fn error() -> std::io::Error {
+        std::io::Error::other(SymlinkLoop)
+    }
+
+    /// Whether `e` is a [`SymlinkLoop`].
+    pub(crate) fn is(e: &std::io::Error) -> bool {
+        e.get_ref().is_some_and(|e| e.is::<SymlinkLoop>())
     }
 }

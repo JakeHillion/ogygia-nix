@@ -198,7 +198,7 @@ fn indirect(id: &str) -> Attrs {
 /// as `shown`.
 pub fn load<'a>(ev: &Eval<'a>, dir: &str, shown: &str) -> R<'a, Flake<'a>> {
     let file = format!("{}/flake.nix", dir.trim_end_matches('/'));
-    if !ev.ctx.io.exists(&file) {
+    if !ev.ctx.io.exists(&file).map_err(anyhow_err)? {
         return eval_err(format!(
             "source tree referenced by '{shown}' does not contain a '/flake.nix' file"
         ));
