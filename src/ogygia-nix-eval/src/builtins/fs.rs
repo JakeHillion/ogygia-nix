@@ -66,14 +66,16 @@ pub fn read_file_type<'a>(ev: &Eval<'a>, path: Value<'a>) -> R<'a> {
     // Unlike other builtins, readFileType follows no symlinks at all.
     let parent = crate::path::dir_of(&path);
     let root = parent.len() - crate::path::abs(parent).len() + 1;
-    let mut ancestors = parent[root..]
+    let ancestors = parent[root..]
         .match_indices('/')
         .map(|(i, _)| &parent[..root + i])
         .chain([parent]);
-    if ancestors.any(|a| ev.ctx.io.file_type(a) == Some(FileType::Symlink)) {
-        return eval_err(format!("path '{parent}' (or its ancestor) is a symlink"));
+    for a in ancestors {
+        if ev.ctx.io.file_type(a).map_err(anyhow_err)? == Some(FileType::Symlink) {
+            return eval_err(format!("path '{parent}' (or its ancestor) is a symlink"));
+        }
     }
-    match ev.ctx.io.file_type(&path) {
+    match ev.ctx.io.file_type(&path).map_err(anyhow_err)? {
         Some(t) => Ok(ev.string(t.name())),
         None => eval_err(format!("path '{path}' does not exist")),
     }
@@ -84,11 +86,13 @@ pub fn path_exists<'a>(ev: &Eval<'a>, path: Value<'a>) -> R<'a> {
     let (raw, _) = ev.coerce_to_string(v, Coerce::PLAIN)?;
     let path = ev.realise_path(v)?;
     let io = &ev.ctx.io;
-    // A trailing slash requires a directory.
-    if raw.ends_with(b"/") && path != "/" {
-        return Ok(Value::Bool(io.is_dir(&path)));
-    }
-    Ok(Value::Bool(io.exists(&path)))
+    // A trailing `/` or `/.` requires a directory.
+    let exists = if (raw.ends_with(b"/") || raw.ends_with(b"/.")) && path != "/" {
+        io.is_dir(&path)
+    } else {
+        io.exists(&path)
+    };
+    Ok(Value::Bool(exists.map_err(anyhow_err)?))
 }
 
 pub fn hash_file<'a>(ev: &Eval<'a>, algo: Value<'a>, path: Value<'a>) -> R<'a> {
@@ -138,7 +142,7 @@ pub fn find_file<'a>(ev: &Eval<'a>, search_path: Value<'a>, name: Value<'a>) -> 
             format!("{path}/{rest}")
         };
         let candidate = crate::path::canon_path(&candidate);
-        if ev.ctx.io.exists(&candidate) {
+        if ev.ctx.io.resolves(&candidate).map_err(anyhow_err)? {
             return Ok(ev.path_val(&candidate));
         }
     }

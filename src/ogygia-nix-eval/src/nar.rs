@@ -25,7 +25,10 @@ pub fn dump(w: &mut impl Write, acc: &dyn Accessor, path: &str) -> Result<()> {
 }
 
 fn dump_node(w: &mut impl Write, acc: &dyn Accessor, path: &str) -> Result<()> {
-    let Some(ft) = acc.file_type(path) else {
+    let Some(ft) = acc
+        .file_type(path)
+        .with_context(|| format!("reading '{path}'"))?
+    else {
         bail!("path '{path}' does not exist");
     };
     write_str(w, b"(")?;

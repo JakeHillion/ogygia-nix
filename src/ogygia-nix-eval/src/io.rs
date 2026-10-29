@@ -26,6 +26,7 @@ use sha2::Sha256;
 
 use crate::accessor::Accessor;
 use crate::accessor::FileType;
+use crate::accessor::SymlinkLoop;
 use crate::flake::source::Dir;
 use crate::nar;
 use crate::path::join;
@@ -108,15 +109,12 @@ impl Fs {
 }
 
 impl Accessor for Fs {
-    fn file_type(&self, path: &str) -> Option<FileType> {
-        let p = self.physical(path).ok()?;
-        std::fs::symlink_metadata(&p)
-            .ok()
-            .map(|m| FileType::of(m.file_type()))
+    fn file_type(&self, path: &str) -> std::io::Result<Option<FileType>> {
+        os_type(self.physical(path).and_then(std::fs::symlink_metadata))
     }
 
-    fn is_dir(&self, path: &str) -> bool {
-        self.physical(path).map(|p| p.is_dir()).unwrap_or(false)
+    fn resolved_type(&self, path: &str) -> std::io::Result<Option<FileType>> {
+        os_type(self.physical(path).and_then(std::fs::metadata))
     }
 
     fn read_file(&self, path: &str) -> std::io::Result<Vec<u8>> {
@@ -165,6 +163,16 @@ impl Accessor for Fs {
     }
 }
 
+/// The type of a file from its metadata: `None` if it does not exist, and
+/// [`SymlinkLoop`] if it is reached through too many symlinks.
+fn os_type(meta: std::io::Result<std::fs::Metadata>) -> std::io::Result<Option<FileType>> {
+    match meta {
+        Ok(m) => Ok(Some(FileType::of(m.file_type()))),
+        Err(e) if e.raw_os_error() == Some(libc::ELOOP) => Err(SymlinkLoop::error()),
+        Err(_) => Ok(None),
+    }
+}
+
 /// The tree at `root` in `base`, holding only the entries in `kept`
 /// (relative to `root`) if that is set.
 struct Subtree {
@@ -186,12 +194,18 @@ impl Subtree {
 }
 
 impl Accessor for Subtree {
-    fn file_type(&self, path: &str) -> Option<FileType> {
-        self.base.file_type(&self.path(path).ok()?)
+    fn file_type(&self, path: &str) -> std::io::Result<Option<FileType>> {
+        match self.path(path) {
+            Ok(p) => self.base.file_type(&p),
+            Err(_) => Ok(None),
+        }
     }
 
-    fn is_dir(&self, path: &str) -> bool {
-        self.path(path).is_ok_and(|p| self.base.is_dir(&p))
+    fn resolved_type(&self, path: &str) -> std::io::Result<Option<FileType>> {
+        match self.path(path) {
+            Ok(p) => self.base.resolved_type(&p),
+            Err(_) => Ok(None),
+        }
     }
 
     fn read_file(&self, path: &str) -> std::io::Result<Vec<u8>> {
@@ -317,24 +331,45 @@ impl Io {
         String::from_utf8(bytes).with_context(|| format!("file '{logical}' is not UTF-8"))
     }
 
+    /// The type of `logical`, following a final symlink if `follow` is set,
+    /// or `None` if it does not exist. Fails if resolving `logical` loops.
+    fn type_of(&self, logical: &str, follow: bool) -> Result<Option<FileType>> {
+        if self.check_access(logical).is_err() {
+            return Ok(None);
+        }
+        let Ok((acc, path)) = self.locate(logical) else {
+            return Ok(None);
+        };
+        let ty = if follow {
+            acc.resolved_type(&path)
+        } else {
+            acc.file_type(&path)
+        };
+        ty.with_context(|| format!("resolving path '{logical}'"))
+    }
+
     /// The type of `logical` without following a final symlink, or `None` if
-    /// it does not exist.
-    pub fn file_type(&self, logical: &str) -> Option<FileType> {
-        self.check_access(logical).ok()?;
-        let (acc, path) = self.locate(logical).ok()?;
-        acc.file_type(&path)
+    /// it does not exist. Fails if resolving `logical` loops.
+    pub fn file_type(&self, logical: &str) -> Result<Option<FileType>> {
+        self.type_of(logical, false)
     }
 
-    /// Whether `logical` exists, following symlinks.
-    pub fn exists(&self, logical: &str) -> bool {
-        self.file_type(logical).is_some()
+    /// Whether `logical` exists, without following a final symlink. Fails if
+    /// resolving `logical` loops.
+    pub fn exists(&self, logical: &str) -> Result<bool> {
+        Ok(self.type_of(logical, false)?.is_some())
     }
 
-    pub fn is_dir(&self, logical: &str) -> bool {
-        self.check_access(logical).is_ok()
-            && self
-                .locate(logical)
-                .is_ok_and(|(acc, path)| acc.is_dir(&path))
+    /// Whether `logical` exists, following symlinks. Fails if resolving
+    /// `logical` loops.
+    pub fn resolves(&self, logical: &str) -> Result<bool> {
+        Ok(self.type_of(logical, true)?.is_some())
+    }
+
+    /// Whether `logical` is a directory, following symlinks. Fails if
+    /// resolving `logical` loops.
+    pub fn is_dir(&self, logical: &str) -> Result<bool> {
+        Ok(self.type_of(logical, true)? == Some(FileType::Directory))
     }
 
     /// The entries of a directory, sorted by name.
@@ -349,10 +384,10 @@ impl Io {
     /// `default.nix` if it is a directory.
     pub fn resolve_import(&self, logical: &str) -> Result<String> {
         self.check_access(logical)?;
-        if !self.exists(logical) {
+        if !self.exists(logical)? {
             bail!("path '{logical}' does not exist");
         }
-        if self.is_dir(logical) {
+        if self.is_dir(logical)? {
             return Ok(format!("{}/default.nix", logical.trim_end_matches('/')));
         }
         Ok(logical.to_owned())
@@ -383,7 +418,7 @@ impl Io {
     ) -> Result<String> {
         store::check_name(name)?;
         self.check_access(logical)?;
-        if !self.exists(logical) {
+        if !self.exists(logical)? {
             bail!("path '{logical}' does not exist");
         }
         let (base, rel) = self.locate(logical)?;
@@ -490,7 +525,7 @@ impl Io {
     /// SHA-256 of the NAR serialisation of `logical`.
     pub fn nar_hash(&self, logical: &str) -> Result<[u8; 32]> {
         self.check_access(logical)?;
-        if !self.exists(logical) {
+        if !self.exists(logical)? {
             bail!("path '{logical}' does not exist");
         }
         let (acc, path) = self.locate(logical)?;
@@ -512,7 +547,7 @@ fn select(
     kept: &mut HashSet<String>,
 ) -> Result<()> {
     let path = join(root, rel);
-    if base.file_type(&path) != Some(FileType::Directory) {
+    if base.file_type(&path)? != Some(FileType::Directory) {
         return Ok(());
     }
     let entries = base
