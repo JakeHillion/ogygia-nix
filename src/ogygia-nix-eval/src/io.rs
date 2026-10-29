@@ -26,6 +26,7 @@ use sha2::Sha256;
 
 use crate::accessor::Accessor;
 use crate::accessor::FileType;
+use crate::flake::source::Dir;
 use crate::nar;
 use crate::path::join;
 use crate::store;
@@ -147,6 +148,21 @@ impl Accessor for Fs {
         let meta = std::fs::symlink_metadata(self.physical(path)?)?;
         Ok(meta.permissions().mode() & 0o100 != 0)
     }
+
+    fn real_path(&self, path: &str) -> std::io::Result<String> {
+        let mounts = self.mounts.borrow();
+        let Some((m, rest)) = mounts
+            .iter()
+            .find_map(|m| relative(path, &m.logical).map(|rest| (m, rest)))
+        else {
+            return Ok(path.to_owned());
+        };
+        let tree = Dir {
+            root: m.physical.clone(),
+            keep: m.filter.clone(),
+        };
+        Ok(join(&m.logical, &tree.real_path(rest)?))
+    }
 }
 
 /// The tree at `root` in `base`, holding only the entries in `kept`
@@ -194,6 +210,16 @@ impl Accessor for Subtree {
 
     fn is_executable(&self, path: &str) -> std::io::Result<bool> {
         self.base.is_executable(&self.path(path)?)
+    }
+
+    fn real_path(&self, path: &str) -> std::io::Result<String> {
+        let real = self.base.real_path(&self.path(path)?)?;
+        if self.root.is_empty() {
+            return Ok(real);
+        }
+        relative(&real, &self.root)
+            .map(str::to_owned)
+            .ok_or(ErrorKind::NotFound.into())
     }
 }
 
@@ -348,7 +374,15 @@ impl Io {
         if !self.exists(logical) {
             bail!("path '{logical}' does not exist");
         }
-        let (base, root) = self.locate(logical)?;
+        let (base, rel) = self.locate(logical)?;
+        // What `logical` resolves to is copied, and `keep` sees paths below it.
+        let root = base
+            .real_path(&rel)
+            .with_context(|| format!("path '{logical}' does not exist"))?;
+        let logical = &join(
+            logical[..logical.len() - rel.len()].trim_end_matches('/'),
+            &root,
+        );
         let kept = match keep {
             None => None,
             Some(keep) => {
@@ -357,11 +391,7 @@ impl Io {
                 Some(kept)
             }
         };
-        let tree = Rc::new(Subtree {
-            base,
-            root: root.into_owned(),
-            kept,
-        });
+        let tree = Rc::new(Subtree { base, root, kept });
         let (sp, _) = self.store.add_source(name, tree)?;
         self.allow(sp)
     }

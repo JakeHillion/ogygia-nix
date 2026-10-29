@@ -1,0 +1,13 @@
+#~flake path:@dir(root)#x
+#~lock
+#~tree dep git
+#~file sub/default.nix
+1
+#~file link link
+../dep/sub
+#~tree root path
+#~file flake.nix
+{
+  inputs.dep = { url = "git+file://@dir(dep)"; flake = false; };
+  outputs = { self, dep }: { x = builtins.path { path = dep + "/link"; name = "p"; }; };
+}

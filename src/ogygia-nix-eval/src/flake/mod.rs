@@ -4,7 +4,7 @@
 mod file;
 mod flakeref;
 mod lock;
-mod source;
+pub(crate) mod source;
 
 use std::cell::OnceCell;
 use std::cell::RefCell;
