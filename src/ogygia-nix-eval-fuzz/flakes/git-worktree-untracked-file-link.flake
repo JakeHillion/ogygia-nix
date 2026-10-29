@@ -1,0 +1,8 @@
+#~flake git+file://@dir(root)#x
+#~tree root git
+#~file flake.nix
+{ outputs = { self }: { x = builtins.readFile (self + "/link"); }; }
+#~file link link
+file
+#~file file unstaged
+untracked
