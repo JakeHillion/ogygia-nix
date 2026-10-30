@@ -272,26 +272,26 @@ fn installable_ref(flake: &str, cwd: &Path) -> anyhow::Result<Attrs> {
 }
 
 /// An attribute path as written after `#`: names separated by dots, any
-/// of them quoted.
-fn attr_path(s: &str) -> Vec<String> {
+/// of them quoted. Every unquoted dot ends a name, even an empty one; only
+/// an empty name after the last dot is dropped.
+fn attr_path(s: &str) -> anyhow::Result<Vec<String>> {
     let mut out = Vec::new();
     let mut cur = String::new();
     let mut quoted = false;
     for c in s.chars() {
         match c {
             '"' => quoted = !quoted,
-            '.' if !quoted => {
-                if !cur.is_empty() {
-                    out.push(std::mem::take(&mut cur));
-                }
-            }
+            '.' if !quoted => out.push(std::mem::take(&mut cur)),
             c => cur.push(c),
         }
+    }
+    if quoted {
+        anyhow::bail!("missing closing quote in selection path '{s}'");
     }
     if !cur.is_empty() {
         out.push(cur);
     }
-    out
+    Ok(out)
 }
 
 /// The value at `path` in `v`, or `None` if it has no such attribute. A
@@ -366,19 +366,26 @@ pub(crate) fn eval_json<'a>(
             vec!["defaultPackage".into(), system.clone()],
         ],
         Some(f) => {
-            let p = attr_path(f);
-            let with = |prefix: &[&str]| -> Vec<String> {
-                prefix
-                    .iter()
-                    .map(|s| s.to_string())
-                    .chain(p.iter().cloned())
-                    .collect()
-            };
-            vec![
-                with(&["packages", system]),
-                with(&["legacyPackages", system]),
-                p.clone(),
-            ]
+            let f = r(flakeref::percent_decode(f))?;
+            match f.strip_prefix('.') {
+                // A leading dot selects from the outputs alone.
+                Some(f) => vec![r(attr_path(f))?],
+                None => {
+                    let p = r(attr_path(&f))?;
+                    let with = |prefix: &[&str]| -> Vec<String> {
+                        prefix
+                            .iter()
+                            .map(|s| s.to_string())
+                            .chain(p.iter().cloned())
+                            .collect()
+                    };
+                    vec![
+                        with(&["packages", system]),
+                        with(&["legacyPackages", system]),
+                        p.clone(),
+                    ]
+                }
+            }
         }
     };
     let mut found = None;

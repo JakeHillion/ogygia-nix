@@ -1,0 +1,4 @@
+#~flake path:@dir(root)#.
+#~tree root path
+#~file flake.nix
+{ outputs = _: { legacyPackages.x86_64-linux.x = 1; x = 2; }; }
