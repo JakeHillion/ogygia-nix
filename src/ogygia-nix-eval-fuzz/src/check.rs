@@ -851,6 +851,45 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn path_adds_flat() {
+        // The SHA-256 of `t`'s contents.
+        let t = "let t = builtins.toFile \"x\" \"y\"; in";
+        let y = "a1fce4363854ff888cff4b8e7875d600c2682390412a8cf79b37d0b11148b0fa";
+        for args in [
+            "path = t;",
+            "path = t; name = \"q\";",
+            &format!("path = t; sha256 = \"{y}\";"),
+            "path = t; filter = p: k: throw \"f\";",
+            "path = <nix/fetchurl.nix>;",
+        ] {
+            let p = format!("builtins.path {{ {args} recursive = false; }}");
+            for expr in [
+                format!("{t} {p}"),
+                format!("{t} builtins.getContext ({p})"),
+                format!("{t} builtins.readFile ({p})"),
+            ] {
+                assert_eq!(outcome(&expr), "values", "{expr}");
+            }
+        }
+        for args in [
+            "path = t; sha256 = \"\";",
+            "path = <nix/.>;",
+            &format!("path = <nix/.>; sha256 = \"{y}\";"),
+        ] {
+            let expr =
+                format!("{t} builtins.tryEval (builtins.path {{ {args} recursive = false; }})");
+            assert_eq!(outcome(&expr), "uncaught", "{expr}");
+        }
+        // A path whose expected store path is already valid is not read.
+        let expr = format!(
+            "{t} let a = builtins.path {{ path = t; name = \"q\"; recursive = false; }}; in \
+             builtins.seq a (builtins.readFile (builtins.path {{ path = /nonexistent; \
+             name = \"q\"; recursive = false; sha256 = \"{y}\"; }}))"
+        );
+        assert_eq!(outcome(&expr), "values", "{expr}");
+    }
+
+    #[test]
     fn skips_what_nix_cannot_finish() {
         assert_eq!(outcome("let f = x: f x; in f 1"), "skipped");
     }

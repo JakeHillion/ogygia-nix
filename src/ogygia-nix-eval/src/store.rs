@@ -104,7 +104,8 @@ pub fn text_path(contents: &[u8], name: &str, refs: &[&str]) -> String {
     make_store_path(&type_with_refs("text", refs, false), &h, name)
 }
 
-/// The path of a fixed-output derivation's output.
+/// The path of a content-addressed store object, such as a fixed-output
+/// derivation's output.
 pub fn fixed_output_path(recursive: bool, algo: HashAlgo, hash: &[u8], name: &str) -> String {
     if recursive && algo == HashAlgo::Sha256 {
         return make_store_path("source", hash, name);
@@ -186,6 +187,10 @@ pub trait Store {
     /// Add a regular file holding `contents` that refers to the store paths
     /// `refs`.
     fn add_text(&self, name: &str, contents: &[u8], refs: &[&str]) -> Result<StorePath>;
+
+    /// Add a regular, non-executable file holding `contents`, addressed by
+    /// their SHA-256 as a fixed-output path.
+    fn add_flat(&self, name: &str, contents: &[u8]) -> Result<StorePath>;
 
     /// Add the tree rooted at the empty path in `tree`, addressed by the hash
     /// of its NAR serialisation, which is returned too.
