@@ -1,0 +1,4 @@
+#~flake path:@dir(root)#%
+#~tree root path
+#~file flake.nix
+{ outputs = _: { "%" = 1; }; }
