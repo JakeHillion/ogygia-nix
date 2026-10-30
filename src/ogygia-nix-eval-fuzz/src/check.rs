@@ -468,7 +468,8 @@ pub(crate) fn catch_ours<T>(f: impl FnOnce() -> T) -> Result<T, String> {
 }
 
 /// Fails with a deliberate divergence when evaluation reached a disabled
-/// feature, and with a [divergence](Outcome::Diverged) when it panicked.
+/// or unimplemented feature, and with a [divergence](Outcome::Diverged)
+/// when it panicked.
 pub(crate) fn run_ours(
     eval: impl Fn(&str) -> Result<String, Error>,
     src: &str,
@@ -478,6 +479,9 @@ pub(crate) fn run_ours(
         Ok(Ok(out)) => Ok(Ok(out)),
         Ok(Err(Error::Disabled(feature))) => Err(Outcome::DeliberateDivergence(
             Skip::find(&Evidence::Disabled(feature)).expect("only skips disable features"),
+        )),
+        Ok(Err(Error::Unimplemented(_))) => Err(Outcome::DeliberateDivergence(
+            Skip::find(&Evidence::Unimplemented).expect("a skip matches unimplemented features"),
         )),
         Ok(Err(Error::Eval(e))) => Ok(Err(e)),
         Err(panic) => Err(panicked(src, expr, &panic)),

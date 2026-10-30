@@ -336,6 +336,7 @@ pub const NIX_STARTUP: &[&str] = &[
     "__appendContext",
     "appendContext",
     "fetchMercurial",
+    "fetchTree",
     "fetchFinalTree",
     "__fetchurl",
     "fetchurl",
@@ -364,3 +365,7 @@ pub const NIX_STARTUP_IMPURE: &[&str] = &[
     "__currentSystem",
     "currentSystem",
 ];
+
+/// The names in [`NIX_STARTUP`] that Nix leaves out unless the `flakes`
+/// experimental feature is enabled.
+pub const NIX_STARTUP_FLAKES: &[&str] = &["fetchTree"];

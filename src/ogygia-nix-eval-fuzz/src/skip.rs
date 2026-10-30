@@ -21,6 +21,8 @@ pub(crate) enum Evidence<'a> {
     NixStderr(&'a str),
     /// ogygia-nix-eval reached a feature that [`disabled`] switches off.
     Disabled(Feature),
+    /// ogygia-nix-eval reached a feature it deliberately leaves out.
+    Unimplemented,
     /// A flake bundle that is not well formed, or whose trees could not be
     /// written out or added to Nix's store.
     MalformedBundle,
@@ -70,6 +72,9 @@ pub enum Skip {
     /// harmless artefact of its implementation, which ogygia-nix-eval does
     /// not match and which is not reported upstream.
     StoreRoot,
+    /// ogygia-nix-eval reached a feature it deliberately leaves out, such
+    /// as fetching, and failed with an error naming it where Nix may not.
+    Unimplemented,
 }
 
 impl Skip {
@@ -96,6 +101,7 @@ impl Skip {
                 evidence,
                 Evidence::Disagreement { theirs, store, ours } if hidden_root(theirs, *store, ours)
             ),
+            Skip::Unimplemented => matches!(evidence, Evidence::Unimplemented),
         }
     }
 
@@ -314,6 +320,63 @@ mod tests {
             "deliberate-divergence regex"
         );
         assert_eq!(outcome("builtins.typeOf builtins.match"), "values");
+    }
+
+    #[test]
+    fn ignores_unimplemented_features() {
+        for expr in [
+            r#"builtins.fetchTarball "x""#,
+            r#"builtins.tryEval (builtins.fetchurl { url = "a"; })"#,
+            r#"fetchGit "/x""#,
+            r#"fetchMercurial "/x""#,
+            r#"builtins.flakeRefToString { type = "git"; url = "https://a/b"; }"#,
+        ] {
+            assert_eq!(
+                outcome(expr),
+                "deliberate-divergence unimplemented",
+                "{expr}"
+            );
+        }
+        assert_eq!(outcome("builtins.typeOf builtins.fetchTarball"), "values");
+        assert_eq!(outcome("builtins ? fetchTree"), "values");
+        assert_eq!(
+            outcome(r#"builtins.flakeRefToString { type = "github"; owner = "a"; repo = "b"; }"#),
+            "uncaught"
+        );
+    }
+
+    #[test]
+    fn ignores_unimplemented_flake_features() {
+        let bundle = |reference: &str, outputs: &str| {
+            format!(
+                "#~flake path:@dir(root){reference}\n#~tree root path\n#~file flake.nix\n\
+                 {{ outputs = _: {{ {outputs} }}; }}\n"
+            )
+        };
+        for src in [
+            bundle(
+                "#x",
+                r#"x = builtins.fetchTree { type = "path"; path = "/x"; };"#,
+            ),
+            bundle("#x", r#"x = builtins.getFlake "github:a/b";"#),
+            bundle(
+                "#x",
+                r#"x = builtins.flakeRefToString { type = "github"; owner = "a"; repo = "b"; };"#,
+            ),
+            bundle("#x^out", "x = 1;"),
+            bundle("#^", "x = 1;"),
+        ] {
+            assert_eq!(
+                outcome(&src),
+                "deliberate-divergence unimplemented",
+                "{src}"
+            );
+        }
+        assert_eq!(
+            outcome(&bundle("#x", "x = builtins.attrNames builtins;")),
+            "values"
+        );
+        assert_eq!(outcome(&bundle("#x%5Eout", r#""x^out" = 1;"#)), "values");
     }
 
     #[test]

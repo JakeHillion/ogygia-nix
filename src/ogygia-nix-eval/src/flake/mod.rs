@@ -26,6 +26,7 @@ use crate::value::ThunkState;
 use crate::value::Value;
 use crate::value::anyhow_err;
 use crate::value::eval_err;
+use crate::value::unimplemented;
 
 /// Where a flake is evaluated.
 pub struct FlakeEnv {
@@ -323,6 +324,10 @@ pub(crate) fn eval_json<'a>(
     env: &'a FlakeEnv,
     flakes: &'a OnceCell<Flakes<'a>>,
 ) -> R<'a, Vec<u8>> {
+    // Nix reads what follows the last `^` as the outputs to select.
+    if installable.contains('^') {
+        return unimplemented("installable outputs specifier '^'");
+    }
     let (flake, fragment) = match installable.split_once('#') {
         Some((f, a)) => (f, Some(a)),
         None => (installable, None),

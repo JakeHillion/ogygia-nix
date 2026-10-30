@@ -11,8 +11,13 @@ use crate::eval::Eval;
 use crate::value::R;
 use crate::value::Value;
 use crate::value::eval_err;
+use crate::value::unimplemented;
 
 const FLAKES_DISABLED: &str = "experimental Nix feature 'flakes' is disabled; add '--extra-experimental-features flakes' to enable it";
+
+/// The input types Nix shows only with the `flakes` experimental feature
+/// enabled.
+const FLAKE_TYPES: &[&[u8]] = &[b"indirect", b"path", b"github", b"gitlab", b"sourcehut"];
 
 fn flakes_disabled<'a>() -> R<'a> {
     eval_err(FLAKES_DISABLED)
@@ -20,11 +25,14 @@ fn flakes_disabled<'a>() -> R<'a> {
 
 pub fn get_flake<'a>(ev: &Eval<'a>, flake_ref: Value<'a>) -> R<'a> {
     ev.force_str_no_ctx(flake_ref)?;
+    if ev.ctx.flakes {
+        return unimplemented("builtins.getFlake");
+    }
     flakes_disabled()
 }
 
 pub fn parse_flake_ref<'a>(ev: &Eval<'a>, flake_ref: Value<'a>) -> R<'a> {
-    let attrs = url_ref(ev.force_str_no_ctx(flake_ref)?, ev.flakes).or_else(eval_err)?;
+    let attrs = url_ref(ev.force_str_no_ctx(flake_ref)?, ev.ctx.flakes).or_else(eval_err)?;
     Ok(ev.attrs(
         attrs
             .into_iter()
@@ -521,7 +529,8 @@ pub fn flake_ref_to_string<'a>(ev: &Eval<'a>, set: Value<'a>) -> R<'a> {
         .transpose()?
     {
         None => eval_err("'type' attribute to specify input scheme is required but not provided"),
-        Some(Value::Str(_)) => flakes_disabled(),
+        Some(Value::Str(ty)) if !ev.ctx.flakes && FLAKE_TYPES.contains(&ty.s) => flakes_disabled(),
+        Some(Value::Str(_)) => unimplemented("builtins.flakeRefToString"),
         Some(_) => eval_err("input attribute 'type' is not a string"),
     }
 }

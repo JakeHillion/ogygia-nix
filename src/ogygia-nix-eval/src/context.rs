@@ -27,6 +27,9 @@ pub struct Context {
     pub interner: Interner,
     pub syms: Syms,
     pub io: Io,
+    /// Whether the `flakes` experimental feature is enabled, as it is for
+    /// `nix eval`.
+    pub(crate) flakes: bool,
     /// Compiled files by path. The `'static` is a lie told to the type
     /// system: the expressions live in `arena` and are only handed out with
     /// the lifetime of a borrow of `self`.
@@ -39,9 +42,21 @@ pub struct Context {
 
 impl Context {
     pub fn new(io: Io) -> Context {
+        Context::with_flakes(io, false)
+    }
+
+    /// A context for flake evaluation, with the `flakes` experimental
+    /// feature enabled.
+    pub(crate) fn flakes(io: Io) -> Context {
+        Context::with_flakes(io, true)
+    }
+
+    fn with_flakes(io: Io, flakes: bool) -> Context {
         let interner = Interner::default();
         for name in symbol::NIX_STARTUP {
-            if !(io.pure && symbol::NIX_STARTUP_IMPURE.contains(name)) {
+            if !(io.pure && symbol::NIX_STARTUP_IMPURE.contains(name)
+                || !flakes && symbol::NIX_STARTUP_FLAKES.contains(name))
+            {
                 interner.intern(name);
             }
         }
@@ -51,6 +66,7 @@ impl Context {
             interner,
             syms,
             io,
+            flakes,
             files: RefCell::new(HashMap::new()),
             regexes: Default::default(),
             drvs: RefCell::new(HashMap::new()),

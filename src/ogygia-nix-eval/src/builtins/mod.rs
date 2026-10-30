@@ -77,6 +77,7 @@ pub enum Builtin {
     FetchGit,
     FetchMercurial,
     FetchTarball,
+    FetchTree,
     Fetchurl,
     Filter,
     FilterSource,
@@ -184,7 +185,13 @@ impl Builtin {
     pub fn in_scope(name: &str, pure: bool) -> Option<Builtin> {
         let bare = name.strip_prefix("__");
         let b: Builtin = bare.unwrap_or(name).parse().ok()?;
-        (b.global() == bare.is_none() && !(pure && b.impure())).then_some(b)
+        (b.global() == bare.is_none() && !(pure && b.impure()) && !b.flakes()).then_some(b)
+    }
+
+    /// Whether the `builtins` set has this builtin only with the `flakes`
+    /// experimental feature enabled, and the global scope never does.
+    fn flakes(self) -> bool {
+        matches!(self, Builtin::FetchTree)
     }
 
     /// Whether the global scope has this builtin without the `__` prefix.
@@ -260,6 +267,7 @@ impl Builtin {
             FetchGit => Kind::PrimOp(F1(fs::fetch_git)),
             FetchMercurial => Kind::PrimOp(F1(fs::fetch_mercurial)),
             FetchTarball => Kind::PrimOp(F1(fs::fetch_tarball)),
+            FetchTree => Kind::PrimOp(F1(fs::fetch_tree)),
             Fetchurl => Kind::PrimOp(F1(fs::fetchurl)),
             Filter => Kind::PrimOp(F2(lists::filter)),
             FilterSource => Kind::PrimOp(F2(fs::filter_source)),
@@ -381,7 +389,7 @@ pub fn make_globals<'a>(ev: &Eval<'a>) -> EnumMap<Builtin, Value<'a>> {
     });
     let entries = globals
         .iter()
-        .filter(|(b, _)| !(ev.ctx.io.pure && b.impure()))
+        .filter(|(b, _)| !(ev.ctx.io.pure && b.impure()) && (ev.ctx.flakes || !b.flakes()))
         .map(|(b, v)| ev.entry(b.name(), *v))
         .collect();
     self_ref.0.set(ThunkState::Done(ev.attrs(entries)));
