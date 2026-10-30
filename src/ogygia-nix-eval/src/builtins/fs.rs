@@ -180,8 +180,13 @@ pub fn to_file<'a>(ev: &Eval<'a>, name: Value<'a>, contents: Value<'a>) -> R<'a>
         .io
         .add_text(&name, contents.s, &refs)
         .map_err(anyhow_err)?;
-    let path: &'a str = ev.bump.alloc_str(&path);
-    Ok(ev.str_val(path.as_bytes(), &[Ctx::Opaque(path)]))
+    Ok(store_path_val(ev, &path))
+}
+
+/// The store path `sp` as a string that refers to it.
+fn store_path_val<'a>(ev: &Eval<'a>, sp: &str) -> Value<'a> {
+    let sp: &'a str = ev.bump.alloc_str(sp);
+    ev.str_val(sp.as_bytes(), &[Ctx::Opaque(sp)])
 }
 
 pub fn to_path<'a>(ev: &Eval<'a>, path: Value<'a>) -> R<'a> {
@@ -228,48 +233,39 @@ fn add_path<'a>(
         && io.is_valid(&sp).map_err(anyhow_err)?
     {
         io.allow_valid(&sp);
-        let sp: &'a str = ev.bump.alloc_str(sp.as_str());
-        return Ok(ev.str_val(sp.as_bytes(), &[Ctx::Opaque(sp)]));
+        return Ok(store_path_val(ev, sp.as_str()));
     }
-    let sp = match filter {
-        _ if !recursive => io.add_flat_to_store(path, &name).map_err(anyhow_err)?,
-        None => io
-            .add_filtered_to_store(path, &name, None)
-            .map_err(anyhow_err)?,
-        Some(f) => {
-            let err: Cell<Option<Box<crate::value::EvalError>>> = Cell::new(None);
-            let keep = |p: &str, ty: crate::accessor::FileType| -> anyhow::Result<bool> {
-                let r = (|| {
-                    let args = [ev.string(crate::path::abs(p)), ev.string(ty.name())];
-                    ev.force_bool(ev.call(f, &args, None)?)
-                })();
-                match r {
-                    Ok(b) => Ok(b),
-                    Err(e) => {
+    let sp = if recursive {
+        let err = &Cell::new(None);
+        let keep = filter.map(|f| {
+            move |p: &str, ty: FileType| -> anyhow::Result<bool> {
+                let args = [ev.string(crate::path::abs(p)), ev.string(ty.name())];
+                ev.call(f, &args, None)
+                    .and_then(|r| ev.force_bool(r))
+                    .map_err(|e| {
                         err.set(Some(e));
-                        anyhow::bail!("filter failed")
-                    }
-                }
-            };
-            match io.add_filtered_to_store(path, &name, Some(&keep)) {
-                Ok(sp) => sp,
-                Err(e) => return Err(err.take().unwrap_or_else(|| anyhow_err(e))),
+                        anyhow::anyhow!("filter failed")
+                    })
             }
-        }
+        });
+        let keep = keep.as_ref().map(|k| k as crate::io::KeepFn<'_>);
+        io.add_filtered_to_store(path, &name, keep)
+            .map_err(|e| err.take().unwrap_or_else(|| anyhow_err(e)))?
+    } else {
+        io.add_flat_to_store(path, &name).map_err(anyhow_err)?
     };
     if expected.is_some_and(|e| e != sp) {
         return eval_err(format!(
             "store path mismatch in (possibly filtered) path added from '{path}'"
         ));
     }
-    let sp: &'a str = ev.bump.alloc_str(&sp);
-    Ok(ev.str_val(sp.as_bytes(), &[Ctx::Opaque(sp)]))
+    Ok(store_path_val(ev, &sp))
 }
 
 pub fn path<'a>(ev: &Eval<'a>, set: Value<'a>) -> R<'a> {
     let set = ev.force_attrs(set)?;
-    let (mut path, mut name, mut filter, mut recursive) = (None, None, None, true);
-    let mut sha256 = None;
+    let (mut path, mut name, mut filter, mut recursive, mut sha256) =
+        (None, None, None, true, None);
     for e in set.entries {
         match ev.ctx.name(e.name) {
             "path" => path = Some(ev.realise_path(e.value)?),
@@ -278,16 +274,7 @@ pub fn path<'a>(ev: &Eval<'a>, set: Value<'a>) -> R<'a> {
             }
             "filter" => filter = Some(ev.force_function(e.value)?),
             "recursive" => recursive = ev.force_bool(e.value)?,
-            "sha256" => {
-                let hash = String::from_utf8_lossy(ev.force_str_no_ctx(e.value)?);
-                sha256 = Some(if hash.is_empty() {
-                    vec![0; 32]
-                } else {
-                    crate::store::parse_hash(&hash, Some(crate::store::HashAlgo::Sha256))
-                        .map_err(anyhow_err)?
-                        .1
-                });
-            }
+            "sha256" => sha256 = Some(sha256_arg(ev, e.value)?.unwrap_or_else(|| vec![0; 32])),
             n => return eval_err(format!("unsupported argument '{n}' to 'builtins.path'")),
         }
     }
@@ -297,6 +284,18 @@ pub fn path<'a>(ev: &Eval<'a>, set: Value<'a>) -> R<'a> {
         );
     };
     add_path(ev, &path, name, filter, recursive, sha256)
+}
+
+/// The hash a `sha256` argument gives, or `None` if it is empty.
+fn sha256_arg<'a>(ev: &Eval<'a>, v: Value<'a>) -> R<'a, Option<Vec<u8>>> {
+    let hash = ev.force_str_no_ctx(v)?;
+    if hash.is_empty() {
+        return Ok(None);
+    }
+    let algo = Some(crate::store::HashAlgo::Sha256);
+    let (_, hash) =
+        crate::store::parse_hash(&String::from_utf8_lossy(hash), algo).map_err(anyhow_err)?;
+    Ok(Some(hash))
 }
 
 pub fn filter_source<'a>(ev: &Eval<'a>, filter: Value<'a>, path: Value<'a>) -> R<'a> {
@@ -445,14 +444,7 @@ fn check_fetch<'a>(ev: &Eval<'a>, arg: Value<'a>, who: &str) -> R<'a, ()> {
                         ev.force_str_no_ctx(e.value)?;
                     }
                     "sha256" => {
-                        let hash = ev.force_str_no_ctx(e.value)?;
-                        if !hash.is_empty() {
-                            crate::store::parse_hash(
-                                &String::from_utf8_lossy(hash),
-                                Some(crate::store::HashAlgo::Sha256),
-                            )
-                            .map_err(anyhow_err)?;
-                        }
+                        sha256_arg(ev, e.value)?;
                     }
                     n => return eval_err(format!("unsupported argument '{n}' to '{who}'")),
                 }
