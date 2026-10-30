@@ -227,6 +227,8 @@ pub struct Io {
     pub(crate) pure: bool,
     fs: Rc<Fs>,
     store: Box<dyn Store>,
+    /// A directory of store objects that are valid as well as those added.
+    store_dir: Option<PathBuf>,
     /// Store paths pure evaluation may read.
     allowed: RefCell<HashSet<StorePath>>,
     store_paths: RefCell<HashMap<String, String>>,
@@ -238,6 +240,7 @@ impl Default for Io {
             pure: false,
             fs: Rc::default(),
             store: Box::new(MemoryStore::default()),
+            store_dir: None,
             allowed: RefCell::default(),
             store_paths: RefCell::default(),
         }
@@ -251,6 +254,15 @@ impl Io {
         Io {
             pure: true,
             ..Io::default()
+        }
+    }
+
+    /// This [`Io`] with the store objects in `dir`, such as `/nix/store`,
+    /// valid too, as if they had been added.
+    pub(crate) fn with_store_dir(self, dir: Option<PathBuf>) -> Io {
+        Io {
+            store_dir: dir,
+            ..self
         }
     }
 
@@ -423,7 +435,34 @@ impl Io {
 
     /// Whether the store has `path`, or a mount stands in for it.
     pub fn is_valid(&self, path: &StorePath) -> Result<bool> {
-        Ok(self.fs.in_mount(path.as_str()) || self.store.accessor(path)?.is_some())
+        Ok(self.fs.in_mount(path.as_str())
+            || self.store.accessor(path)?.is_some()
+            || self.stored(path).is_some())
+    }
+
+    /// Where `path` is in the store directory, if it is there.
+    fn stored(&self, path: &StorePath) -> Option<PathBuf> {
+        let base = path.as_str().rsplit('/').next()?;
+        let physical = self.store_dir.as_ref()?.join(base);
+        std::fs::symlink_metadata(&physical)
+            .is_ok()
+            .then_some(physical)
+    }
+
+    /// Mount `path` from the store directory, returning whether it is there.
+    pub(crate) fn mount_stored(&self, path: &StorePath) -> bool {
+        let Some(physical) = self.stored(path) else {
+            return false;
+        };
+        self.mount(path.as_str(), &physical, None);
+        true
+    }
+
+    /// Let pure evaluation read the valid store path `path`.
+    pub fn allow_valid(&self, path: &StorePath) {
+        if !self.mount_stored(path) {
+            self.allowed.borrow_mut().insert(path.clone());
+        }
     }
 
     /// `path` and every store path it refers to, directly or indirectly.

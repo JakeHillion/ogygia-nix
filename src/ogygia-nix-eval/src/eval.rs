@@ -815,8 +815,11 @@ impl<'a> Eval<'a> {
                 None => None,
             };
             let valid = match path.as_deref().and_then(StorePath::parse) {
-                Some(sp) => self.ctx.io.is_valid(&sp).map_err(anyhow_err)?,
-                None => false,
+                Some(sp) if self.ctx.io.is_valid(&sp).map_err(anyhow_err)? => {
+                    self.ctx.io.allow_valid(&sp);
+                    true
+                }
+                _ => false,
             };
             if !valid {
                 return eval_err(format!(

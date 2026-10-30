@@ -217,6 +217,7 @@ fn add_path<'a>(
     if let Some(sp) = expected.as_deref().and_then(crate::store::StorePath::parse)
         && io.is_valid(&sp).map_err(anyhow_err)?
     {
+        io.allow_valid(&sp);
         let sp: &'a str = ev.bump.alloc_str(sp.as_str());
         return Ok(ev.str_val(sp.as_bytes(), &[Ctx::Opaque(sp)]));
     }
