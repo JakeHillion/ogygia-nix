@@ -2,9 +2,8 @@
 //!
 //! Paths the evaluator sees are logical: a flake input is `/nix/store/…-source`
 //! whether or not it has been realised there. [`Io`] reads store paths from
-//! its store and other logical paths from physical directories ("mounts"),
-//! optionally restricted to a set of files (the tracked files of a Git
-//! checkout).
+//! its store or its store directory, and other logical paths from the
+//! filesystem.
 
 use std::borrow::Cow;
 use std::cell::RefCell;
@@ -35,14 +34,6 @@ use crate::store::MemoryStore;
 use crate::store::Store;
 use crate::store::StorePath;
 
-struct Mount {
-    logical: String,
-    physical: PathBuf,
-    /// If set, only these paths (relative to the mount, `/`-separated, with
-    /// every ancestor directory included) exist.
-    filter: Option<HashSet<String>>,
-}
-
 // The directory holding the files Nix ships with itself, which `<nix/…>`
 // paths resolve within, as `nix/…`. Set at build time; without it they do
 // not exist.
@@ -61,23 +52,11 @@ fn relative<'p>(logical: &'p str, root: &str) -> Option<&'p str> {
         .strip_prefix('/')
 }
 
-/// The filesystem as seen through the mounts, addressed by logical path.
-#[derive(Default)]
-struct Fs {
-    mounts: RefCell<Vec<Mount>>,
-}
+/// The filesystem, addressed by logical path.
+struct Fs;
 
 impl Fs {
-    /// Whether `logical` is a mount or inside one.
-    fn in_mount(&self, logical: &str) -> bool {
-        self.mounts
-            .borrow()
-            .iter()
-            .any(|m| relative(logical, &m.logical).is_some())
-    }
-
-    /// The physical path behind `logical`, or `NotFound` if a mount filter
-    /// hides it.
+    /// The physical path behind `logical`.
     fn physical(&self, logical: &str) -> std::io::Result<PathBuf> {
         if let Some(rest) = logical.strip_prefix(crate::path::COREPKGS) {
             let Some(include) = DEFAULT_INCLUDE_PATH else {
@@ -87,24 +66,7 @@ impl Fs {
                 .join("nix")
                 .join(rest.trim_start_matches('/')));
         }
-        let mounts = self.mounts.borrow();
-        let found = mounts
-            .iter()
-            .find_map(|m| relative(logical, &m.logical).map(|rest| (m, rest)));
-        let Some((m, rest)) = found else {
-            return Ok(PathBuf::from(logical));
-        };
-        if let Some(f) = &m.filter
-            && !rest.is_empty()
-            && !f.contains(rest)
-        {
-            return Err(ErrorKind::NotFound.into());
-        }
-        if rest.is_empty() {
-            Ok(m.physical.clone())
-        } else {
-            Ok(m.physical.join(rest))
-        }
+        Ok(PathBuf::from(logical))
     }
 }
 
@@ -126,10 +88,6 @@ impl Accessor for Fs {
         for entry in std::fs::read_dir(self.physical(path)?)? {
             let entry = entry?;
             let name = entry.file_name().to_string_lossy().into_owned();
-            // Entries hidden by a mount filter do not exist.
-            if self.physical(&join(path, &name)).is_err() {
-                continue;
-            }
             out.push((name, FileType::of(entry.file_type()?)));
         }
         out.sort();
@@ -145,21 +103,6 @@ impl Accessor for Fs {
     fn is_executable(&self, path: &str) -> std::io::Result<bool> {
         let meta = std::fs::symlink_metadata(self.physical(path)?)?;
         Ok(meta.permissions().mode() & 0o100 != 0)
-    }
-
-    fn real_path(&self, path: &str) -> std::io::Result<String> {
-        let mounts = self.mounts.borrow();
-        let Some((m, rest)) = mounts
-            .iter()
-            .find_map(|m| relative(path, &m.logical).map(|rest| (m, rest)))
-        else {
-            return Ok(path.to_owned());
-        };
-        let tree = Dir {
-            root: m.physical.clone(),
-            keep: m.filter.clone(),
-        };
-        Ok(join(&m.logical, &tree.real_path(rest)?))
     }
 }
 
@@ -239,10 +182,11 @@ impl Accessor for Subtree {
 
 pub struct Io {
     pub(crate) pure: bool,
-    fs: Rc<Fs>,
     store: Box<dyn Store>,
     /// A directory of store objects that are valid as well as those added.
     store_dir: Option<PathBuf>,
+    /// The objects of the store directory that have been read from it.
+    stored: RefCell<HashMap<StorePath, Rc<dyn Accessor>>>,
     /// Store paths pure evaluation may read.
     allowed: RefCell<HashSet<StorePath>>,
     store_paths: RefCell<HashMap<String, String>>,
@@ -252,9 +196,9 @@ impl Default for Io {
     fn default() -> Io {
         Io {
             pure: false,
-            fs: Rc::default(),
             store: Box::new(MemoryStore::default()),
             store_dir: None,
+            stored: RefCell::default(),
             allowed: RefCell::default(),
             store_paths: RefCell::default(),
         }
@@ -263,7 +207,8 @@ impl Default for Io {
 
 impl Io {
     /// An [`Io`] that, like Nix in pure evaluation mode, forbids access to
-    /// any path outside a mount or a store path it did not add.
+    /// any path outside a store path it did not add or read from its store
+    /// directory.
     pub fn pure() -> Io {
         Io {
             pure: true,
@@ -284,8 +229,9 @@ impl Io {
     pub fn check_access(&self, logical: &str) -> Result<()> {
         if self.pure
             && !logical.starts_with(crate::path::COREPKGS)
-            && !self.fs.in_mount(logical)
-            && !StorePath::split(logical).is_some_and(|(sp, _)| self.allowed.borrow().contains(&sp))
+            && !StorePath::split(logical).is_some_and(|(sp, _)| {
+                self.allowed.borrow().contains(&sp) || self.stored.borrow().contains_key(&sp)
+            })
         {
             bail!(
                 "access to absolute path '{logical}' is forbidden in pure evaluation mode (use '--impure' to override)"
@@ -294,29 +240,18 @@ impl Io {
         Ok(())
     }
 
-    /// Make the logical directory `logical` show the contents of `physical`,
-    /// restricted to `filter` if given.
-    pub fn mount(&self, logical: &str, physical: &Path, filter: Option<HashSet<String>>) {
-        let mut mounts = self.fs.mounts.borrow_mut();
-        mounts.retain(|m| m.logical != logical);
-        mounts.push(Mount {
-            logical: logical.to_owned(),
-            physical: physical.to_owned(),
-            filter,
-        });
-        // Longest prefix first, so nested mounts win.
-        mounts.sort_by_key(|m| std::cmp::Reverse(m.logical.len()));
-    }
-
     /// The tree holding `logical`: the store object it is in, if the store
-    /// has it, else the filesystem.
+    /// has it or it was read from the store directory, else the filesystem.
     fn locate<'p>(&self, logical: &'p str) -> Result<(Rc<dyn Accessor>, Cow<'p, str>)> {
-        if let Some((sp, rest)) = StorePath::split(logical)
-            && let Some(acc) = self.store.accessor(&sp)?
-        {
-            return Ok((acc, Cow::Borrowed(rest)));
+        if let Some((sp, rest)) = StorePath::split(logical) {
+            if let Some(acc) = self.store.accessor(&sp)? {
+                return Ok((acc, Cow::Borrowed(rest)));
+            }
+            if let Some(acc) = self.stored.borrow().get(&sp) {
+                return Ok((acc.clone(), Cow::Borrowed(rest)));
+            }
         }
-        Ok((self.fs.clone(), Cow::Borrowed(logical)))
+        Ok((Rc::new(Fs), Cow::Borrowed(logical)))
     }
 
     pub fn read(&self, logical: &str) -> Result<Vec<u8>> {
@@ -483,15 +418,13 @@ impl Io {
         Ok(sp.as_str().to_owned())
     }
 
-    /// Whether the store has `path`, or a mount stands in for it.
+    /// Whether the store or the store directory has `path`.
     pub fn is_valid(&self, path: &StorePath) -> Result<bool> {
-        Ok(self.fs.in_mount(path.as_str())
-            || self.store.accessor(path)?.is_some()
-            || self.stored(path).is_some())
+        Ok(self.store.accessor(path)?.is_some() || self.in_store_dir(path).is_some())
     }
 
     /// Where `path` is in the store directory, if it is there.
-    fn stored(&self, path: &StorePath) -> Option<PathBuf> {
+    fn in_store_dir(&self, path: &StorePath) -> Option<PathBuf> {
         let base = path.as_str().rsplit('/').next()?;
         let physical = self.store_dir.as_ref()?.join(base);
         std::fs::symlink_metadata(&physical)
@@ -499,18 +432,20 @@ impl Io {
             .then_some(physical)
     }
 
-    /// Mount `path` from the store directory, returning whether it is there.
-    pub(crate) fn mount_stored(&self, path: &StorePath) -> bool {
-        let Some(physical) = self.stored(path) else {
+    /// Read `path` from the store directory, its symlinks resolved within
+    /// it, returning whether it is there.
+    pub(crate) fn read_stored(&self, path: &StorePath) -> bool {
+        let Some(root) = self.in_store_dir(path) else {
             return false;
         };
-        self.mount(path.as_str(), &physical, None);
+        let tree = Rc::new(Dir { root, keep: None });
+        self.stored.borrow_mut().insert(path.clone(), tree);
         true
     }
 
     /// Let pure evaluation read the valid store path `path`.
     pub fn allow_valid(&self, path: &StorePath) {
-        if !self.mount_stored(path) {
+        if !self.read_stored(path) {
             self.allowed.borrow_mut().insert(path.clone());
         }
     }
