@@ -15,6 +15,7 @@ use crate::value::anyhow_err;
 use crate::value::error;
 use crate::value::eval_err;
 use crate::value::type_err;
+use crate::value::unimplemented;
 
 pub fn import<'a>(ev: &Eval<'a>, path: Value<'a>) -> R<'a> {
     let path = ev.realise_path(path)?;
@@ -301,12 +302,6 @@ pub fn filter_source<'a>(ev: &Eval<'a>, filter: Value<'a>, path: Value<'a>) -> R
     add_path(ev, &path, None, Some(filter), None)
 }
 
-fn unsupported<'a>(name: &str) -> R<'a> {
-    eval_err(format!(
-        "'builtins.{name}' is not supported by this evaluator"
-    ))
-}
-
 pub fn fetch_git<'a>(ev: &Eval<'a>, arg: Value<'a>) -> R<'a> {
     match ev.force(arg)? {
         Value::Attrs(set) => {
@@ -337,7 +332,7 @@ pub fn fetch_git<'a>(ev: &Eval<'a>, arg: Value<'a>) -> R<'a> {
             ev.coerce_to_string(v, Coerce::PLAIN)?;
         }
     }
-    unsupported("fetchGit")
+    unimplemented("builtins.fetchGit")
 }
 
 /// Rejects a `fetchGit` URL that is neither an absolute path, a valid
@@ -419,18 +414,26 @@ pub fn fetch_mercurial<'a>(ev: &Eval<'a>, arg: Value<'a>) -> R<'a> {
             ev.coerce_to_string(v, Coerce::PLAIN)?;
         }
     }
-    unsupported("fetchMercurial")
+    unimplemented("builtins.fetchMercurial")
 }
 
 pub fn fetch_tarball<'a>(ev: &Eval<'a>, arg: Value<'a>) -> R<'a> {
-    fetch(ev, arg, "fetchTarball")
+    check_fetch(ev, arg, "fetchTarball")?;
+    unimplemented("builtins.fetchTarball")
 }
 
 pub fn fetchurl<'a>(ev: &Eval<'a>, arg: Value<'a>) -> R<'a> {
-    fetch(ev, arg, "fetchurl")
+    check_fetch(ev, arg, "fetchurl")?;
+    unimplemented("builtins.fetchurl")
 }
 
-fn fetch<'a>(ev: &Eval<'a>, arg: Value<'a>, who: &str) -> R<'a> {
+pub fn fetch_tree<'a>(ev: &Eval<'a>, arg: Value<'a>) -> R<'a> {
+    ev.force(arg)?;
+    unimplemented("builtins.fetchTree")
+}
+
+/// Fails on the arguments to `who` that Nix rejects before fetching.
+fn check_fetch<'a>(ev: &Eval<'a>, arg: Value<'a>, who: &str) -> R<'a, ()> {
     match ev.force(arg)? {
         Value::Attrs(set) => {
             for e in set.entries {
@@ -456,5 +459,5 @@ fn fetch<'a>(ev: &Eval<'a>, arg: Value<'a>, who: &str) -> R<'a> {
             ev.force_str_no_ctx(v)?;
         }
     }
-    unsupported(who)
+    Ok(())
 }

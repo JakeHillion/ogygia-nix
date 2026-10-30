@@ -83,6 +83,10 @@ pub enum Error {
     /// The expression used a feature in [`Settings::disabled`].
     #[error("disabled feature: {0}")]
     Disabled(Feature),
+    /// The expression used a feature this evaluator deliberately leaves
+    /// out, which the string names.
+    #[error("not implemented: {0}")]
+    Unimplemented(&'static str),
 }
 
 /// Evaluate the expression in `text`, deeply forcing it, and render it the
@@ -110,6 +114,7 @@ fn printed(result: Result<Vec<u8>, Box<EvalError>>) -> Result<String, Error> {
         Ok(bytes) => Ok(String::from_utf8_lossy(&bytes).into_owned()),
         Err(e) => Err(match e.kind {
             value::ErrorKind::Disabled(feature) => Error::Disabled(feature),
+            value::ErrorKind::Unimplemented(feature) => Error::Unimplemented(feature),
             _ => Error::Eval(e.to_string()),
         }),
     }
@@ -126,11 +131,10 @@ pub fn eval_flake_json(
     settings: Settings,
 ) -> Result<String, Error> {
     run_with_stack(|| {
-        let ctx = Context::new(Io::pure().with_store_dir(env.store.clone()));
+        let ctx = Context::flakes(Io::pure().with_store_dir(env.store.clone()));
         let bump = bumpalo::Bump::new();
         let flakes = std::cell::OnceCell::new();
-        let mut ev = Eval::new(&ctx, &bump, settings);
-        ev.flakes = true;
+        let ev = Eval::new(&ctx, &bump, settings);
         printed(flake::eval_json(&ev, installable, apply, env, &flakes))
     })
 }

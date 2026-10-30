@@ -86,9 +86,6 @@ pub struct Eval<'a> {
     pub ctx: &'a Context,
     pub bump: &'a Bump,
     pub settings: Settings,
-    /// Whether the `flakes` experimental feature is enabled, as it is for
-    /// `nix eval`.
-    pub(crate) flakes: bool,
     /// The value of every builtin.
     globals: EnumMap<Builtin, Value<'a>>,
     import_cache: RefCell<HashMap<String, Value<'a>>>,
@@ -146,7 +143,6 @@ impl<'a> Eval<'a> {
             ctx,
             bump,
             settings,
-            flakes: false,
             globals: EnumMap::from_fn(|_| Value::Null),
             import_cache: RefCell::new(HashMap::new()),
             depth: Cell::new(0),

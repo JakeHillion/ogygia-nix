@@ -164,6 +164,8 @@ pub enum ErrorKind {
     Eval,
     /// Use of a feature in [`crate::Settings::disabled`].
     Disabled(crate::Feature),
+    /// Use of a feature this evaluator deliberately leaves out, by name.
+    Unimplemented(&'static str),
 }
 
 #[derive(Debug)]
@@ -197,6 +199,15 @@ pub fn error(kind: ErrorKind, msg: impl Into<String>) -> Box<EvalError> {
 
 pub fn eval_err<T>(msg: impl Into<String>) -> Result<T, Box<EvalError>> {
     Err(error(ErrorKind::Eval, msg))
+}
+
+/// An [`ErrorKind::Unimplemented`] error for `feature`, which
+/// `builtins.tryEval` does not catch.
+pub fn unimplemented<T>(feature: &'static str) -> Result<T, Box<EvalError>> {
+    Err(error(
+        ErrorKind::Unimplemented(feature),
+        format!("{feature} is not implemented by this evaluator"),
+    ))
 }
 
 /// An [`ErrorKind::Type`] error.

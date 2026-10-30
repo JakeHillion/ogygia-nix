@@ -44,7 +44,9 @@ evaluators are pointed at a proxy that refuses connections, so fetches fail
 without touching the network. Inputs that are not UTF-8 are ignored, as
 ogygia-nix-eval only accepts text, and so are inputs containing a NUL byte:
 Nix stops reading at the first one outside a string, so it evaluates only
-a prefix of the input.
+a prefix of the input. Nor is an input compared once ogygia-nix-eval
+reaches a feature it deliberately leaves out, such as fetching, where it
+fails with an error naming the feature.
 
 ### Flakes
 
