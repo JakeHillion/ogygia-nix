@@ -199,7 +199,13 @@ impl Resolve for Dir {
 impl Dir {
     /// The physical path of the entry at `path`, resolved as by [`resolve`].
     fn physical(&self, path: &str, follow: bool) -> std::io::Result<PathBuf> {
-        Ok(self.root.join(resolve(self, path, follow)?.node))
+        let rel = resolve(self, path, follow)?.node;
+        // Joining an empty path would add a `/`, which a file at the root
+        // does not resolve with.
+        if rel.as_os_str().is_empty() {
+            return Ok(self.root.clone());
+        }
+        Ok(self.root.join(rel))
     }
 
     /// The type of the entry at `path`, resolved as by [`resolve`].
@@ -551,7 +557,7 @@ fn from_store(io: &Io, locked: &Attrs) -> Result<Option<Source>> {
     let (_, hash) = store::parse_hash(nar_hash, Some(HashAlgo::Sha256))?;
     let path = store::source_path(&hash, "source");
     let sp = StorePath::parse(&path).expect("a source path is a store path");
-    if !io.mount_stored(&sp) {
+    if !io.read_stored(&sp) {
         return Ok(None);
     }
     Ok(Some(Source {
