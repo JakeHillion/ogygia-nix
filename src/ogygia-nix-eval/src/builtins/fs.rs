@@ -198,18 +198,28 @@ pub fn store_path<'a>(ev: &Eval<'a>, path: Value<'a>) -> R<'a> {
     Ok(ev.str_val(path.as_bytes(), &[Ctx::Opaque(base)]))
 }
 
-/// Shared by `builtins.path` and `filterSource`.
+/// Shared by `builtins.path` and `filterSource`. With `sha256`, the NAR
+/// hash the copy must have, a store path already valid for that hash is
+/// returned without reading `path`.
 fn add_path<'a>(
     ev: &Eval<'a>,
     path: &str,
     name: Option<String>,
     filter: Option<Value<'a>>,
+    sha256: Option<Vec<u8>>,
 ) -> R<'a> {
     let name = match name {
         Some(n) if !n.is_empty() => n,
         _ => crate::path::store_name(path),
     };
     let io = &ev.ctx.io;
+    let expected = sha256.map(|h| crate::store::source_path(&h, &name));
+    if let Some(sp) = expected.as_deref().and_then(crate::store::StorePath::parse)
+        && io.is_valid(&sp).map_err(anyhow_err)?
+    {
+        let sp: &'a str = ev.bump.alloc_str(sp.as_str());
+        return Ok(ev.str_val(sp.as_bytes(), &[Ctx::Opaque(sp)]));
+    }
     let sp = match filter {
         None => io
             .add_filtered_to_store(path, &name, None)
@@ -235,6 +245,11 @@ fn add_path<'a>(
             }
         }
     };
+    if expected.is_some_and(|e| e != sp) {
+        return eval_err(format!(
+            "store path mismatch in (possibly filtered) path added from '{path}'"
+        ));
+    }
     let sp: &'a str = ev.bump.alloc_str(&sp);
     Ok(ev.str_val(sp.as_bytes(), &[Ctx::Opaque(sp)]))
 }
@@ -242,6 +257,7 @@ fn add_path<'a>(
 pub fn path<'a>(ev: &Eval<'a>, set: Value<'a>) -> R<'a> {
     let set = ev.force_attrs(set)?;
     let (mut path, mut name, mut filter, mut recursive) = (None, None, None, true);
+    let mut sha256 = None;
     for e in set.entries {
         match ev.ctx.name(e.name) {
             "path" => path = Some(ev.realise_path(e.value)?),
@@ -251,7 +267,14 @@ pub fn path<'a>(ev: &Eval<'a>, set: Value<'a>) -> R<'a> {
             "filter" => filter = Some(ev.force_function(e.value)?),
             "recursive" => recursive = ev.force_bool(e.value)?,
             "sha256" => {
-                ev.force_str_no_ctx(e.value)?;
+                let hash = String::from_utf8_lossy(ev.force_str_no_ctx(e.value)?);
+                sha256 = Some(if hash.is_empty() {
+                    vec![0; 32]
+                } else {
+                    crate::store::parse_hash(&hash, Some(crate::store::HashAlgo::Sha256))
+                        .map_err(anyhow_err)?
+                        .1
+                });
             }
             n => return eval_err(format!("unsupported argument '{n}' to 'builtins.path'")),
         }
@@ -264,13 +287,13 @@ pub fn path<'a>(ev: &Eval<'a>, set: Value<'a>) -> R<'a> {
     if !recursive {
         return eval_err("non-recursive builtins.path is not supported");
     }
-    add_path(ev, &path, name, filter)
+    add_path(ev, &path, name, filter, sha256)
 }
 
 pub fn filter_source<'a>(ev: &Eval<'a>, filter: Value<'a>, path: Value<'a>) -> R<'a> {
     let path = ev.realise_path(path)?;
     let filter = ev.force_function(filter)?;
-    add_path(ev, &path, None, Some(filter))
+    add_path(ev, &path, None, Some(filter), None)
 }
 
 fn unsupported<'a>(name: &str) -> R<'a> {
