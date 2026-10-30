@@ -126,7 +126,7 @@ pub fn eval_flake_json(
     settings: Settings,
 ) -> Result<String, Error> {
     run_with_stack(|| {
-        let ctx = Context::new(Io::pure());
+        let ctx = Context::new(Io::pure().with_store_dir(env.store.clone()));
         let bump = bumpalo::Bump::new();
         let flakes = std::cell::OnceCell::new();
         let mut ev = Eval::new(&ctx, &bump, settings);

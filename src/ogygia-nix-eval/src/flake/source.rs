@@ -29,6 +29,7 @@ use crate::io::Io;
 use crate::store;
 use crate::store::HashAlgo;
 use crate::store::HashFormat;
+use crate::store::StorePath;
 
 /// What a flake knows about its source, besides where it is.
 #[derive(Clone, Debug, Default)]
@@ -533,20 +534,17 @@ fn fetch_git_rev(io: &Io, dir: &Path, rev: &str, locked: &Attrs, what: &str) -> 
     })
 }
 
-/// The source `locked` names, read from `env`'s store, if it is there.
-fn from_store(io: &Io, env: &FlakeEnv, locked: &Attrs) -> Result<Option<Source>> {
-    let (Some(store_dir), Some(nar_hash)) = (&env.store, flakeref::get_str(locked, "narHash"))
-    else {
+/// The source `locked` names, read from the store directory, if it is there.
+fn from_store(io: &Io, locked: &Attrs) -> Result<Option<Source>> {
+    let Some(nar_hash) = flakeref::get_str(locked, "narHash") else {
         return Ok(None);
     };
     let (_, hash) = store::parse_hash(nar_hash, Some(HashAlgo::Sha256))?;
     let path = store::source_path(&hash, "source");
-    let base = path.rsplit('/').next().expect("a store path has a name");
-    let physical = store_dir.join(base);
-    if std::fs::symlink_metadata(&physical).is_err() {
+    let sp = StorePath::parse(&path).expect("a source path is a store path");
+    if !io.mount_stored(&sp) {
         return Ok(None);
     }
-    io.mount(&path, &physical, None);
     Ok(Some(Source {
         path,
         info: Info {
@@ -654,7 +652,7 @@ pub fn fetch(io: &Io, env: &FlakeEnv, attrs: &Attrs, what: &str) -> Result<Sourc
         ),
         _ => {}
     }
-    if let Some(source) = from_store(io, env, attrs)? {
+    if let Some(source) = from_store(io, attrs)? {
         return Ok(source);
     }
     match ty {

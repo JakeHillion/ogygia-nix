@@ -1,0 +1,25 @@
+#~flake path:@dir(root)#x
+#~tree st store
+#~file a
+x
+#~tree root path
+#~file flake.nix
+{
+  outputs = { self }: {
+    x =
+      let
+        d = derivation {
+          name = "source";
+          system = "x";
+          builder = "/b";
+          outputHashMode = "recursive";
+          outputHash = "@narHash(st)";
+        };
+      in
+      {
+        read = builtins.readFile "${d}/a";
+        dir = builtins.readDir d.outPath;
+        exists = builtins.pathExists "${d}/b";
+      };
+  };
+}
