@@ -203,14 +203,17 @@ pub fn store_path<'a>(ev: &Eval<'a>, path: Value<'a>) -> R<'a> {
     Ok(ev.str_val(path.as_bytes(), &[Ctx::Opaque(base)]))
 }
 
-/// Shared by `builtins.path` and `filterSource`. With `sha256`, the NAR
-/// hash the copy must have, a store path already valid for that hash is
-/// returned without reading `path`.
+/// Shared by `builtins.path` and `filterSource`. Unless `recursive`, `path`
+/// must be a regular file, copied unfiltered. With `sha256`, the hash the copy
+/// must have (of its NAR serialisation if `recursive`, else of its contents),
+/// a store path already valid for that hash is returned without reading
+/// `path`.
 fn add_path<'a>(
     ev: &Eval<'a>,
     path: &str,
     name: Option<String>,
     filter: Option<Value<'a>>,
+    recursive: bool,
     sha256: Option<Vec<u8>>,
 ) -> R<'a> {
     let name = match name {
@@ -218,7 +221,9 @@ fn add_path<'a>(
         _ => crate::path::store_name(path),
     };
     let io = &ev.ctx.io;
-    let expected = sha256.map(|h| crate::store::source_path(&h, &name));
+    let expected = sha256.map(|h| {
+        crate::store::fixed_output_path(recursive, crate::store::HashAlgo::Sha256, &h, &name)
+    });
     if let Some(sp) = expected.as_deref().and_then(crate::store::StorePath::parse)
         && io.is_valid(&sp).map_err(anyhow_err)?
     {
@@ -227,6 +232,7 @@ fn add_path<'a>(
         return Ok(ev.str_val(sp.as_bytes(), &[Ctx::Opaque(sp)]));
     }
     let sp = match filter {
+        _ if !recursive => io.add_flat_to_store(path, &name).map_err(anyhow_err)?,
         None => io
             .add_filtered_to_store(path, &name, None)
             .map_err(anyhow_err)?,
@@ -290,16 +296,13 @@ pub fn path<'a>(ev: &Eval<'a>, set: Value<'a>) -> R<'a> {
             "missing required 'path' attribute in the first argument to builtins.path",
         );
     };
-    if !recursive {
-        return eval_err("non-recursive builtins.path is not supported");
-    }
-    add_path(ev, &path, name, filter, sha256)
+    add_path(ev, &path, name, filter, recursive, sha256)
 }
 
 pub fn filter_source<'a>(ev: &Eval<'a>, filter: Value<'a>, path: Value<'a>) -> R<'a> {
     let path = ev.realise_path(path)?;
     let filter = ev.force_function(filter)?;
-    add_path(ev, &path, None, Some(filter), None)
+    add_path(ev, &path, None, Some(filter), true, None)
 }
 
 pub fn fetch_git<'a>(ev: &Eval<'a>, arg: Value<'a>) -> R<'a> {

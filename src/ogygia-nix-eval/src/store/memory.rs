@@ -60,6 +60,21 @@ impl Store for MemoryStore {
         }))
     }
 
+    fn add_flat(&self, name: &str, contents: &[u8]) -> Result<StorePath> {
+        super::check_name(name)?;
+        let hash = Sha256::digest(contents);
+        let path = StorePath(super::fixed_output_path(
+            false,
+            super::HashAlgo::Sha256,
+            &hash,
+            name,
+        ));
+        Ok(self.insert(path, || Object {
+            contents: Rc::new(File(contents.to_vec())),
+            refs: Vec::new(),
+        }))
+    }
+
     fn add_source(&self, name: &str, tree: Rc<dyn Accessor>) -> Result<(StorePath, [u8; 32])> {
         super::check_name(name)?;
         let mut h = Sha256::new();

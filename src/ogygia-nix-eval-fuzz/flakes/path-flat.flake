@@ -1,0 +1,53 @@
+#~flake path:@dir(root)#x
+#~lock
+#~tree st store
+#~file exe x
+y
+#~file link link
+exe
+#~tree dep git
+#~file exe x
+y
+#~file link link
+exe
+#~tree root path
+#~file exe x
+y
+#~file link link
+exe
+#~file flake.nix
+{
+  inputs.dep = { url = "git+file://@dir(dep)"; flake = false; };
+  inputs.st = { url = "github:o/st"; flake = false; };
+  outputs = { self, dep, st }:
+    let
+      flat = args: builtins.path (args // { recursive = false; });
+      copy = t: rec {
+        exe = flat { path = t + "/exe"; };
+        named = flat { path = t + "/exe"; name = "p"; };
+        link = flat { path = t + "/link"; };
+        hashed = flat {
+          path = t + "/exe";
+          sha256 = "3bb2abb69ebb27fbfe63c7639624c6ec5e331b841a5bc8c3ebc10b9285e90877";
+        };
+        filtered = flat { path = t + "/exe"; filter = _: _: false; };
+        nar = builtins.path { path = exe; name = "p"; };
+        content = builtins.readFile link;
+      };
+    in {
+      x = { self = copy self; dep = copy dep; st = copy st; };
+    };
+}
+#~file flake.lock
+{
+  "nodes": {
+    "st": {
+      "flake": false,
+      "locked": { "lastModified": 1700000000, "narHash": "@narHash(st)", "owner": "o", "repo": "st", "rev": "0123456789abcdef0123456789abcdef01234567", "type": "github" },
+      "original": { "owner": "o", "repo": "st", "type": "github" }
+    },
+    "root": { "inputs": { "st": "st" } }
+  },
+  "root": "root",
+  "version": 7
+}

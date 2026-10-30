@@ -443,6 +443,21 @@ impl Io {
         self.allow(sp)
     }
 
+    /// Copy the regular file `logical` resolves to to the store under `name`
+    /// by the hash of its contents alone (`builtins.path` with `recursive =
+    /// false`), and return its store path.
+    pub fn add_flat_to_store(&self, logical: &str, name: &str) -> Result<String> {
+        store::check_name(name)?;
+        self.check_access(logical)?;
+        match self.type_of(logical, true)? {
+            None => bail!("path '{logical}' does not exist"),
+            Some(FileType::Regular) => {}
+            Some(_) => bail!("file '{logical}' is not a regular file"),
+        }
+        let sp = self.store.add_flat(name, &self.read(logical)?)?;
+        self.allow(sp)
+    }
+
     /// Add `tree` to the store under `name`, returning its store path and the
     /// SHA-256 of its NAR serialisation. Pure evaluation may read it.
     pub(crate) fn add_tree(
