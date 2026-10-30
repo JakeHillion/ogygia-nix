@@ -10,6 +10,7 @@ use std::cell::RefCell;
 use std::collections::BTreeSet;
 use std::collections::HashMap;
 use std::collections::HashSet;
+use std::ffi::OsStr;
 use std::io::ErrorKind;
 use std::os::unix::ffi::OsStringExt;
 use std::os::unix::fs::PermissionsExt;
@@ -84,26 +85,46 @@ impl Accessor for Fs {
     }
 
     fn read_dir(&self, path: &str) -> std::io::Result<Vec<(String, FileType)>> {
-        let mut out = Vec::new();
-        for entry in std::fs::read_dir(self.physical(path)?)? {
-            let entry = entry?;
-            let name = entry.file_name().to_string_lossy().into_owned();
-            out.push((name, FileType::of(entry.file_type()?)));
-        }
-        out.sort();
-        Ok(out)
+        os_read_dir(&self.physical(path)?, |_| true)
     }
 
     fn read_link(&self, path: &str) -> std::io::Result<Vec<u8>> {
-        Ok(std::fs::read_link(self.physical(path)?)?
-            .into_os_string()
-            .into_vec())
+        os_read_link(&self.physical(path)?)
     }
 
     fn is_executable(&self, path: &str) -> std::io::Result<bool> {
-        let meta = std::fs::symlink_metadata(self.physical(path)?)?;
-        Ok(meta.permissions().mode() & 0o100 != 0)
+        os_is_executable(&self.physical(path)?)
     }
+}
+
+/// The entries of the directory `path` whose names `keep` accepts, sorted
+/// by name.
+pub(crate) fn os_read_dir(
+    path: &Path,
+    keep: impl Fn(&OsStr) -> bool,
+) -> std::io::Result<Vec<(String, FileType)>> {
+    let mut out = Vec::new();
+    for entry in std::fs::read_dir(path)? {
+        let entry = entry?;
+        let name = entry.file_name();
+        if keep(&name) {
+            let ty = FileType::of(entry.file_type()?);
+            out.push((name.to_string_lossy().into_owned(), ty));
+        }
+    }
+    out.sort();
+    Ok(out)
+}
+
+/// The target of the symlink `path`.
+pub(crate) fn os_read_link(path: &Path) -> std::io::Result<Vec<u8>> {
+    Ok(std::fs::read_link(path)?.into_os_string().into_vec())
+}
+
+/// Whether `path`, not followed if it is a symlink, is executable.
+pub(crate) fn os_is_executable(path: &Path) -> std::io::Result<bool> {
+    let meta = std::fs::symlink_metadata(path)?;
+    Ok(meta.permissions().mode() & 0o100 != 0)
 }
 
 /// The type of a file from its metadata: `None` if it does not exist, and
@@ -138,17 +159,13 @@ impl Subtree {
 
 impl Accessor for Subtree {
     fn file_type(&self, path: &str) -> std::io::Result<Option<FileType>> {
-        match self.path(path) {
-            Ok(p) => self.base.file_type(&p),
-            Err(_) => Ok(None),
-        }
+        self.path(path)
+            .map_or(Ok(None), |p| self.base.file_type(&p))
     }
 
     fn resolved_type(&self, path: &str) -> std::io::Result<Option<FileType>> {
-        match self.path(path) {
-            Ok(p) => self.base.resolved_type(&p),
-            Err(_) => Ok(None),
-        }
+        self.path(path)
+            .map_or(Ok(None), |p| self.base.resolved_type(&p))
     }
 
     fn read_file(&self, path: &str) -> std::io::Result<Vec<u8>> {
