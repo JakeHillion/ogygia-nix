@@ -5,9 +5,7 @@ use std::collections::HashSet;
 use std::collections::VecDeque;
 use std::ffi::OsStr;
 use std::os::unix::ffi::OsStrExt;
-use std::os::unix::ffi::OsStringExt;
 use std::os::unix::fs::MetadataExt;
-use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::path::PathBuf;
 use std::rc::Rc;
@@ -26,6 +24,7 @@ use crate::archive::MemTree;
 use crate::flake::FlakeEnv;
 use crate::flake::flakeref;
 use crate::flake::flakeref::Attrs;
+use crate::io;
 use crate::io::Io;
 use crate::store;
 use crate::store::HashAlgo;
@@ -51,14 +50,6 @@ pub struct Source {
     pub info: Info,
 }
 
-/// What an entry of a tree is, as [`resolve`] sees it.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Kind {
-    Directory,
-    Symlink,
-    Other,
-}
-
 /// A tree whose paths [`resolve`] can follow symlinks in.
 trait Resolve {
     /// An entry of the tree.
@@ -67,7 +58,7 @@ trait Resolve {
     fn root(&self) -> Self::Node;
 
     /// The entry `name` of the directory `dir`, or `NotFound`.
-    fn child(&self, dir: &Self::Node, name: &[u8]) -> std::io::Result<(Kind, Self::Node)>;
+    fn child(&self, dir: &Self::Node, name: &[u8]) -> std::io::Result<(FileType, Self::Node)>;
 
     /// The target of the symlink `link`.
     fn target(&self, link: &Self::Node) -> std::io::Result<Vec<u8>>;
@@ -112,8 +103,8 @@ fn resolve<T: Resolve>(tree: &T, path: &str, follow: bool) -> std::io::Result<Re
             _ => {}
         }
         let dir = dirs.last().expect("the root is never left");
-        let (kind, node) = tree.child(dir, &name)?;
-        if kind == Kind::Symlink && (follow || !pending.is_empty()) {
+        let (ty, node) = tree.child(dir, &name)?;
+        if ty == FileType::Symlink && (follow || !pending.is_empty()) {
             if links == MAX_SYMLINKS {
                 return Err(SymlinkLoop::error());
             }
@@ -128,7 +119,7 @@ fn resolve<T: Resolve>(tree: &T, path: &str, follow: bool) -> std::io::Result<Re
             continue;
         }
         names.push(name);
-        if kind == Kind::Directory {
+        if ty == FileType::Directory {
             dirs.push(node);
         } else if pending.is_empty() {
             return Ok(Resolved { node, names });
@@ -171,7 +162,7 @@ impl Resolve for Dir {
         PathBuf::new()
     }
 
-    fn child(&self, dir: &PathBuf, name: &[u8]) -> std::io::Result<(Kind, PathBuf)> {
+    fn child(&self, dir: &PathBuf, name: &[u8]) -> std::io::Result<(FileType, PathBuf)> {
         let path = dir.join(OsStr::from_bytes(name));
         if let Some(keep) = &self.keep
             && !path.to_str().is_some_and(|p| keep.contains(p))
@@ -179,20 +170,11 @@ impl Resolve for Dir {
             return Err(std::io::ErrorKind::NotFound.into());
         }
         let ty = std::fs::symlink_metadata(self.root.join(&path))?.file_type();
-        let kind = if ty.is_symlink() {
-            Kind::Symlink
-        } else if ty.is_dir() {
-            Kind::Directory
-        } else {
-            Kind::Other
-        };
-        Ok((kind, path))
+        Ok((FileType::of(ty), path))
     }
 
     fn target(&self, link: &PathBuf) -> std::io::Result<Vec<u8>> {
-        Ok(std::fs::read_link(self.root.join(link))?
-            .into_os_string()
-            .into_vec())
+        io::os_read_link(&self.root.join(link))
     }
 }
 
@@ -233,33 +215,18 @@ impl Accessor for Dir {
 
     fn read_dir(&self, path: &str) -> std::io::Result<Vec<(String, FileType)>> {
         let rel = resolve(self, path, true)?.node;
-        let mut out = Vec::new();
-        for entry in std::fs::read_dir(self.root.join(&rel))? {
-            let entry = entry?;
-            if let Some(keep) = &self.keep
-                && !rel
-                    .join(entry.file_name())
-                    .to_str()
-                    .is_some_and(|p| keep.contains(p))
-            {
-                continue;
-            }
-            let name = entry.file_name().to_string_lossy().into_owned();
-            out.push((name, FileType::of(entry.file_type()?)));
-        }
-        out.sort();
-        Ok(out)
+        io::os_read_dir(&self.root.join(&rel), |name| match &self.keep {
+            Some(keep) => rel.join(name).to_str().is_some_and(|p| keep.contains(p)),
+            None => true,
+        })
     }
 
     fn read_link(&self, path: &str) -> std::io::Result<Vec<u8>> {
-        Ok(std::fs::read_link(self.physical(path, false)?)?
-            .into_os_string()
-            .into_vec())
+        io::os_read_link(&self.physical(path, false)?)
     }
 
     fn is_executable(&self, path: &str) -> std::io::Result<bool> {
-        let meta = std::fs::symlink_metadata(self.physical(path, false)?)?;
-        Ok(meta.permissions().mode() & 0o100 != 0)
+        io::os_is_executable(&self.physical(path, false)?)
     }
 
     fn real_path(&self, path: &str) -> std::io::Result<String> {
@@ -290,18 +257,12 @@ impl Resolve for GitTree {
         (EntryKind::Tree.into(), self.tree)
     }
 
-    fn child(&self, dir: &Self::Node, name: &[u8]) -> std::io::Result<(Kind, Self::Node)> {
+    fn child(&self, dir: &Self::Node, name: &[u8]) -> std::io::Result<(FileType, Self::Node)> {
         let tree = self.repo.find_tree(dir.1).map_err(std::io::Error::other)?;
         let entry = tree.find_entry(name).ok_or(std::io::ErrorKind::NotFound)?;
         let mode = entry.mode();
-        let kind = if mode.is_tree() {
-            Kind::Directory
-        } else if mode.is_link() {
-            Kind::Symlink
-        } else {
-            Kind::Other
-        };
-        Ok((kind, (mode, entry.object_id())))
+        let ty = git_file_type(mode).unwrap_or(FileType::Unknown);
+        Ok((ty, (mode, entry.object_id())))
     }
 
     fn target(&self, link: &Self::Node) -> std::io::Result<Vec<u8>> {
@@ -315,6 +276,11 @@ impl GitTree {
         resolve(self, path, follow).map(|r| r.node)
     }
 
+    /// The type of the entry at `path`, resolved as by [`resolve`].
+    fn entry_type(&self, path: &str, follow: bool) -> std::io::Result<Option<FileType>> {
+        Ok(found(self.entry(path, follow))?.and_then(|(mode, _)| git_file_type(mode)))
+    }
+
     fn read_blob(&self, id: gix::ObjectId) -> std::io::Result<Vec<u8>> {
         self.repo
             .find_blob(id)
@@ -325,11 +291,11 @@ impl GitTree {
 
 impl Accessor for GitTree {
     fn file_type(&self, path: &str) -> std::io::Result<Option<FileType>> {
-        Ok(found(self.entry(path, false))?.and_then(|(mode, _)| git_file_type(mode)))
+        self.entry_type(path, false)
     }
 
     fn resolved_type(&self, path: &str) -> std::io::Result<Option<FileType>> {
-        Ok(found(self.entry(path, true))?.and_then(|(mode, _)| git_file_type(mode)))
+        self.entry_type(path, true)
     }
 
     fn read_file(&self, path: &str) -> std::io::Result<Vec<u8>> {
