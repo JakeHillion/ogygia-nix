@@ -799,6 +799,58 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn path_checks_sha256() {
+        // The NAR hashes of `t` and of an empty directory.
+        let t = "let t = builtins.toFile \"x\" \"y\"; in";
+        let y = "jyiRGLH0P4VduRAhXme5qgKYjS+wp8Vv6s2yRrgV4bQ=";
+        let empty = "sha256-pQpattmS9VmO3ZIQUFn66az8GSmB4IvYhTTCFn6SUmo=";
+        let zero = "0000000000000000000000000000000000000000000000000000";
+        for hash in [
+            &format!("sha256-{y}"),
+            y,
+            "sha256:1d712nw4dcndx9pwb9xh5y6rh0map5kmw88hp5fqagzln4c92a4g",
+            "8f289118b1f43f855db910215e67b9aa02988d2fb0a7c56feacdb246b815e1b4",
+        ] {
+            let expr = format!("{t} builtins.path {{ path = t; sha256 = \"{hash}\"; }}");
+            assert_eq!(outcome(&expr), "values", "{expr}");
+        }
+        for expr in [
+            &format!("{t} builtins.path {{ path = t; sha256 = \"{zero}\"; }}"),
+            &format!("{t} builtins.path {{ path = t; name = \"q\"; sha256 = \"\"; }}"),
+            &format!("{t} builtins.path {{ path = t; sha256 = \"garbage\"; }}"),
+            &format!(
+                "{t} builtins.path {{ path = t; sha256 = \"sha1:{}\"; }}",
+                &zero[..32]
+            ),
+            &format!(
+                "{t} builtins.path {{ path = t; sha256 = \"garbage\"; recursive = throw \"r\"; }}"
+            ),
+            &format!("builtins.path {{ path = <nix/.>; sha256 = \"{empty}\"; }}"),
+            &format!(
+                "builtins.path {{ path = /nonexistent; name = \"q\"; sha256 = \"sha256-{y}\"; }}"
+            ),
+        ] {
+            assert_eq!(outcome(expr), "uncaught", "{expr}");
+        }
+        assert_eq!(
+            outcome(&format!(
+                "builtins.path {{ path = <nix/.>; filter = p: k: false; sha256 = \"{empty}\"; }}"
+            )),
+            "values"
+        );
+        // A path whose expected store path is already valid is not read.
+        for (path, name) in [("/nonexistent", "name = \"q\";"), ("\"/nonexistent\"", "")] {
+            let expr = format!(
+                "{t} let a = builtins.path {{ path = t; name = \"{}\"; }}; in builtins.seq a \
+                 (builtins.readFile (builtins.path {{ path = {path}; {name} \
+                 sha256 = \"sha256-{y}\"; filter = p: k: throw \"f\"; }}))",
+                if name.is_empty() { "nonexistent" } else { "q" }
+            );
+            assert_eq!(outcome(&expr), "values", "{expr}");
+        }
+    }
+
+    #[test]
     fn skips_what_nix_cannot_finish() {
         assert_eq!(outcome("let f = x: f x; in f 1"), "skipped");
     }
