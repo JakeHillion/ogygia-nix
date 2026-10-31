@@ -1,8 +1,8 @@
 //! `flake.nix`: a flake's description, inputs and outputs.
 //!
 //! Nix reads a flake's attributes without evaluating them: an attribute
-//! whose expression is not a literal set, list, function or constant is a
-//! thunk to it, and is rejected wherever a value is expected.
+//! whose expression is not a literal set, list, function or constant, or a
+//! builtin, is a thunk to it, and is rejected wherever a value is expected.
 
 use std::collections::BTreeMap;
 
@@ -46,7 +46,6 @@ struct Field<'a> {
 
 /// Whether Nix evaluates `e` as part of the set it is an attribute of.
 fn eager(e: ExprRef<'_>) -> bool {
-    use crate::builtins::Builtin;
     matches!(
         e,
         Expr::Attrs(_)
@@ -58,7 +57,7 @@ fn eager(e: ExprRef<'_>) -> bool {
             | Expr::Float(_)
             | Expr::Str(_)
             | Expr::Path(_)
-            | Expr::Global(Builtin::True | Builtin::False | Builtin::Null)
+            | Expr::Global(_)
     )
 }
 
@@ -212,6 +211,7 @@ pub fn load<'a>(ev: &Eval<'a>, dir: &str, shown: &str) -> R<'a, Flake<'a>> {
         expr: Some(expr),
     };
     let mut outputs = None;
+    let mut unsupported = None;
     let mut inputs = BTreeMap::new();
     for (name, f) in top.fields(ev, "")? {
         match name {
@@ -224,18 +224,23 @@ pub fn load<'a>(ev: &Eval<'a>, dir: &str, shown: &str) -> R<'a, Flake<'a>> {
                     inputs.insert(input.to_owned(), input_spec(ev, input, i, true)?);
                 }
             }
-            "outputs" => outputs = Some(f.value),
+            "outputs" => outputs = Some(f),
             other => {
-                return eval_err(format!(
-                    "flake '{shown}' has an unsupported attribute '{other}'"
-                ));
+                unsupported.get_or_insert(other);
             }
         }
     }
     let Some(outputs) = outputs else {
         return eval_err(format!("flake '{shown}' lacks attribute 'outputs'"));
     };
-    let outputs = ev.force_function(outputs)?;
+    let outputs = outputs.expect(ev, "a function", "for attribute 'outputs'", |v| {
+        v.is_function().then_some(v)
+    })?;
+    if let Some(other) = unsupported {
+        return eval_err(format!(
+            "flake '{shown}' has an unsupported attribute '{other}'"
+        ));
+    }
     // The arguments of `outputs` that are not declared inputs are inputs
     // too, from the registry.
     if let Value::Lambda(c) = outputs

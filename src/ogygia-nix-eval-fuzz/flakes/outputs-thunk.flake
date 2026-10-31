@@ -1,0 +1,4 @@
+#~flake path:@dir(root)#x
+#~tree root path
+#~file flake.nix
+{ outputs = let f = _: { x = 1; }; in f; }
