@@ -1,0 +1,6 @@
+#~flake ?a#x
+#~tree root git
+#~file flake.nix
+{ outputs = { self }: { x = "${self}"; }; }
+#~file a unstaged
+a
