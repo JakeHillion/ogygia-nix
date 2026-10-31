@@ -1,0 +1,16 @@
+#~flake git+file:/.@dir(root)#x
+#~lock
+#~tree root git
+#~file flake.nix
+{
+  inputs = {
+    dep.url = "git+file:/..@dir(dep)";
+    file = { url = "file+file:@dir(root)/f.txt"; flake = false; };
+  };
+  outputs = { self, dep, file }: { x = [ dep.x (builtins.readFile file) ]; };
+}
+#~file f.txt
+hello
+#~tree dep git
+#~file flake.nix
+{ outputs = { self }: { x = 1; }; }

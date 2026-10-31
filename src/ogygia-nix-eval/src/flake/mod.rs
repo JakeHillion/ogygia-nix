@@ -36,8 +36,8 @@ pub struct FlakeEnv {
     /// valid store paths: a locked input is read from it instead of being
     /// fetched, if it is there.
     pub store: Option<PathBuf>,
-    /// What downloads inputs from anywhere but a `file://` URL. Without one,
-    /// such inputs cannot be fetched.
+    /// What downloads inputs from anywhere but a local `file:` URL. Without
+    /// one, such inputs cannot be fetched.
     pub fetcher: Option<Box<dyn crate::Fetcher>>,
 }
 
