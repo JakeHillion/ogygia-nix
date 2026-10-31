@@ -104,8 +104,8 @@ reaches code in ogygia-nix-eval (or rnix) that no earlier input reached,
 and makes new inputs by mutating and combining corpus entries. Its own
 byte-level mutations, which can turn any input into any other, run
 alongside mutations that replace, delete, copy, swap and splice whole nodes
-and tokens of rnix's syntax tree, within one of the Nix files of a flake
-bundle. Those make meaningful Nix likelier but never make any input
+and tokens of rnix's syntax tree, or insert Nix's keywords and operators
+between them, within one of the Nix files of a flake bundle. Those make meaningful Nix likelier but never make any input
 unreachable.
 
 The Nix package ships seed inputs to start from (the equivalence cases,

@@ -1,8 +1,9 @@
-//! Mutations that edit whole nodes and tokens of rnix's syntax tree, so
-//! changes to an input stay meaningful Nix more often than byte edits do.
-//! They only make some inputs likelier: libFuzzer's byte-level mutations,
-//! which can turn any input into any other, run alongside them. In a flake
-//! bundle they edit the Nix files it holds, one at a time.
+//! Mutations that edit whole nodes and tokens of rnix's syntax tree, or
+//! insert Nix's keywords and operators between them, so changes to an input
+//! stay meaningful Nix more often than byte edits do. They only make some
+//! inputs likelier: libFuzzer's byte-level mutations, which can turn any
+//! input into any other, run alongside them. In a flake bundle they edit the
+//! Nix files it holds, one at a time.
 
 use std::ops::Range;
 
@@ -43,21 +44,33 @@ fn nix_part(text: &str, rng: &mut Rng) -> Option<Range<usize>> {
     (!parts.is_empty()).then(|| parts[rng.below(parts.len())].clone())
 }
 
+/// The keywords and operators of Nix.
+const TOKENS: &[&str] = &[
+    "assert", "else", "if", "in", "inherit", "let", "or", "rec", "then", "with", "->", "||", "&&",
+    "==", "!=", "<", "<=", ">", ">=", "//", "++", "+", "-", "*", "/", "!", "?", ".", "|>", "<|",
+    ":", "@", "...", "=", ";", ",", "{", "}", "[", "]", "(", ")",
+];
+
 fn splice(text: &str, range: TextRange, with: &str) -> String {
     let (start, end) = (usize::from(range.start()), usize::from(range.end()));
     [&text[..start], with, &text[end..]].concat()
 }
 
-/// Replace, delete, copy or swap whole nodes and tokens of `text`.
+/// Replace, delete, copy or swap whole nodes and tokens of `text`, or
+/// insert a keyword or operator after one.
 fn mutate_tree(text: &str, rng: &mut Rng) -> String {
     let ranges = elements(text);
     let a = ranges[rng.below(ranges.len())];
     let b = ranges[rng.below(ranges.len())];
     let piece = &text[b];
-    match rng.below(4) {
+    match rng.below(5) {
         0 => splice(text, a, piece),
         1 => splice(text, a, ""),
         2 => splice(text, TextRange::empty(a.end()), &format!(" {piece}")),
+        3 => {
+            let token = TOKENS[rng.below(TOKENS.len())];
+            splice(text, TextRange::empty(a.end()), &format!(" {token} "))
+        }
         _ => {
             let (first, second) = if a.start() <= b.start() {
                 (a, b)
@@ -173,6 +186,16 @@ mod tests {
                     .unwrap_or_else(|e| panic!("{input:?} with seed {seed}: {e}"));
             }
         }
+    }
+
+    #[test]
+    fn tree_mutations_insert_every_token() {
+        let mut missing = TOKENS.to_vec();
+        for seed in 0..20000 {
+            let out = mutate_tree("1", &mut Rng::new(seed));
+            missing.retain(|token| out != format!("1 {token} "));
+        }
+        assert!(missing.is_empty(), "never inserted: {missing:?}");
     }
 
     #[test]
