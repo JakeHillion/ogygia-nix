@@ -3,7 +3,7 @@
 mod attrs;
 mod context;
 mod derivation;
-mod flake;
+pub(crate) mod flake;
 mod fs;
 mod grisu2;
 pub(crate) mod json;
