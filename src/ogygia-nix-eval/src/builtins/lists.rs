@@ -43,7 +43,7 @@ pub fn elem_at<'a>(ev: &Eval<'a>, list: Value<'a>, n: Value<'a>) -> R<'a> {
 
 pub fn elem<'a>(ev: &Eval<'a>, x: Value<'a>, list: Value<'a>) -> R<'a> {
     for item in ev.force_list(list)? {
-        if ev.eq(x, *item)? {
+        if ev.eq_elem(x, *item)? {
             return Ok(Value::Bool(true));
         }
     }
