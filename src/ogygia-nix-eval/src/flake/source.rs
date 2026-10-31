@@ -398,7 +398,11 @@ fn fetch_path(io: &Io, dir: &Path, locked: &Attrs, what: &str) -> Result<Source>
 }
 
 fn open_repo(dir: &Path) -> Result<gix::Repository> {
-    gix::open(dir).with_context(|| format!("opening Git repository '{}'", dir.display()))
+    // gix resolves `..` lexically, failing above the root, where Nix leaves
+    // it to the file system: after following a symbolic link, say.
+    let real = std::fs::canonicalize(dir);
+    gix::open(real.as_deref().unwrap_or(dir))
+        .with_context(|| format!("opening Git repository '{}'", dir.display()))
 }
 
 fn commit_count(repo: &gix::Repository, commit: gix::ObjectId) -> Result<u64> {
@@ -538,10 +542,18 @@ fn from_store(io: &Io, locked: &Attrs) -> Result<Option<Source>> {
     }))
 }
 
-/// The contents of the file at `url`: read directly for a `file://` URL,
-/// and downloaded by `env`'s fetcher otherwise.
+/// The absolute path a `file:` URL with no host names, such as `/r` for
+/// `file:/r` or `file:///r`.
+fn file_url_path(url: &str) -> Option<&str> {
+    let rest = url.strip_prefix("file:")?;
+    let path = rest.strip_prefix("//").unwrap_or(rest);
+    path.starts_with('/').then_some(path)
+}
+
+/// The contents of the file at `url`: read directly for a local `file:`
+/// URL, and downloaded by `env`'s fetcher otherwise.
 fn download(env: &FlakeEnv, url: &str) -> Result<Vec<u8>> {
-    if let Some(path) = url.strip_prefix("file://") {
+    if let Some(path) = file_url_path(url) {
         return std::fs::read(path).with_context(|| format!("reading '{path}'"));
     }
     match &env.fetcher {
@@ -616,7 +628,7 @@ fn forge_archive_url(ty: &str, attrs: &Attrs, rev: &str) -> String {
 pub fn fetch(io: &Io, env: &FlakeEnv, attrs: &Attrs, what: &str) -> Result<Source> {
     let ty = flakeref::get_str(attrs, "type").unwrap_or("");
     let url = flakeref::get_str(attrs, "url").unwrap_or("");
-    match (ty, url.strip_prefix("file://")) {
+    match (ty, file_url_path(url)) {
         ("path", _) => {
             let path = flakeref::get_str(attrs, "path").unwrap_or("");
             return fetch_path(io, Path::new(path), attrs, what);
