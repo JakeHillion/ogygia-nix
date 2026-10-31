@@ -164,9 +164,7 @@ impl Resolve for Dir {
 
     fn child(&self, dir: &PathBuf, name: &[u8]) -> std::io::Result<(FileType, PathBuf)> {
         let path = dir.join(OsStr::from_bytes(name));
-        if let Some(keep) = &self.keep
-            && !path.to_str().is_some_and(|p| keep.contains(p))
-        {
+        if !self.kept(&path) {
             return Err(std::io::ErrorKind::NotFound.into());
         }
         let ty = std::fs::symlink_metadata(self.root.join(&path))?.file_type();
@@ -179,6 +177,13 @@ impl Resolve for Dir {
 }
 
 impl Dir {
+    /// Whether the entry at `path`, relative to the root, is kept.
+    fn kept(&self, path: &Path) -> bool {
+        self.keep
+            .as_ref()
+            .is_none_or(|keep| path.to_str().is_some_and(|p| keep.contains(p)))
+    }
+
     /// The physical path of the entry at `path`, resolved as by [`resolve`].
     fn physical(&self, path: &str, follow: bool) -> std::io::Result<PathBuf> {
         let rel = resolve(self, path, follow)?.node;
@@ -215,10 +220,7 @@ impl Accessor for Dir {
 
     fn read_dir(&self, path: &str) -> std::io::Result<Vec<(String, FileType)>> {
         let rel = resolve(self, path, true)?.node;
-        io::os_read_dir(&self.root.join(&rel), |name| match &self.keep {
-            Some(keep) => rel.join(name).to_str().is_some_and(|p| keep.contains(p)),
-            None => true,
-        })
+        io::os_read_dir(&self.root.join(&rel), |name| self.kept(&rel.join(name)))
     }
 
     fn read_link(&self, path: &str) -> std::io::Result<Vec<u8>> {

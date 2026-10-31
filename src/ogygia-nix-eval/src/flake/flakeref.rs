@@ -127,19 +127,17 @@ fn scheme(url: &str) -> Option<(&str, &str)> {
 pub fn parse(url: &str, cwd: Option<&Path>) -> Result<Attrs> {
     let mut attrs = Attrs::new();
     let (url_part, query) = url.split_once('?').unwrap_or((url, ""));
-    if crate::builtins::flake::is_path(url.as_bytes()) {
-        let mut path = String::new();
-        for c in url_part.chars() {
-            if !(c == '/' && path.ends_with('/')) {
-                path.push(c);
-            }
-        }
-        str_attr(&mut attrs, "type", "path");
-        str_attr(&mut attrs, "path", resolve(&path, cwd));
-        add_query(&mut attrs, query)?;
-        return Ok(attrs);
-    }
     match scheme(url_part) {
+        _ if crate::builtins::flake::is_path(url.as_bytes()) => {
+            let mut path = String::new();
+            for c in url_part.chars() {
+                if !(c == '/' && path.ends_with('/')) {
+                    path.push(c);
+                }
+            }
+            str_attr(&mut attrs, "type", "path");
+            str_attr(&mut attrs, "path", resolve(&path, cwd));
+        }
         Some(("path", path)) => {
             str_attr(&mut attrs, "type", "path");
             str_attr(&mut attrs, "path", resolve(path, cwd));
