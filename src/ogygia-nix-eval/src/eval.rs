@@ -623,9 +623,10 @@ impl<'a> Eval<'a> {
         })
     }
 
-    /// Equality of values stored in a list or set: both are forced, then a
-    /// stored value equals itself, even if it is a function.
-    fn eq_elem(&self, a: Value<'a>, b: Value<'a>) -> R<'a, bool> {
+    /// Equality of values stored in a list or set, or passed as arguments:
+    /// both are forced, then a stored value equals itself, even if it is a
+    /// function.
+    pub(crate) fn eq_elem(&self, a: Value<'a>, b: Value<'a>) -> R<'a, bool> {
         self.deeper(|| {
             let forced_a = self.force(a)?;
             let forced_b = self.force(b)?;
