@@ -88,6 +88,9 @@ fn url_ref(r: &[u8], flakes: bool) -> Result<Attrs, String> {
         });
     };
     let mut params = params(query)?;
+    if file_with_host(&uri) {
+        return Err(not_absolute());
+    }
 
     let (ty, scheme) = match uri.scheme {
         b"path" | b"github" | b"gitlab" | b"sourcehut" | b"flake" if !flakes => {
@@ -121,9 +124,6 @@ fn url_ref(r: &[u8], flakes: bool) -> Result<Attrs, String> {
             _ => return Err(format!("input '{shown}' is unsupported")),
         },
     };
-    if scheme == b"file" && uri.authority.as_ref().is_some_and(|a| !a.host.is_empty()) {
-        return Err(not_absolute());
-    }
 
     let mut attrs = vec![("type", Attr::Str(ty.into()))];
     dir_attr(&mut attrs, &mut params);
@@ -200,6 +200,23 @@ fn url_ref(r: &[u8], flakes: bool) -> Result<Attrs, String> {
     }
     attrs.push(("url", Attr::Str(out)));
     Ok(attrs)
+}
+
+/// Whether Nix reads the flake reference `r` as a path, which in a flake
+/// input or installable may be relative: when it is neither a registry name
+/// nor a URL, or is a URL with a host whose scheme is `file`, perhaps after
+/// a `+`.
+pub(crate) fn is_path(r: &[u8]) -> bool {
+    let base = split_once(r, b'?').map_or(r, |(b, _)| b);
+    match url::parse(base) {
+        Ok(uri) => file_with_host(&uri),
+        Err(_) => !bare_id(r),
+    }
+}
+
+fn file_with_host(uri: &url::Uri<'_>) -> bool {
+    let scheme = split_once(uri.scheme, b'+').map_or(uri.scheme, |(_, s)| s);
+    scheme == b"file" && uri.authority.as_ref().is_some_and(|a| !a.host.is_empty())
 }
 
 /// The parameters of the URL query `query`, decoded. The first of

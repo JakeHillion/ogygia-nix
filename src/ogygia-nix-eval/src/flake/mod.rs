@@ -251,11 +251,10 @@ fn git_root(dir: &Path) -> Option<&Path> {
 /// The flake reference of an installable, made absolute against `cwd`.
 fn installable_ref(flake: &str, cwd: &Path) -> anyhow::Result<Attrs> {
     let path_like = flake.is_empty() || flake.starts_with('/') || flake.starts_with('.');
+    let mut attrs = flakeref::parse(flake, Some(cwd))?;
     if !path_like || flake.contains(':') {
-        return flakeref::parse(flake, Some(cwd));
+        return Ok(attrs);
     }
-    let (path, query) = flake.split_once('?').unwrap_or((flake, ""));
-    let mut attrs = flakeref::parse(&format!("path:{path}?{query}"), Some(cwd))?;
     let dir = PathBuf::from(flakeref::get_str(&attrs, "path").unwrap_or(""));
     if let Some(root) = git_root(&dir) {
         let sub = dir.strip_prefix(root).unwrap_or(Path::new(""));

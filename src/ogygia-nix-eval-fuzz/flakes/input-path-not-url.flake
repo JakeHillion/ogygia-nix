@@ -1,0 +1,14 @@
+#~flake path:@dir(root)#x
+#~lock
+#~tree root path
+#~file flake.nix
+{
+  inputs = {
+    sub = { url = "sub(1)"; flake = false; };
+    file = { url = "git+file://x(y)"; flake = false; };
+    host = { url = "git+file://host/x"; flake = false; };
+  };
+  outputs = { self, sub, ... }: { x = builtins.readFile "${sub}/v"; };
+}
+#~file sub(1)/v
+sub

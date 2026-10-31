@@ -127,6 +127,18 @@ fn scheme(url: &str) -> Option<(&str, &str)> {
 pub fn parse(url: &str, cwd: Option<&Path>) -> Result<Attrs> {
     let mut attrs = Attrs::new();
     let (url_part, query) = url.split_once('?').unwrap_or((url, ""));
+    if crate::builtins::flake::is_path(url.as_bytes()) {
+        let mut path = String::new();
+        for c in url_part.chars() {
+            if !(c == '/' && path.ends_with('/')) {
+                path.push(c);
+            }
+        }
+        str_attr(&mut attrs, "type", "path");
+        str_attr(&mut attrs, "path", resolve(&path, cwd));
+        add_query(&mut attrs, query)?;
+        return Ok(attrs);
+    }
     match scheme(url_part) {
         Some(("path", path)) => {
             str_attr(&mut attrs, "type", "path");
@@ -166,10 +178,6 @@ pub fn parse(url: &str, cwd: Option<&Path>) -> Result<Attrs> {
             str_attr(&mut attrs, "url", format!("{s}:{rest}"));
         }
         Some((s, _)) => bail!("input type '{s}' is unsupported"),
-        None if url_part.starts_with('/') || url_part.starts_with('.') => {
-            str_attr(&mut attrs, "type", "path");
-            str_attr(&mut attrs, "path", resolve(url_part, cwd));
-        }
         None => indirect(&mut attrs, url_part, url)?,
     }
     add_query(&mut attrs, query)?;
@@ -292,6 +300,14 @@ mod tests {
         assert_eq!(
             parse("nixpkgs", None).unwrap(),
             s(&[("type", "indirect"), ("id", "nixpkgs")])
+        );
+        assert_eq!(
+            parse("git+file://h//x(y)?dir=d", None).unwrap(),
+            s(&[("type", "path"), ("path", "git+file:/h/x(y)"), ("dir", "d")])
+        );
+        assert_eq!(
+            parse("a b", None).unwrap(),
+            s(&[("type", "path"), ("path", "a b")])
         );
     }
 
